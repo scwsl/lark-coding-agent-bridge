@@ -1,7 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
-type ReactionType = 'Typing' | 'DONE';
+type ReactionType = 'Typing' | 'DONE' | 'Get';
 
 async function addReaction(
   channel: LarkChannel,
@@ -53,6 +53,18 @@ export function addDoneReaction(
   messageId: string,
 ): Promise<string | undefined> {
   return addReaction(channel, messageId, 'DONE');
+}
+
+/**
+ * Add a "Get" (收到) reaction to a message that was folded into the running
+ * task as a supplement, so the sender can tell it was not queued as a new
+ * question — and not mistake it for the DONE of a finished run.
+ */
+export function addSupplementReaction(
+  channel: LarkChannel,
+  messageId: string,
+): Promise<string | undefined> {
+  return addReaction(channel, messageId, 'Get');
 }
 
 /** Remove a previously-added reaction. Tolerates errors silently — best

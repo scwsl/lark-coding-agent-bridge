@@ -1,8 +1,23 @@
 import type { AgentRun } from '../agent/types';
 
+/**
+ * What an IM run exposes so a follow-up message can be recognized as a
+ * supplement to it (and who may send one). Set by the IM flow only; comment,
+ * scheduler and card-callback runs have none and never take supplements.
+ */
+export interface SupplementTarget {
+  /** Messages that triggered the run — quoting one of them targets this run. */
+  originIds: Set<string>;
+  /** The run's own reply (card / markdown) once it exists. */
+  replyIds: Set<string>;
+  /** Senders of the triggering batch; only they (and the owner) may add to it. */
+  initiators: Set<string>;
+}
+
 export interface RunHandle {
   run: AgentRun;
   interrupted: boolean;
+  supplement?: SupplementTarget;
   /** When the run was registered — the in-memory fallback for elapsed-time
    * display when no durable RunRecord exists (e.g. comment runs). */
   startedAt: number;

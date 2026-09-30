@@ -46,7 +46,7 @@ import {
   toPolicyAttachment,
   toPromptAttachment,
 } from '../media/attachment';
-import { canUseDm, canUseGroup, requireMentionForChat } from '../policy/access';
+import { canUseDm, canUseGroup, isCreator, requireMentionForChat } from '../policy/access';
 import { MeetingManager } from '../meeting/manager';
 import type { VcRequestClient } from '../meeting/api';
 import { attachMeetingAgent, summarizeEndedMeeting } from '../meeting/orchestrator';
@@ -74,7 +74,18 @@ import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
 import { lookupMessageThreadId } from './thread-id';
-import { addDoneReaction, addWorkingReaction, removeReaction } from './reaction';
+import {
+  addDoneReaction,
+  addSupplementReaction,
+  addWorkingReaction,
+  removeReaction,
+} from './reaction';
+import {
+  maySupplement,
+  SUPPLEMENT_INSTRUCTION,
+  supplementPreview,
+  supplementSignal,
+} from './supplement';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
@@ -407,6 +418,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           workspaces,
           activeRuns,
           pending,
+          media,
           msg,
           controls,
           chatModeCache,
@@ -729,6 +741,7 @@ interface IntakeDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
+  media: MediaCache;
   msg: NormalizedMessage;
   controls: Controls;
   chatModeCache: ChatModeCache;
@@ -752,6 +765,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
+    media,
     msg,
     controls,
     chatModeCache,
@@ -893,8 +907,75 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  if (
+    await tryInjectSupplement({
+      channel,
+      activeRuns,
+      media,
+      controls,
+      msg: emsg,
+      scope,
+      mode: chatMode,
+    })
+  ) {
+    return;
+  }
+
   const size = pending.push(scope, emsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+/**
+ * Fold a follow-up into the run already going on this scope instead of
+ * queueing it as a new question — only on an explicit signal (quote-reply to
+ * the run, or a 补充/追加/+ prefix) and only from the run's initiator or the
+ * owner. Everything else, including a run that can no longer take input,
+ * keeps the queue-for-next-run behavior.
+ */
+async function tryInjectSupplement(deps: {
+  channel: LarkChannel;
+  activeRuns: ActiveRuns;
+  media: MediaCache;
+  controls: Controls;
+  msg: NormalizedMessage;
+  scope: string;
+  mode: ChatMode;
+}): Promise<boolean> {
+  const { channel, activeRuns, media, controls, msg, scope, mode } = deps;
+  const handle = activeRuns.get(scope);
+  const target = handle?.supplement;
+  if (!handle || !target || !handle.run.inject) return false;
+  const signal = supplementSignal(msg.content, replyQuoteTargetForMessage(msg, mode), target);
+  if (!signal) return false;
+  if (!maySupplement(target, msg.senderId, isCreator(controls, msg.senderId))) {
+    log.info('supplement', 'skip-not-initiator', { scope, sender: msg.senderId.slice(-6) });
+    return false;
+  }
+  const attachments = await media.resolve(
+    msg.resources.map((r) => ({ messageId: msg.messageId, resource: r })),
+    controls.profileConfig.attachments,
+  );
+  const prompt = buildPrompt([msg], attachments, [], [], channel.botIdentity, [
+    SUPPLEMENT_INSTRUCTION,
+  ]);
+  // The run may have wrapped up while attachments were downloading.
+  const injected =
+    activeRuns.get(scope) === handle &&
+    handle.run.inject(prompt, supplementPreview(msg.content, attachments.length));
+  if (!injected) {
+    log.info('supplement', 'fallback-queue', { scope, msgId: msg.messageId, signal });
+    return false;
+  }
+  // Quoting the supplement later should reach this run too.
+  target.originIds.add(msg.messageId);
+  log.info('supplement', 'injected', {
+    scope,
+    msgId: msg.messageId,
+    signal,
+    attachments: attachments.length,
+  });
+  void addSupplementReaction(channel, msg.messageId);
+  return true;
 }
 
 interface RunBatchDeps {
@@ -1130,6 +1211,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
+  const supplementTarget = {
+    originIds: new Set(batch.map((m) => m.messageId)),
+    replyIds: new Set<string>(),
+    initiators: new Set(batch.map((m) => m.senderId)),
+  };
+  handle.supplement = supplementTarget;
   const eventStream = execution.subscribe();
   if (flow.resumeFrom) {
     log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
@@ -1308,6 +1395,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 producerStarted = true;
                 if (progress.abandoned()) return;
                 cardCtrl = ctrl;
+                supplementTarget.replyIds.add(ctrl.messageId);
                 await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
                 await renderDone;
               },
@@ -1375,6 +1463,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               producerStarted = true;
               if (progress.abandoned()) return;
               markdownCtrl = ctrl;
+              supplementTarget.replyIds.add(ctrl.messageId);
               await ctrl.setContent(renderText(filterForPrefs(latestState)));
               await renderDone;
             },

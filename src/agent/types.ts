@@ -10,6 +10,8 @@ export type AgentEvent =
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; output: string; isError: boolean }
+  /** A message injected mid-run via `AgentRun.inject` was picked up by the agent. */
+  | { type: 'supplement'; preview: string }
   | {
       type: 'usage';
       inputTokens?: number;
@@ -70,6 +72,16 @@ export interface AgentRun {
    * 143 instead of 0; waiting it out lets it exit cleanly.
    */
   waitForExit(timeoutMs: number): Promise<boolean>;
+  /**
+   * Feed one more user message into the still-running agent, which picks it
+   * up at its next turn boundary (after the current tool call) and folds it
+   * into the ongoing task. `preview` is what the `supplement` event reports
+   * once the agent has actually read it. Returns false when the run can no
+   * longer take input (already finishing / exited) — callers then fall back
+   * to queueing the message for the next run. Adapters without streaming
+   * input omit it.
+   */
+  inject?(prompt: string, preview: string): boolean;
 }
 
 /**

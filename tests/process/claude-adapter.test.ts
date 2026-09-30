@@ -46,10 +46,13 @@ describe('ClaudeAdapter process contract', () => {
     // The prompt goes via stdin, and the bridge system prompt via a temp file,
     // so neither ever touches argv (which cmd.exe would mangle on Windows).
     expect(record.stdin).toBe('hello');
-    expect(record.argv.slice(0, 7)).toEqual([
+    expect(record.argv.slice(0, 10)).toEqual([
       '-p',
+      '--input-format',
+      'stream-json',
       '--output-format',
       'stream-json',
+      '--replay-user-messages',
       '--verbose',
       '--permission-mode',
       'acceptEdits',
@@ -123,7 +126,7 @@ describe('ClaudeAdapter process contract', () => {
     const record = await readRecord(fake.recordPath);
 
     expect(record.argv.slice(-4)).toEqual(['--resume', 'sess-old', '--model', 'sonnet']);
-    expect(record.argv[5]).toBe('bypassPermissions');
+    expect(record.argv[8]).toBe('bypassPermissions');
   });
 
   it('includes stderr when the process exits non-zero', async () => {
@@ -131,6 +134,7 @@ describe('ClaudeAdapter process contract', () => {
       lines: [{ type: 'assistant', message: { content: [{ type: 'text', text: 'before failure' }] } }],
       stderr: 'boom\n',
       exitCode: 42,
+      exitWithoutEof: true,
     });
     cleanup.push(fake.dir);
 
@@ -205,6 +209,125 @@ describe('ClaudeAdapter process contract', () => {
     await iterator.return?.();
   });
 
+  it('does not end the run on a result that arrives before the prompt is read', async () => {
+    // A resumed session can first flush a stale background-task notification
+    // turn; its result must not be mistaken for the answer to our prompt.
+    const fake = await createFakeClaude({
+      lines: [
+        { type: 'result', session_id: 'sess-stale', result: 'stale notification' },
+        REPLAY,
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'real answer' }] } },
+        { type: 'result', session_id: 'sess-stale' },
+      ],
+    });
+    cleanup.push(fake.dir);
+
+    const run = new ClaudeAdapter({ binary: fake.path }).run({
+      runId: 'run-stale',
+      prompt: 'question',
+      cwd: fake.dir,
+    });
+
+    expect(await collect(run.events)).toEqual([
+      { type: 'text', delta: 'real answer' },
+      { type: 'done', sessionId: 'sess-stale', terminationReason: 'normal' },
+    ]);
+  });
+
+  it('folds an injected supplement into the running run', async () => {
+    const fake = await createFakeClaude({
+      lines: [
+        REPLAY,
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } },
+      ],
+      followUps: [
+        [
+          REPLAY,
+          { type: 'assistant', message: { content: [{ type: 'text', text: 'with supplement' }] } },
+          { type: 'result', session_id: 'sess-steer' },
+        ],
+      ],
+    });
+    cleanup.push(fake.dir);
+
+    const run = new ClaudeAdapter({ binary: fake.path }).run({
+      runId: 'run-steer',
+      prompt: 'task',
+      cwd: fake.dir,
+    });
+
+    const events: AgentEvent[] = [];
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'text' && event.delta === 'working') {
+        expect(run.inject?.('supplement prompt', '补充：加上 BANANA')).toBe(true);
+      }
+    }
+
+    expect(events).toEqual([
+      { type: 'text', delta: 'working' },
+      { type: 'supplement', preview: '补充：加上 BANANA' },
+      { type: 'text', delta: 'with supplement' },
+      { type: 'done', sessionId: 'sess-steer', terminationReason: 'normal' },
+    ]);
+    expect(run.inject?.('too late', 'late')).toBe(false);
+    const record = await readRecord(fake.recordPath);
+    expect(record.messages).toEqual(['task', 'supplement prompt']);
+  });
+
+  it('keeps going when a supplement lands just as a turn ends', async () => {
+    // The supplement is written before claude reports the first result but is
+    // only read afterwards, as a turn of its own.
+    const fake = await createFakeClaude({
+      lines: [REPLAY, { type: 'assistant', message: { content: [{ type: 'text', text: 'first' }] } }],
+      followUps: [
+        [
+          { type: 'result', session_id: 'sess-late' },
+          REPLAY,
+          { type: 'assistant', message: { content: [{ type: 'text', text: 'second' }] } },
+          { type: 'result', session_id: 'sess-late' },
+        ],
+      ],
+    });
+    cleanup.push(fake.dir);
+
+    const run = new ClaudeAdapter({ binary: fake.path }).run({
+      runId: 'run-late',
+      prompt: 'task',
+      cwd: fake.dir,
+    });
+
+    const events: AgentEvent[] = [];
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'text' && event.delta === 'first') run.inject?.('more', '补充');
+    }
+
+    expect(events).toEqual([
+      { type: 'text', delta: 'first' },
+      { type: 'supplement', preview: '补充' },
+      { type: 'text', delta: 'second' },
+      { type: 'done', sessionId: 'sess-late', terminationReason: 'normal' },
+    ]);
+  });
+
+  it('ends on an error result even with input still unread', async () => {
+    const fake = await createFakeClaude({
+      lines: [{ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'sess-err' }],
+    });
+    cleanup.push(fake.dir);
+
+    const run = new ClaudeAdapter({ binary: fake.path }).run({
+      runId: 'run-err',
+      prompt: 'task',
+      cwd: fake.dir,
+    });
+
+    expect(await collect(run.events)).toEqual([
+      { type: 'done', sessionId: 'sess-err', terminationReason: 'normal' },
+    ]);
+  });
+
   it('requires cwd to be resolved by policy before spawning', () => {
     expect(() =>
       new ClaudeAdapter({ binary: 'unused' }).run({ runId: 'run-no-cwd', prompt: 'hi' }),
@@ -218,29 +341,44 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return out;
 }
 
+/** Marks where the fake echoes the message it just read (`--replay-user-messages`). */
+const REPLAY = '$replay';
+
+/**
+ * A stream-json claude stand-in: reads one JSON message per stdin line and
+ * answers the first with `lines`, the n-th follow-up with `followUps[n-1]`.
+ * Each reply echoes the message at its `REPLAY` marker (or first, if absent)
+ * and the fake exits once stdin closes — or right away with `exitWithoutEof`.
+ */
 async function createFakeClaude(options: {
   lines: unknown[];
+  followUps?: unknown[][];
   stderr?: string;
   exitCode?: number;
   exitDelayMs?: number;
+  exitWithoutEof?: boolean;
 }): Promise<FakeBinary> {
   const dir = await mkdtemp(join(tmpdir(), 'claude-adapter-test-'));
   const path = join(dir, 'fake-claude.mjs');
   const recordPath = join(dir, 'argv.json');
+  const turns = [options.lines, ...(options.followUps ?? [])];
   await writeFile(
     path,
     [
       '#!/usr/bin/env node',
       'import { writeFileSync, readFileSync } from "node:fs";',
+      'import { createInterface } from "node:readline";',
       'const argv = process.argv.slice(2);',
       'const spIdx = argv.indexOf("--append-system-prompt-file");',
       'const systemPrompt = spIdx !== -1 ? readFileSync(argv[spIdx + 1], "utf8") : null;',
-      'let stdin = "";',
-      'process.stdin.on("data", (c) => { stdin += c; });',
-      'process.stdin.on("end", () => {',
+      `const turns = ${JSON.stringify(turns)};`,
+      `const REPLAY = ${JSON.stringify(REPLAY)};`,
+      'const messages = [];',
+      'const finish = () => {',
       `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({`,
       '    argv,',
-      '    stdin,',
+      '    stdin: messages[0] ?? "",',
+      '    messages,',
       '    systemPrompt,',
       '    cwd: process.cwd(),',
       '    env: {',
@@ -251,11 +389,21 @@ async function createFakeClaude(options: {
       '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
       '    },',
       '  }));',
-      `  const lines = ${JSON.stringify(options.lines)};`,
-      '  for (const line of lines) console.log(JSON.stringify(line));',
       options.stderr ? `  process.stderr.write(${JSON.stringify(options.stderr)});` : '',
       `  setTimeout(() => process.exit(${options.exitCode ?? 0}), ${options.exitDelayMs ?? 0});`,
+      '};',
+      'const rl = createInterface({ input: process.stdin });',
+      'rl.on("line", (raw) => {',
+      '  if (!raw.trim()) return;',
+      '  const msg = JSON.parse(raw);',
+      '  messages.push(msg.message.content);',
+      '  const out = turns[messages.length - 1] ?? [];',
+      '  const echo = { type: "user", isReplay: true, uuid: msg.uuid, message: msg.message };',
+      '  if (!out.includes(REPLAY)) console.log(JSON.stringify(echo));',
+      '  for (const line of out) console.log(JSON.stringify(line === REPLAY ? echo : line));',
+      options.exitWithoutEof ? '  if (messages.length === 1) finish();' : '',
       '});',
+      options.exitWithoutEof ? '' : 'rl.on("close", finish);',
     ].filter(Boolean).join('\n'),
     'utf8',
   );
@@ -266,6 +414,7 @@ async function createFakeClaude(options: {
 async function readRecord(path: string): Promise<{
   argv: string[];
   stdin: string;
+  messages: string[];
   systemPrompt: string | null;
   cwd: string;
   env: {
@@ -279,6 +428,7 @@ async function readRecord(path: string): Promise<{
   return JSON.parse(await readFile(path, 'utf8')) as {
     argv: string[];
     stdin: string;
+    messages: string[];
     systemPrompt: string | null;
     cwd: string;
     env: {

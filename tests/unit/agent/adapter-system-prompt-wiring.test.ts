@@ -55,7 +55,7 @@ describe('ClaudeAdapter system prompt wiring', () => {
     adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
 
     // The prompt goes via stdin, never argv (cmd.exe would mangle it on Windows).
-    expect(await readAll(child.stdin)).toBe('hi');
+    expect(await readFirstStreamJsonPrompt(child.stdin)).toBe('hi');
     expect(systemPromptFileContent()).toBe(
       buildBridgeSystemPrompt({ openId: 'ou_bot_self', name: 'Bridge' }),
     );
@@ -68,7 +68,7 @@ describe('ClaudeAdapter system prompt wiring', () => {
 
     adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
 
-    expect(await readAll(child.stdin)).toBe('hi');
+    expect(await readFirstStreamJsonPrompt(child.stdin)).toBe('hi');
     expect(systemPromptFileContent()).toBe(buildBridgeSystemPrompt(undefined));
   });
 
@@ -121,4 +121,18 @@ async function readAll(stream: PassThrough): Promise<string> {
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/** Claude keeps stdin open (stream-json input); read just the first message. */
+async function readFirstStreamJsonPrompt(stream: PassThrough): Promise<string> {
+  let buf = '';
+  for await (const chunk of stream) {
+    buf += String(chunk);
+    const nl = buf.indexOf('\n');
+    if (nl !== -1) {
+      const line = JSON.parse(buf.slice(0, nl)) as { message: { content: string } };
+      return line.message.content;
+    }
+  }
+  throw new Error('stdin ended before a full stream-json line');
 }

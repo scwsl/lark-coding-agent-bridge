@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,10 +71,17 @@ export class ClaudeAdapter implements AgentAdapter {
     // special characters ever reach the shell.
     const systemPromptFile = writeSystemPromptFile(buildBridgeSystemPrompt(this.botIdentity));
 
+    // stdin stays open (`--input-format stream-json`) so mid-run supplements
+    // can be fed in through `inject`; `--replay-user-messages` echoes each
+    // message back once claude has consumed it, which is what tells a real
+    // end of run apart from an intermediate turn (see ClaudeInput).
     const args = [
       '-p',
+      '--input-format',
+      'stream-json',
       '--output-format',
       'stream-json',
+      '--replay-user-messages',
       '--verbose',
       '--permission-mode',
       opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -127,14 +135,16 @@ export class ClaudeAdapter implements AgentAdapter {
       runtimeError = err;
       systemPromptFile.cleanup();
     });
+    const input = new ClaudeInput(child.stdin);
     child.on('exit', (code, signal) => {
       log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
+      input.detach();
       systemPromptFile.cleanup();
     });
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
-    child.stdin.end(opts.prompt, 'utf8');
+    input.write(opts.prompt);
 
     // Default 5s if caller didn't specify — claude often has live
     // subprocesses (lark-cli waiting for OAuth, long Bash, etc.) and the
@@ -145,7 +155,15 @@ export class ClaudeAdapter implements AgentAdapter {
 
     return {
       runId: opts.runId,
-      events: createEventStream(child, stderrChunks, () => runtimeError),
+      events: createEventStream(child, stderrChunks, () => runtimeError, input),
+      inject(prompt: string, preview: string): boolean {
+        const ok = input.write(prompt, preview);
+        log.info('agent', ok ? 'inject' : 'inject-refused', {
+          pid: child.pid ?? null,
+          promptChars: prompt.length,
+        });
+        return ok;
+      },
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
@@ -188,10 +206,89 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 }
 
+/**
+ * How long an intermediate `result` (one that left written input unconsumed)
+ * may be followed by silence before we stop waiting for the next turn and
+ * close stdin. claude normally starts the queued turn immediately; this only
+ * guards against it never doing so.
+ */
+const NEXT_TURN_GUARD_MS = 30_000;
+
+/**
+ * The streaming stdin of one claude process, plus the bookkeeping that decides
+ * when the run is really over. Every message written carries a uuid, and
+ * `--replay-user-messages` echoes it back once claude actually consumes it —
+ * a supplement sent mid-tool-call is echoed only when the tool finishes and
+ * the model picks it up. A `result` therefore only ends the run when nothing
+ * written is still unread; otherwise claude has another turn queued. That
+ * also covers a resumed session whose first turn is a stale background-task
+ * notification: its `result` arrives before the bridge prompt is read, and
+ * treating it as the end used to swallow the user's message.
+ */
+class ClaudeInput {
+  /** uuid → supplement preview (undefined for the run's initial prompt). */
+  private readonly unread = new Map<string, string | undefined>();
+  private closed = false;
+
+  constructor(private readonly stdin: Writable) {}
+
+  write(prompt: string, preview?: string): boolean {
+    if (this.closed || this.stdin.destroyed || this.stdin.writableEnded) return false;
+    const uuid = randomUUID();
+    this.unread.set(uuid, preview);
+    const line = JSON.stringify({
+      type: 'user',
+      uuid,
+      session_id: '',
+      parent_tool_use_id: null,
+      message: { role: 'user', content: prompt },
+    });
+    this.stdin.write(`${line}\n`, 'utf8');
+    return true;
+  }
+
+  /** Mark a replayed message as read; returns its preview if it was a supplement. */
+  ack(uuid: unknown): string | undefined {
+    if (typeof uuid !== 'string' || !this.unread.has(uuid)) return undefined;
+    const preview = this.unread.get(uuid);
+    this.unread.delete(uuid);
+    return preview;
+  }
+
+  get unreadCount(): number {
+    return this.unread.size;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  /** No more input: claude finishes whatever it has and exits. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (!this.stdin.destroyed && !this.stdin.writableEnded) this.stdin.end();
+  }
+
+  /** The process is gone; refuse further writes without touching the pipe. */
+  detach(): void {
+    this.closed = true;
+  }
+}
+
+interface ClaudeResultLine {
+  type?: string;
+  subtype?: string;
+  is_error?: boolean;
+  isReplay?: boolean;
+  uuid?: unknown;
+}
+
 async function* createEventStream(
   child: ClaudeChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
+  input: ClaudeInput,
 ): AsyncGenerator<AgentEvent> {
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
@@ -214,9 +311,17 @@ async function* createEventStream(
     }, 50);
   };
   child.once('exit', closeSilentStdout);
+  let sawResult = false;
+  let finished = false;
+  let nextTurnGuard: ReturnType<typeof setTimeout> | undefined;
+  const clearNextTurnGuard = (): void => {
+    if (nextTurnGuard) clearTimeout(nextTurnGuard);
+    nextTurnGuard = undefined;
+  };
   try {
     for await (const line of rl) {
       sawStdout = true;
+      clearNextTurnGuard();
       const trimmed = line.trim();
       if (!trimmed) continue;
       let parsed: unknown;
@@ -225,9 +330,40 @@ async function* createEventStream(
       } catch {
         continue;
       }
+      const raw = (parsed && typeof parsed === 'object' ? parsed : {}) as ClaudeResultLine;
+      if (raw.type === 'user' && raw.isReplay === true) {
+        const preview = input.ack(raw.uuid);
+        if (preview !== undefined) yield { type: 'supplement', preview };
+        continue;
+      }
+      if (raw.type === 'result') {
+        sawResult = true;
+        const failed = raw.is_error === true || (raw.subtype !== undefined && raw.subtype !== 'success');
+        if (input.unreadCount > 0 && !failed && !input.isClosed) {
+          log.info('agent', 'turn-result-more-input', {
+            pid: child.pid ?? null,
+            unread: input.unreadCount,
+          });
+          for (const evt of translateEvent(parsed)) {
+            if (evt.type !== 'done') yield evt;
+          }
+          nextTurnGuard = setTimeout(() => {
+            log.warn('agent', 'next-turn-guard-expired', {
+              pid: child.pid ?? null,
+              unread: input.unreadCount,
+              guardMs: NEXT_TURN_GUARD_MS,
+            });
+            input.close();
+          }, NEXT_TURN_GUARD_MS);
+          continue;
+        }
+        input.close();
+        finished = true;
+      }
       yield* translateEvent(parsed);
     }
   } finally {
+    clearNextTurnGuard();
     if (silentExitTimer) clearTimeout(silentExitTimer);
     child.removeListener('exit', closeSilentStdout);
     rl.close();
@@ -269,6 +405,10 @@ async function* createEventStream(
       message: `claude runtime error: ${runtimeError.message}`,
       terminationReason: 'failed',
     };
+  } else if (sawResult && !finished) {
+    // stdin was closed by the next-turn guard and claude exited cleanly
+    // without another result: the last completed turn is the answer.
+    yield { type: 'done', terminationReason: 'normal' };
   }
 }
 
