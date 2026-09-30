@@ -107,7 +107,7 @@ describe('run card renderer snapshots', () => {
       header?: { template?: string; title?: { content?: string } };
       body?: { elements?: Array<{ tag?: string; content?: string }> };
     };
-    expect(running.header).toEqual({ template: 'purple', title: { tag: 'plain_text', content: 'CC' } });
+    expect(running.header).toEqual({ template: 'wathet', title: { tag: 'plain_text', content: 'CC' } });
     // While streaming, the footer status + stop button own the bottom of the
     // card — the byline would only push them down.
     expect(JSON.stringify(running.body)).not.toContain('Provider');
@@ -116,7 +116,7 @@ describe('run card renderer snapshots', () => {
       meta,
     }) as { header?: { template?: string }; body?: { elements?: Array<{ tag?: string; content?: string }> } };
     const elements = done.body?.elements ?? [];
-    expect(done.header?.template).toBe('purple');
+    expect(done.header?.template).toBe('wathet');
     expect(elements[elements.length - 2]?.tag).toBe('hr');
     expect(elements[elements.length - 1]?.content).toBe(
       "<font color='grey'>Agent: claude | Model: Opus 5 | Provider: anthropic</font>",

@@ -87,10 +87,10 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   });
 }
 
-/** Coloured title bar: purple while healthy, red on failure, grey when cut short. */
+/** Coloured title bar: wathet while healthy, red on failure, grey when cut short. */
 function cardHeader(title: string, terminal: Terminal): object {
   const template =
-    terminal === 'error' ? 'red' : terminal === 'running' || terminal === 'done' ? 'purple' : 'grey';
+    terminal === 'error' ? 'red' : terminal === 'running' || terminal === 'done' ? 'wathet' : 'grey';
   return {
     template,
     title: { tag: 'plain_text', content: title },
