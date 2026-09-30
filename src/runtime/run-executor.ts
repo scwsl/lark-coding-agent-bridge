@@ -42,7 +42,10 @@ export interface RunExecution {
   stop(): Promise<void>;
 }
 
-const DEFAULT_POST_DONE_EXIT_GRACE_MS = 2000;
+// claude takes ~1.7–2.2s after its `result` line to flush and exit; at 2s about
+// one run in eight was SIGTERMed (exit 143) mid-cleanup. The reply has already
+// been rendered by then, so waiting longer costs nothing user-visible.
+const DEFAULT_POST_DONE_EXIT_GRACE_MS = 5000;
 
 export class RunExecutor {
   private readonly agent: AgentAdapter;
