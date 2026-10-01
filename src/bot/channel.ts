@@ -1418,6 +1418,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
+      if (opensProgressEagerly(controls.profileConfig.agentKind)) progress.ensureOpen();
       try {
         await awaitRenderAwareStream({
           mode: replyMode,
@@ -1485,6 +1486,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
+      if (opensProgressEagerly(controls.profileConfig.agentKind)) progress.ensureOpen();
       try {
         await awaitRenderAwareStream({
           mode: replyMode,
@@ -1623,6 +1625,18 @@ function createLazyProgressStream(
  * with `renderText` in both reply modes so it matches the rule
  * `recallIfEmptyStreamedReply` applies: a stream we open is one that survives.
  */
+/**
+ * Claude streams its whole answer into the progress message, so open it as
+ * soon as the run starts. Waiting for visible text left runs that go straight
+ * to tool calls (hidden when `showToolCalls` is off) with no card and no stop
+ * button for a minute or more — only the Typing reaction showed anything was
+ * happening. Codex keeps the lazy open: its final-only rounds would otherwise
+ * leave an empty placeholder card behind (see `createLazyProgressStream`).
+ */
+function opensProgressEagerly(agentKind: string): boolean {
+  return agentKind !== 'codex';
+}
+
 function shouldOpenProgressStream(state: RunState): boolean {
   if (state.terminal !== 'running') return false;
   return renderText({ ...state, footer: null }).trim() !== '';

@@ -234,6 +234,38 @@ describe('markdown stream startup failures', () => {
     expect(lastMarkdown(h.channel)).toContain('FINAL_ONLY_SENTINEL');
   });
 
+  it('opens the Claude progress stream before any visible output', async () => {
+    // Claude runs often start with tool calls, which are hidden when
+    // showToolCalls is off. The progress message (with its stop button) must
+    // appear right away instead of after the first sentence.
+    const streamCalls: unknown[] = [];
+    const h = await createHarness({
+      agentKind: 'claude',
+      events: [
+        // Nothing visible at all: only hidden tool calls. The lazy rule would
+        // never open a stream for this run.
+        { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'sleep 1' } },
+        { type: 'tool_result', id: 'toolu_1', output: '', isError: false },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      stream: async (_chatId, input) => {
+        streamCalls.push(input);
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        await producer?.({ setContent: vi.fn(async () => {}) });
+      },
+    });
+    h.profileConfig.preferences.showToolCalls = false;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_eager', 'run'));
+    await waitFor(() => streamCalls.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(streamCalls).toHaveLength(1);
+  });
+
   it('does not repeat streamed text as the final reply when Codex held nothing back', async () => {
     // Codex only reserves its *last* message as `final_text`; an abnormal turn
     // end (turn.failed, or the process dying before turn.completed) flushes it
