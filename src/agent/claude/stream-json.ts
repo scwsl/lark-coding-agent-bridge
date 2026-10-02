@@ -19,6 +19,9 @@ interface ClaudeRawEvent {
   cwd?: string;
   model?: string;
   message?: { content?: ContentBlock[] };
+  /** Set on messages from inside a subagent (Agent/Task tool) — the id of the
+   * parent's tool_use that spawned it. Absent or null for the main agent. */
+  parent_tool_use_id?: string | null;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -30,6 +33,13 @@ interface ClaudeRawEvent {
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   if (!raw || typeof raw !== 'object') return;
   const evt = raw as ClaudeRawEvent;
+
+  // A subagent's own text, tool calls and results are its working, not the
+  // answer: the main agent gets the subagent's report as the Agent tool's
+  // result. Rendering them made one review run's card carry five full
+  // subagent reports, past Feishu's card size limit (230025) — every update
+  // after that was rejected and the card froze mid-run.
+  if (typeof evt.parent_tool_use_id === 'string' && evt.parent_tool_use_id) return;
 
   if (evt.type === 'system' && evt.subtype === 'init') {
     yield {

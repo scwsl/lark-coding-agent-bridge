@@ -22,6 +22,34 @@ describe('Claude stream-json translator', () => {
     expect([...translateEvent({ type: 'system', subtype: 'init', session_id: 'sess-1' })][0]).not.toHaveProperty('threadId');
   });
 
+  it('drops subagent messages so only the main agent reaches the card', () => {
+    const sub = { parent_tool_use_id: 'toolu_agent_1' };
+    expect([
+      ...translateEvent({
+        type: 'assistant',
+        ...sub,
+        message: {
+          content: [
+            { type: 'text', text: 'subagent report' },
+            { type: 'tool_use', id: 'tool-sub', name: 'Read', input: { file_path: '/x' } },
+          ],
+        },
+      }),
+      ...translateEvent({
+        type: 'user',
+        ...sub,
+        message: { content: [{ type: 'tool_result', tool_use_id: 'tool-sub', content: 'x' }] },
+      }),
+    ]).toEqual([]);
+    expect([
+      ...translateEvent({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { content: [{ type: 'text', text: 'main answer' }] },
+      }),
+    ]).toEqual([{ type: 'text', delta: 'main answer' }]);
+  });
+
   it('translates assistant text, thinking, and tool_use blocks in order', () => {
     expect([
       ...translateEvent({
