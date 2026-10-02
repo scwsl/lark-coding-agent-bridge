@@ -1,11 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { isCreator, type RuntimeControls } from './access';
 
-/** One fenced path for `bin/bridge-bash-guard.mjs` (same shape it reads). */
+/** One fenced path for `bin/bridge-guard.mjs` (same shape it reads). */
 export interface GuardRule {
   path: string;
   /** `any`: no shell command may name it; `write`: only writing into it is refused. */
@@ -22,10 +22,19 @@ export interface GuardRule {
  * bridge's secrets and logs are unreadable.
  */
 export interface RunGuard {
+  home: string;
   rules: GuardRule[];
+  /**
+   * Inside `home`, the only places the run may read or write: the projects
+   * the owner opened to others (`access.guestRoots`), the run's workspace,
+   * and what the agent itself needs (skills, tools, attachments).
+   */
+  allowedRoots: string[];
+  /** Regexes for further allowed paths (anchored), e.g. attachment dirs. */
+  allowPatterns: string[];
   /** Absolute path globs the run may not read. */
   readDeny: string[];
-  /** The PreToolUse hook script that applies `rules` to Bash. */
+  /** The PreToolUse hook script that applies the guard to tool calls. */
   hookScript: string;
 }
 
@@ -57,6 +66,10 @@ function escapeRe(s: string): string {
 
 export function ownerOnlyGuard(opts: {
   larkChannelHome: string;
+  /** Projects the owner opened to others (`access.guestRoots`). */
+  guestRoots?: readonly string[];
+  /** The run's working directory. */
+  workspace?: string;
   home?: string;
   root?: string;
 }): RunGuard {
@@ -64,7 +77,20 @@ export function ownerOnlyGuard(opts: {
   const root = opts.root ?? bridgeRoot();
   const lc = opts.larkChannelHome;
   const claude = join(home, '.claude');
+  const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
   return {
+    home,
+    allowedRoots: [
+      ...(opts.guestRoots ?? []).map(expand),
+      ...(opts.workspace ? [opts.workspace] : []),
+      // What the agent needs to do its job for anyone: skills (read and run,
+      // never write — the rules below still apply) and command-line tools.
+      join(claude, 'skills'),
+      join(home, '.agents', 'skills'),
+      ...skillTargets(join(claude, 'skills')),
+      join(home, '.local', 'bin'),
+    ],
+    allowPatterns: [`${escapeRe(lc)}/profiles/[^/]+/media/`],
     rules: [
       { path: root, bash: 'any' },
       // Attachments the user sent land under media/ and must stay readable.
@@ -81,8 +107,28 @@ export function ownerOnlyGuard(opts: {
       join(lc, 'profiles', '*', 'lark-cli', '**'),
       join(lc, 'profiles', '*', 'logs', '**'),
     ],
-    hookScript: join(root, 'bin', 'bridge-bash-guard.mjs'),
+    hookScript: join(root, 'bin', 'bridge-guard.mjs'),
   };
+}
+
+/** Where symlinked skills really live, so running their scripts stays possible. */
+function skillTargets(skillsDir: string): string[] {
+  const roots = new Set<string>();
+  let names: string[] = [];
+  try {
+    names = readdirSync(skillsDir);
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    try {
+      const real = realpathSync(join(skillsDir, name));
+      if (real !== join(skillsDir, name)) roots.add(real);
+    } catch {
+      /* dangling link */
+    }
+  }
+  return [...roots];
 }
 
 /** Claude CLI flags that enforce `guard`, plus the env its hook reads. */
@@ -100,7 +146,7 @@ export function claudeGuardArgs(
     hooks: {
       PreToolUse: [
         {
-          matcher: 'Bash',
+          matcher: 'Bash|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep',
           hooks: [{ type: 'command', command: `"${nodeBinary}" "${guard.hookScript}"` }],
         },
       ],
@@ -108,7 +154,14 @@ export function claudeGuardArgs(
   };
   return {
     args: ['--disallowedTools', ...deny, '--settings', JSON.stringify(settings)],
-    env: { LARK_CHANNEL_GUARD: JSON.stringify(guard.rules) },
+    env: {
+      LARK_CHANNEL_GUARD: JSON.stringify({
+        home: guard.home,
+        rules: guard.rules,
+        allowedRoots: guard.allowedRoots,
+        allowPatterns: guard.allowPatterns,
+      }),
+    },
   };
 }
 

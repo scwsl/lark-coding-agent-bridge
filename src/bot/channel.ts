@@ -1242,6 +1242,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
+  // Someone else's run may only touch what the owner opened to others.
+  const guestWorkspace = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+  const guestGuard = ownerRun
+    ? undefined
+    : ownerOnlyGuard({
+        larkChannelHome: paths.appDir,
+        guestRoots: controls.profileConfig.access.guestRoots ?? [],
+        ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
+      });
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
@@ -1256,7 +1265,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
-    ...(ownerRun ? {} : { guard: ownerOnlyGuard({ larkChannelHome: paths.appDir }) }),
+    ...(guestGuard ? { guard: guestGuard } : {}),
     observability: {
       profile: controls.profile,
       agent: capability.agentId,

@@ -17,6 +17,7 @@ describe('bridge system prompt bot collaboration rules', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('senderIsOwner');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('这项操作仅限 bot 主人发起');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('不要换个写法再试');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('access.guestRoots');
   });
 
   it('states that bots only receive messages via a real structured mention', () => {

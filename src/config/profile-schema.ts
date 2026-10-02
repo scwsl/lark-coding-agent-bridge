@@ -45,6 +45,12 @@ export interface ProfileAccess {
    * top of the owner, admins, and whoever started that run. Omitted when empty.
    */
   stoppers?: string[];
+  /**
+   * Directories a run started by someone other than the owner may read and
+   * change (`~` allowed). Everything else under the owner's home is off
+   * limits to them. Omitted when empty.
+   */
+  guestRoots?: string[];
 }
 
 export interface SandboxConfig {
@@ -368,6 +374,7 @@ function normalizeAccess(
   const chatRequireMention = normalizeChatMentionMap(access?.chatRequireMention);
   const chatAllowedUsers = normalizeChatUserMap(access?.chatAllowedUsers);
   const stoppers = stringArray(access?.stoppers);
+  const guestRoots = stringArray(access?.guestRoots);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -377,6 +384,7 @@ function normalizeAccess(
     ...(Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}),
     ...(Object.keys(chatAllowedUsers).length > 0 ? { chatAllowedUsers } : {}),
     ...(stoppers.length > 0 ? { stoppers } : {}),
+    ...(guestRoots.length > 0 ? { guestRoots } : {}),
   };
 }
 
