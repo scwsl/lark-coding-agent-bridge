@@ -18,7 +18,7 @@ export function listDescendants(rootPid: number): number[] {
   try {
     out = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], {
       encoding: 'utf8',
-      timeout: 2000,
+      timeout: 5000,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {

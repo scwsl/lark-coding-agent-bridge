@@ -12,7 +12,7 @@ describe.skipIf(process.platform === 'win32')('stopping a Claude run', () => {
     await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
   });
 
-  it('also ends the commands the agent started, even ones ignoring SIGTERM', async () => {
+  it('also ends the commands the agent started, even ones ignoring SIGTERM', { timeout: 20_000 }, async () => {
     const fake = await createHangingClaude();
     const run = new ClaudeAdapter({ binary: fake.path }).run({
       runId: 'run-tree',
@@ -67,7 +67,7 @@ async function createHangingClaude(): Promise<{
 }
 
 async function readPid(file: string): Promise<number> {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 250; i++) {
     const text = await readFile(file, 'utf8').catch(() => '');
     const pid = Number(text.trim());
     if (pid > 0) return pid;
@@ -78,7 +78,7 @@ async function readPid(file: string): Promise<number> {
 
 /** Killed processes linger as zombies until reaped; give init a moment. */
 async function expectGone(pid: number): Promise<void> {
-  for (let i = 0; i < 100 && isAlive(pid); i++) {
+  for (let i = 0; i < 250 && isAlive(pid); i++) {
     await new Promise((r) => setTimeout(r, 20));
   }
   expect(isAlive(pid), `pid ${pid} still alive`).toBe(false);

@@ -31,6 +31,11 @@ function shell(title: string, elements: object[]): object {
   };
 }
 
+/** `/usage`: the plan's limit windows. `body` is markdown (code blocks allowed). */
+export function usageCard(body: string): object {
+  return shell('📈 Claude 额度', [{ tag: 'markdown', content: body }]);
+}
+
 export function workspacesCard(current: string | undefined, named: Record<string, string>): object {
   const entries = Object.entries(named);
   const elements: object[] = [];
@@ -281,7 +286,8 @@ export function helpCard(agentName = 'Agent'): object {
           '`/cron list|show|run|pause|resume|remove` — 管理已有任务',
         ]),
         helpSection('grey-50', '⚙️ 运维与诊断', [
-          '`/status` — 当前 profile、会话、工作目录、git、知识库状态',
+          '`/status` — 当前 profile、会话、工作目录、git、知识库状态，以及运行中任务的实况',
+          '`/usage` — Claude 额度：5 小时窗口、本周用量和重置时间（不消耗额度）',
           '`/config` — 偏好、访问控制、lark-cli 身份策略',
           '`/account` — 查看当前应用；`/account change` 换 appId/secret',
           '`/ps` · `/exit <id|#>` — 列出 / 关掉本机的 bot',

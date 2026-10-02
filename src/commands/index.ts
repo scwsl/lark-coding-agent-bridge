@@ -44,6 +44,7 @@ import {
   resumeCard,
   skillsCard,
   statusCard,
+  usageCard,
   worktreeCard,
   workspacesCard,
 } from '../card/templates';
@@ -89,6 +90,7 @@ import type {
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
 import { resolveAppPaths } from '../config/app-paths';
 import { describeActiveRun } from '../bot/run-status';
+import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
 import { accessToClaudePermissionMode } from '../config/permissions';
 import {
   canRunAdminCommand,
@@ -250,6 +252,7 @@ const handlers: Record<string, Handler> = {
   '/knowledge': handleKnowledge,
   '/cron': handleCron,
   '/coffee': handleCoffee,
+  '/usage': handleUsage,
 };
 
 /**
@@ -259,6 +262,8 @@ const handlers: Record<string, Handler> = {
  */
 const ADMIN_COMMANDS = new Set([
   '/account',
+  // The plan quota of whoever runs the bridge, not something to show a group.
+  '/usage',
   '/config',
   '/ps',
   '/exit',
@@ -1444,6 +1449,30 @@ function formatDoctorEchoStatus(echoText: string, state: RunState): string {
 
 async function handleHelp(_args: string, ctx: CommandContext): Promise<void> {
   const card = helpCard(ctx.agent.displayName);
+  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
+
+// ─── /usage ───────────────────────────────────────────────────────────────
+
+/**
+ * Plan quota, answered by the bridge itself through `claude -p /usage`: no
+ * agent run, so it costs no quota and still answers while a run is busy or
+ * stuck.
+ */
+async function handleUsage(_args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.controls.profileConfig.agentKind !== 'claude') {
+    await reply(ctx, '`/usage` 目前只支持 Claude profile。');
+    return;
+  }
+  let raw: string;
+  try {
+    raw = await readClaudeUsage();
+  } catch (err) {
+    log.fail('command', err, { cmd: '/usage' });
+    await reply(ctx, `❌ 读取额度失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  const card = usageCard(usageMarkdown(parseClaudeUsage(raw), raw));
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
 
