@@ -5,6 +5,7 @@ import { ProcessPool } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { RunRejected, SpawnFailed } from './errors';
+import type { RunGuard } from '../policy/owner-guard';
 
 export interface RunExecutorDeps {
   agent: AgentAdapter;
@@ -24,6 +25,7 @@ export interface SubmitRunInput {
   effort?: string;
   images?: readonly string[];
   stopGraceMs?: number;
+  guard?: RunGuard;
   nowait?: boolean;
   observability?: {
     profile: string;
@@ -109,6 +111,7 @@ export class RunExecutor {
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
       stopGraceMs: input.stopGraceMs,
+      ...(input.guard ? { guard: input.guard } : {}),
     };
     let run: AgentRun;
     try {

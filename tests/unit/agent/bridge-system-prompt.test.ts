@@ -13,6 +13,12 @@ describe('bridge system prompt bot collaboration rules', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('工具调用的说明字段');
   });
 
+  it('reserves changes to the bridge and the agent itself for the owner', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('senderIsOwner');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('这项操作仅限 bot 主人发起');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不要换个写法再试');
+  });
+
   it('states that bots only receive messages via a real structured mention', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('只有被真实 @');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('收不到');

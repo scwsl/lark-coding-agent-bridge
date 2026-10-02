@@ -10,6 +10,7 @@ import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import { isAlive, listDescendants, signalAll } from '../process-tree';
+import { claudeGuardArgs } from '../../policy/owner-guard';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
   type AgentAdapter,
@@ -92,10 +93,15 @@ export class ClaudeAdapter implements AgentAdapter {
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);
     if (opts.effort) args.push('--effort', opts.effort);
+    const guard = opts.guard ? claudeGuardArgs(opts.guard) : undefined;
+    if (guard) args.push(...guard.args);
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
+      env: mergeProcessEnv(process.env, {
+        ...buildLarkChannelEnv(this.larkChannel),
+        ...(guard?.env ?? {}),
+      }),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ClaudeChild;
 

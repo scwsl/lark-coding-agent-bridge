@@ -56,6 +56,8 @@ import {
   toPromptAttachment,
 } from '../media/attachment';
 import { canUseDm, canUseGroup, isCreator, requireMentionForChat } from '../policy/access';
+import { isOwnerBatch, ownerOnlyGuard } from '../policy/owner-guard';
+import { paths } from '../config/paths';
 import { MeetingManager } from '../meeting/manager';
 import type { VcRequestClient } from '../meeting/api';
 import { attachMeetingAgent, summarizeEndedMeeting } from '../meeting/orchestrator';
@@ -1017,9 +1019,16 @@ async function tryInjectSupplement(deps: {
     msg.resources.map((r) => ({ messageId: msg.messageId, resource: r })),
     controls.profileConfig.attachments,
   );
-  const prompt = buildPrompt([msg], attachments, [], [], channel.botIdentity, [
-    SUPPLEMENT_INSTRUCTION,
-  ]);
+  const prompt = buildPrompt(
+    [msg],
+    attachments,
+    [],
+    [],
+    channel.botIdentity,
+    [SUPPLEMENT_INSTRUCTION],
+    undefined,
+    isOwnerBatch(controls, [msg], (m) => senderTypeOf(m) === 'bot'),
+  );
   // The run may have wrapped up while attachments were downloading.
   const injected =
     activeRuns.get(scope) === handle &&
@@ -1183,6 +1192,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       })
     : undefined;
 
+  // Changes to the bridge and the agent itself are the owner's alone: other
+  // people's runs are told so and fenced off at the tool level.
+  const ownerRun = isOwnerBatch(controls, batch, (m) => senderTypeOf(m) === 'bot');
   const prompt = buildPrompt(
     batch,
     attachments,
@@ -1191,6 +1203,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     channel.botIdentity,
     extraInstructions,
     knowledgeContext,
+    ownerRun,
   );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
@@ -1243,6 +1256,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    ...(ownerRun ? {} : { guard: ownerOnlyGuard({ larkChannelHome: paths.appDir }) }),
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -2243,6 +2257,7 @@ function buildPrompt(
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
   knowledge?: BridgePromptKnowledge,
+  senderIsOwner = false,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -2277,6 +2292,7 @@ function buildPrompt(
       ...(first.senderName ? { senderName: first.senderName } : {}),
       ...(senderType ? { senderType } : {}),
       ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
+      senderIsOwner,
       ...(mentions.length > 0 ? { mentions } : {}),
       ...(first.threadId ? { threadId: first.threadId } : {}),
       messageIds: batch.map((m) => m.messageId),

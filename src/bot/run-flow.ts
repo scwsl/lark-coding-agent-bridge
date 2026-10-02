@@ -20,6 +20,7 @@ import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import type { RunGuard } from '../policy/owner-guard';
 
 export interface StartRunFlowInput {
   scopeId: string;
@@ -35,6 +36,8 @@ export interface StartRunFlowInput {
   executor: RunExecutor;
   now: number;
   stopGraceMs?: number;
+  /** Limits for a run the bot owner didn't start (see ownerOnlyGuard). */
+  guard?: RunGuard;
   observability?: {
     profile: string;
     agent: string;
@@ -160,6 +163,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .filter((path): path is string => Boolean(path))
           : undefined,
       stopGraceMs: input.stopGraceMs,
+      ...(input.guard ? { guard: input.guard } : {}),
       observability: input.observability,
     });
   } catch (err) {

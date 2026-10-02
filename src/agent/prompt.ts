@@ -15,6 +15,9 @@ export interface BridgePromptContext {
   senderType?: 'user' | 'bot';
   /** The bridge bot's own open_id — "this id is you" for self-identification. */
   botOpenId?: string;
+  /** Every message of this turn came from the bot's owner. Gates changes to
+   * the bridge and the agent itself (see the system prompt). */
+  senderIsOwner?: boolean;
   /** Accounts @-mentioned in the triggering message(s), deduped across the batch. */
   mentions?: BridgePromptMention[];
   threadId?: string;

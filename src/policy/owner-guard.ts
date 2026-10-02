@@ -1,0 +1,122 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { NormalizedMessage } from '@larksuite/channel';
+import { isCreator, type RuntimeControls } from './access';
+
+/** One fenced path for `bin/bridge-bash-guard.mjs` (same shape it reads). */
+export interface GuardRule {
+  path: string;
+  /** `any`: no shell command may name it; `write`: only writing into it is refused. */
+  bash: 'any' | 'write';
+  /** Regexes for sub-paths that stay usable, anchored where the path is named. */
+  allow?: string[];
+}
+
+/**
+ * Limits for a run someone other than the bot owner started: they may use the
+ * bot, but not change the bridge or the agent itself. Edits to the fenced
+ * paths are denied outright (Claude `Edit(...)` deny rules hold even under
+ * bypassPermissions), shell commands go through the guard hook, and the
+ * bridge's secrets and logs are unreadable.
+ */
+export interface RunGuard {
+  rules: GuardRule[];
+  /** Absolute path globs the run may not read. */
+  readDeny: string[];
+  /** The PreToolUse hook script that applies `rules` to Bash. */
+  hookScript: string;
+}
+
+const PACKAGE_NAME = 'lark-channel-bridge';
+
+/** Root of the running bridge's own package — its source tree in a checkout. */
+export function bridgeRoot(start: string = dirname(fileURLToPath(import.meta.url))): string {
+  let dir = start;
+  for (;;) {
+    const manifest = join(dir, 'package.json');
+    if (existsSync(manifest)) {
+      try {
+        if ((JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string }).name === PACKAGE_NAME) {
+          return dir;
+        }
+      } catch {
+        /* keep walking */
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return start;
+    dir = parent;
+  }
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function ownerOnlyGuard(opts: {
+  larkChannelHome: string;
+  home?: string;
+  root?: string;
+}): RunGuard {
+  const home = opts.home ?? homedir();
+  const root = opts.root ?? bridgeRoot();
+  const lc = opts.larkChannelHome;
+  const claude = join(home, '.claude');
+  return {
+    rules: [
+      { path: root, bash: 'any' },
+      // Attachments the user sent land under media/ and must stay readable.
+      { path: lc, bash: 'any', allow: [`${escapeRe(lc)}/profiles/[^/]+/media/`] },
+      ...['CLAUDE.md', 'settings.json', 'settings.local.json', 'skills', 'agents', 'scripts', 'projects'].map(
+        (name): GuardRule => ({ path: join(claude, name), bash: 'write' }),
+      ),
+      { path: join(home, '.local', 'bin'), bash: 'write' },
+      { path: join(home, 'Library', 'LaunchAgents'), bash: 'write' },
+    ],
+    readDeny: [
+      join(lc, 'config.json*'),
+      join(lc, 'profiles', '*', 'secrets.enc'),
+      join(lc, 'profiles', '*', 'lark-cli', '**'),
+      join(lc, 'profiles', '*', 'logs', '**'),
+    ],
+    hookScript: join(root, 'bin', 'bridge-bash-guard.mjs'),
+  };
+}
+
+/** Claude CLI flags that enforce `guard`, plus the env its hook reads. */
+export function claudeGuardArgs(
+  guard: RunGuard,
+  nodeBinary: string = process.execPath,
+): { args: string[]; env: Record<string, string> } {
+  // `//abs/path` is Claude's absolute-path syntax; one Edit rule covers every
+  // file-editing tool.
+  const deny = [
+    ...guard.rules.flatMap((r) => [`Edit(/${r.path})`, `Edit(/${r.path}/**)`]),
+    ...guard.readDeny.map((p) => `Read(/${p})`),
+  ];
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: `"${nodeBinary}" "${guard.hookScript}"` }],
+        },
+      ],
+    },
+  };
+  return {
+    args: ['--disallowedTools', ...deny, '--settings', JSON.stringify(settings)],
+    env: { LARK_CHANNEL_GUARD: JSON.stringify(guard.rules) },
+  };
+}
+
+/** Every message of the batch came from the bot owner themselves (not a bot). */
+export function isOwnerBatch(
+  controls: RuntimeControls,
+  batch: readonly NormalizedMessage[],
+  isBot: (msg: NormalizedMessage) => boolean,
+): boolean {
+  return batch.length > 0 && batch.every((m) => isCreator(controls, m.senderId) && !isBot(m));
+}
