@@ -1,6 +1,7 @@
 import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
+import type { AutoResumer } from '../bot/auto-resume';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
 import type { ProcessPool } from '../bot/process-pool';
@@ -38,6 +39,7 @@ export interface CardDispatchDeps {
   pending: PendingQueue;
   chatModeCache: ChatModeCache;
   callbackAuth?: CallbackAuth;
+  autoResumer?: AutoResumer;
   callbackPolicyFingerprint?: string;
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
 }
@@ -120,6 +122,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       processPool: deps.processPool,
       runExecutor: deps.runExecutor,
       controls: deps.controls,
+      ...(deps.autoResumer ? { autoResumer: deps.autoResumer } : {}),
       formValue,
       fromCardAction: true,
     };

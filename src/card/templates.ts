@@ -85,6 +85,8 @@ export interface StatusInfo {
   activeRun: boolean;
   /** What this scope's run is doing right now, when one is running. */
   activeRunDetail?: string;
+  /** A quota-paused task waiting to resume in this scope. */
+  autoResume?: string;
   activeScopes?: string[];
   activeCommentScopes?: string[];
   queue?: { active: number; waiting: number; cap: number };
@@ -120,6 +122,7 @@ export function statusCard(info: StatusInfo): object {
     `🛡 **${escapeMd(info.runtimeAccess.label)}**: ${escapeMd(info.runtimeAccess.value)}`,
     ...(info.larkCliStatus ? [`🔐 **lark-cli**: ${info.larkCliStatus}`] : []),
     `🏃 **active run**: ${info.activeRun ? (info.activeRunDetail ? escapeMd(info.activeRunDetail) : 'yes') : 'no'}`,
+    ...(info.autoResume ? [`⏸ **auto resume**: ${escapeMd(info.autoResume)}`] : []),
     ...(info.activeScopes && info.activeScopes.length > 0
       ? [
           `🏃 **active scopes**: ${info.activeScopes.map((scope) => `\`${escapeCode(scope)}\``).join(', ')}`,
@@ -263,7 +266,7 @@ export function helpCard(agentName = 'Agent'): object {
           '`/new` `/reset` — 清空当前会话',
           '`/new chat [名字]` — 新建群 + 新会话，自动拉你进群',
           '`/resume [N]` — 列出并恢复历史会话',
-          '`/stop` — 结束正在跑的任务（也可点卡片上的 ⏹ 终止）',
+          '`/stop` — 结束正在跑的任务（也可点卡片上的 ⏹ 终止）；任务因额度用完暂停时，取消它的自动续跑',
           '`/timeout [N|off|default]` — 本会话的探活分钟数',
         ]),
         helpSection('turquoise-50', '📂 工作目录与 Git', [

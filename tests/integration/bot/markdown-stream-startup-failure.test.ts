@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types.js';
+import type { AutoResumer } from '../../../src/bot/auto-resume.js';
 import type { FakeAgentEvents } from '../../helpers/fake-agent.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { log } from '../../../src/core/logger.js';
@@ -482,6 +483,65 @@ describe('markdown stream startup failures', () => {
     expect(h.channel.updateCard).not.toHaveBeenCalled();
   });
 
+  it('pauses on the plan quota and resumes in a new card once it resets', async () => {
+    const resetsAt = Date.now() + 3_600_000;
+    const streams: Array<{ cards: unknown[]; messageId: string }> = [];
+    const h = await createHarness({
+      agentKind: 'claude',
+      messageReply: 'card',
+      events: [
+        [
+          { type: 'text', delta: 'STEP_ONE_DONE' },
+          { type: 'rate_limit', blocked: false, limitType: 'five_hour', resetsAt, at: Date.now() },
+          { type: 'rate_limit', blocked: true, message: "You've hit your limit", at: Date.now() },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+        [
+          { type: 'text', delta: 'FINISHED_THE_REST' },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+      ],
+      stream: async (_chatId, input) => {
+        const record = { cards: [] as unknown[], messageId: `om_card_${streams.length + 1}` };
+        streams.push(record);
+        await sdkLikeCardStream(async (card) => {
+          record.cards.push(card);
+        }, record.messageId)(_chatId, input);
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_task', 'do the long task'));
+    await waitFor(() => h.controls.autoResumer?.get('oc_dm') !== undefined);
+
+    // The original card says why it stopped and when it goes on.
+    const pausedCard = JSON.stringify(streams[0]?.cards.at(-1));
+    expect(pausedCard).toContain('STEP_ONE_DONE');
+    expect(pausedCard).toContain('任务暂停');
+    expect(pausedCard).toContain('5 小时额度已用完');
+    expect(pausedCard).toContain('自动继续');
+    const resume = h.controls.autoResumer!.get('oc_dm')!;
+    expect(resume.resumeAt).toBe(resetsAt + 60_000);
+    expect(resume).toMatchObject({ originMessageId: 'om_task', cardMessageId: 'om_card_1' });
+
+    // Nothing happens before the reset…
+    await h.controls.autoResumer!.tick(resetsAt);
+    expect(h.agent.runs).toHaveLength(1);
+
+    // …and once it is due, the task goes on in a new card under the same question.
+    await h.controls.autoResumer!.tick(resetsAt + 60_000);
+    await waitFor(() => JSON.stringify(streams[1]?.cards ?? []).includes('FINISHED_THE_REST'));
+    expect(h.agent.runs).toHaveLength(2);
+    expect(h.agent.runs[1]?.opts.prompt).toContain('[自动续跑]');
+    expect(streams[1]?.messageId).toBe('om_card_2');
+    // The paused card is updated to point at the new one.
+    const note = JSON.stringify(h.channel.updateCard.mock.calls.at(-1));
+    expect(note).toContain('om_card_1');
+    expect(note).toContain('自动继续');
+    // A run that got through clears any resume left for this chat.
+    await waitFor(() => h.controls.autoResumer?.get('oc_dm') === undefined);
+  });
+
   it('sends one dedicated final reply card after progress completes in card mode', async () => {
     const progressCards: unknown[] = [];
     const h = await createHarness({
@@ -699,13 +759,16 @@ function createFakeLarkChannel(harnessOptions: {
  * every update goes out through `this.patch()`, and the stream ends with one
  * final patch. `patch` decides what Feishu does with each card.
  */
-function sdkLikeCardStream(patch: (card: unknown) => Promise<void>): StreamFn {
+function sdkLikeCardStream(
+  patch: (card: unknown) => Promise<void>,
+  messageId = 'om_card_msg',
+): StreamFn {
   return async (_chatId, input) => {
     const producer = (input as {
       card?: { initial: unknown; producer?: (ctrl: object) => Promise<void> };
     }).card;
     const ctrl = {
-      messageId: 'om_card_msg',
+      messageId,
       current: producer?.initial,
       async update(next: unknown): Promise<void> {
         this.current = next;
@@ -745,6 +808,8 @@ function createControls(profileConfig: ReturnType<typeof createDefaultProfileCon
     configPath: '/tmp/config.json',
     cfg: profileConfig,
     processId: 'proc_test',
+    /** Late-bound by startChannel. */
+    autoResumer: undefined as AutoResumer | undefined,
   };
 }
 

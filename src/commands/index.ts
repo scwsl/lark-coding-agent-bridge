@@ -90,6 +90,7 @@ import type {
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
 import { resolveAppPaths } from '../config/app-paths';
 import { describeActiveRun } from '../bot/run-status';
+import { formatMoment, limitLabel, type AutoResumer } from '../bot/auto-resume';
 import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
 import { accessToClaudePermissionMode } from '../config/permissions';
 import {
@@ -170,6 +171,8 @@ export interface Controls {
   /** Scheduled-job engine backing `/cron`; present only while the channel is
    * connected and a profile data dir exists. Late-bound by startChannel. */
   scheduler?: Scheduler;
+  /** Late-bound like `scheduler`: quota-paused tasks waiting to resume. */
+  autoResumer?: AutoResumer;
 }
 
 export interface CommandContext {
@@ -195,6 +198,8 @@ export interface CommandContext {
   processPool?: ProcessPool;
   runExecutor?: RunExecutor;
   controls: Controls;
+  /** Quota-paused tasks waiting to resume; `/stop` cancels, `/status` shows. */
+  autoResumer?: AutoResumer;
   codexHistoryProvider?: (
     options: ListCodexThreadHistoryOptions,
   ) => Promise<CodexThreadHistoryEntry[]>;
@@ -904,6 +909,7 @@ async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveWorkspaceCwd(ctx);
   const activeHandle = ctx.activeRuns.get(ctx.scope);
+  const pendingResume = ctx.autoResumer?.get(ctx.scope);
   const sess = ctx.sessions.getRaw(ctx.scope);
   const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
   const catalogEntry =
@@ -923,6 +929,11 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     ...(await knowledgeStatusLine(ctx)),
     activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
     ...(activeHandle ? { activeRunDetail: describeActiveRun(activeHandle) } : {}),
+    ...(pendingResume
+      ? {
+          autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
+        }
+      : {}),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
     queue: ctx.processPool?.snapshot(),
@@ -970,6 +981,25 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
     }
   }
   const ok = ctx.activeRuns.interrupt(scope);
+  if (!targetScope && !ok) {
+    // Nothing running, but a quota-paused task may be waiting to resume.
+    const waiting = ctx.autoResumer?.get(scope);
+    if (waiting) {
+      const decision = canStopRun(
+        ctx.controls.profileConfig,
+        ctx.controls,
+        ctx.msg.senderId,
+        new Set([waiting.senderId]),
+      );
+      if (!decision.ok) {
+        await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以取消自动续跑。');
+        return;
+      }
+      await ctx.autoResumer?.cancel(scope, 'stop-command');
+      await reply(ctx, `已取消自动续跑（原定 ${formatMoment(waiting.resumeAt)}）。需要时发「继续」即可接着做。`);
+      return;
+    }
+  }
   log.info('command', 'stop', {
     scope,
     targeted: Boolean(targetScope),

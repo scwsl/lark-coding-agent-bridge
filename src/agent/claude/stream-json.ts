@@ -15,6 +15,13 @@ interface ContentBlock {
 interface ClaudeRawEvent {
   type?: string;
   subtype?: string;
+  /** On a synthetic assistant message: why the API call failed. */
+  error?: string;
+  rate_limit_info?: {
+    status?: string;
+    resetsAt?: number;
+    rateLimitType?: string;
+  };
   session_id?: string;
   cwd?: string;
   model?: string;
@@ -48,6 +55,31 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
       cwd: evt.cwd,
       model: evt.model,
     };
+    return;
+  }
+
+  if (evt.type === 'rate_limit_event' && evt.rate_limit_info) {
+    const info = evt.rate_limit_info;
+    yield {
+      type: 'rate_limit',
+      blocked: info.status === 'rejected',
+      ...(info.rateLimitType ? { limitType: info.rateLimitType } : {}),
+      // Claude reports epoch seconds.
+      ...(typeof info.resetsAt === 'number' ? { resetsAt: info.resetsAt * 1000 } : {}),
+      at: Date.now(),
+    };
+    return;
+  }
+
+  // Claude Code turns a quota refusal into an assistant message flagged
+  // `error: "rate_limit"` ("You've hit your limit · resets …"). It is the
+  // reason the run stopped, not part of the answer.
+  if (evt.type === 'assistant' && evt.error === 'rate_limit') {
+    const message = (evt.message?.content ?? [])
+      .map((b) => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
+      .join('')
+      .trim();
+    yield { type: 'rate_limit', blocked: true, ...(message ? { message } : {}), at: Date.now() };
     return;
   }
 

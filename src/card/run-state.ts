@@ -15,7 +15,20 @@ export type Block =
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
-export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
+/** `paused`: the plan's quota ran out mid-task (see {@link RunLimit}). */
+export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout' | 'paused';
+
+/** Why and until when a run was stopped by the subscription quota. */
+export interface RunLimit {
+  limitType?: string;
+  /** Epoch ms the quota window resets, when known. */
+  resetsAt?: number;
+  message?: string;
+  /** Epoch ms the refusal was seen. */
+  at: number;
+  /** Set by the bridge when it will resume the task on its own at this time. */
+  autoResumeAt?: number;
+}
 
 export interface RunState {
   blocks: Block[];
@@ -27,6 +40,10 @@ export interface RunState {
   /** Set when terminal === 'idle_timeout' — how long claude was idle before
    * the watchdog gave up (so the message can say "N 分钟无响应"). */
   idleTimeoutMinutes?: number;
+  /** Latest quota window the agent reported, blocking or not. */
+  quota?: { limitType?: string; resetsAt?: number };
+  /** Set once a request was refused for quota; the run ends `paused`. */
+  limit?: RunLimit;
 }
 
 export const initialState: RunState = {
@@ -45,6 +62,7 @@ function closeStreamingText(blocks: Block[]): Block[] {
 export function reduce(state: RunState, evt: AgentEvent): RunState {
   switch (evt.type) {
     case 'text': {
+      if (state.limit) state = { ...state, limit: undefined };
       const last = state.blocks[state.blocks.length - 1];
       if (last && last.kind === 'text' && last.streaming) {
         const next: Block = { ...last, content: last.content + evt.delta };
@@ -75,6 +93,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
     }
 
     case 'tool_use': {
+      if (state.limit) state = { ...state, limit: undefined };
       const tool: ToolEntry = {
         id: evt.id,
         name: evt.name,
@@ -104,6 +123,23 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       return { ...state, blocks };
     }
 
+    case 'rate_limit': {
+      const quota = {
+        limitType: evt.limitType ?? state.quota?.limitType,
+        resetsAt: evt.resetsAt ?? state.quota?.resetsAt,
+      };
+      if (!evt.blocked) return { ...state, quota };
+      // A refusal. If the agent still gets work done afterwards (a fallback
+      // model, a retry), the text/tool_use cases above clear it again.
+      const limit: RunLimit = {
+        ...(quota.limitType ? { limitType: quota.limitType } : {}),
+        ...(quota.resetsAt ? { resetsAt: quota.resetsAt } : {}),
+        ...(evt.message ?? state.limit?.message ? { message: evt.message ?? state.limit?.message } : {}),
+        at: evt.at,
+      };
+      return { ...state, quota, limit };
+    }
+
     case 'supplement': {
       // Mark where in the run the user's mid-run supplement was read, so the
       // card shows which part of the answer already accounts for it.
@@ -125,7 +161,9 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
           ? 'interrupted'
           : evt.terminationReason === 'timeout'
             ? 'idle_timeout'
-            : 'error';
+            : state.limit
+              ? 'paused'
+              : 'error';
       return {
         ...state,
         terminal,
@@ -140,7 +178,9 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
           ? 'interrupted'
           : evt.terminationReason === 'timeout'
             ? 'idle_timeout'
-            : 'done';
+            : state.limit
+              ? 'paused'
+              : 'done';
       return {
         ...state,
         blocks: closeStreamingText(state.blocks),

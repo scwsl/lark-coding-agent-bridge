@@ -1,4 +1,5 @@
 import { maskEmails } from './mask-email';
+import { pauseNotice } from './pause-notice';
 import type { Block, RunState, ToolEntry } from './run-state';
 import { toolHeaderText } from './tool-render';
 
@@ -25,6 +26,8 @@ export function renderText(state: RunState): string {
   } else if (state.terminal === 'idle_timeout') {
     const mins = state.idleTimeoutMinutes ?? 0;
     parts.push(`_⏱ ${mins} 分钟无响应,已自动终止_`);
+  } else if (state.terminal === 'paused') {
+    parts.push(pauseNotice(state.limit));
   } else if (state.terminal === 'error' && state.errorMsg) {
     parts.push(`⚠️ agent 失败:${state.errorMsg}`);
   } else if (state.terminal === 'running' && state.footer) {
