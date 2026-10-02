@@ -42,6 +42,8 @@ export interface RunState {
   idleTimeoutMinutes?: number;
   /** Latest quota window the agent reported, blocking or not. */
   quota?: { limitType?: string; resetsAt?: number };
+  /** What the newest subagent step was, while one is working (footer only). */
+  subagent?: { parentToolUseId: string; tool?: string; description?: string; at: number };
   /** Set once a request was refused for quota; the run ends `paused`. */
   limit?: RunLimit;
 }
@@ -139,6 +141,17 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       };
       return { ...state, quota, limit };
     }
+
+    case 'subagent_activity':
+      return {
+        ...state,
+        subagent: {
+          parentToolUseId: evt.parentToolUseId,
+          ...(evt.tool ? { tool: evt.tool } : {}),
+          ...(evt.description ? { description: evt.description } : {}),
+          at: evt.at,
+        },
+      };
 
     case 'supplement': {
       // Mark where in the run the user's mid-run supplement was read, so the

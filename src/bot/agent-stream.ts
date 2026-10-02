@@ -12,6 +12,9 @@ import { log, reportMetric } from '../core/logger';
 import type { RunHandle } from './active-runs';
 
 
+/** At most one `subagent-activity` log line per run this often. */
+const SUBAGENT_LOG_INTERVAL_MS = 60_000;
+
 /**
  * Drive the agent's event stream into a stateful RunState, calling `flush`
  * on every state transition. Used by both card and markdown reply modes —
@@ -60,10 +63,22 @@ export async function processAgentStream(
     }, idleTimeoutMs);
   };
   armOrPauseIdle();
+  // Subagents can work for a long time while the main agent sits in one tool
+  // call; a line now and then keeps the log (and the watchdog reading it)
+  // from mistaking that for a stuck run.
+  let lastSubagentLogAt = 0;
 
   try {
     for await (const evt of events) {
       if (handle.interrupted) break;
+
+      if (evt.type === 'subagent_activity' && evt.at - lastSubagentLogAt >= SUBAGENT_LOG_INTERVAL_MS) {
+        lastSubagentLogAt = evt.at;
+        log.info('agent', 'subagent-activity', {
+          ...(evt.tool ? { tool: evt.tool } : {}),
+          ...(evt.description ? { description: evt.description.slice(0, 80) } : {}),
+        });
+      }
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result

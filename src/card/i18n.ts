@@ -23,6 +23,8 @@ export interface RunStrings {
   toolLabel(description: string, tool: string): string;
   /** Footer label when there is no usable description: `正在调用 Bash`. */
   toolRunningNamed(tool: string): string;
+  /** A subagent's current step under the tool that started it. */
+  subagentStep(label: string, step: string): string;
   streaming: string;
   elapsed(clock: string): string;
   lastActivity(ago: string): string;
@@ -69,6 +71,7 @@ const zh: RunStrings = {
   toolRunning: '🧰 正在调用工具',
   toolLabel: (description, tool) => `${description}（${tool}）`,
   toolRunningNamed: (tool) => `正在调用 ${tool}`,
+  subagentStep: (label, step) => `${label} › 子任务：${step}`,
   streaming: '✍️ 正在输出',
   elapsed: (clock) => `已运行 ${clock}`,
   lastActivity: (ago) => `上次动静 ${ago}`,
@@ -126,6 +129,7 @@ const en: RunStrings = {
   toolRunning: '🧰 Running a tool',
   toolLabel: (description, tool) => `${description} (${tool})`,
   toolRunningNamed: (tool) => `Running ${tool}`,
+  subagentStep: (label, step) => `${label} › subtask: ${step}`,
   streaming: '✍️ Writing',
   elapsed: (clock) => `running ${clock}`,
   lastActivity: (ago) => `last activity ${ago}`,

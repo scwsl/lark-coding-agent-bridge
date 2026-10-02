@@ -14,6 +14,21 @@ export type AgentEvent =
   /** A message injected mid-run via `AgentRun.inject` was picked up by the agent. */
   | { type: 'supplement'; preview: string }
   /**
+   * A subagent (started by the main agent's Agent / Task tool) did something.
+   * Only a sign of life for the progress footer and liveness checks — its
+   * content is never shown.
+   */
+  | {
+      type: 'subagent_activity';
+      /** The main agent's tool_use that started the subagent. */
+      parentToolUseId: string;
+      /** Tool the subagent called, when this step was a tool call. */
+      tool?: string;
+      /** The subagent's own one-line description of that call. */
+      description?: string;
+      at: number;
+    }
+  /**
    * Subscription quota status. `blocked` means a request was refused because
    * the plan's quota ran out: the run can't make progress until `resetsAt`.
    * Non-blocking reports only carry the quota window's details.

@@ -46,7 +46,24 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   // result. Rendering them made one review run's card carry five full
   // subagent reports, past Feishu's card size limit (230025) — every update
   // after that was rejected and the card froze mid-run.
-  if (typeof evt.parent_tool_use_id === 'string' && evt.parent_tool_use_id) return;
+  // What it is doing still matters, though: a subagent can work for half an
+  // hour while the main agent just waits, and without a sign of life the run
+  // looks stuck. So only its activity comes through, never its content.
+  if (typeof evt.parent_tool_use_id === 'string' && evt.parent_tool_use_id) {
+    if (evt.type !== 'assistant') return;
+    const tool = evt.message?.content?.find((b) => b.type === 'tool_use' && b.name);
+    const description = (tool?.input as { description?: unknown } | undefined)?.description;
+    yield {
+      type: 'subagent_activity',
+      parentToolUseId: evt.parent_tool_use_id,
+      ...(tool?.name ? { tool: tool.name } : {}),
+      ...(typeof description === 'string' && description.trim()
+        ? { description: description.trim() }
+        : {}),
+      at: Date.now(),
+    };
+    return;
+  }
 
   if (evt.type === 'system' && evt.subtype === 'init') {
     yield {

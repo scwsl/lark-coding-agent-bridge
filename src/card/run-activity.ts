@@ -21,12 +21,29 @@ export function runningToolLabel(state: RunState, locale: Locale = 'zh'): string
     if (block.kind === 'tool' && block.tool.status === 'running') latest = block.tool;
   }
   if (!latest) return undefined;
-  const description = toolDescription(latest.input);
   const t = runStrings(locale);
-  if (description && (locale !== 'zh' || detectLocale([description]) === 'zh')) {
-    return t.toolLabel(description, latest.name);
-  }
-  return t.toolRunningNamed(latest.name);
+  const description = toolDescription(latest.input);
+  const label =
+    description && inLocale(description, locale)
+      ? t.toolLabel(description, latest.name)
+      : t.toolRunningNamed(latest.name);
+  // A subagent working under this tool: say what it is doing right now.
+  const sub = state.subagent;
+  if (!sub || sub.parentToolUseId !== latest.id) return label;
+  const subDescription = sub.description ? oneLine(sub.description) : undefined;
+  if (subDescription && inLocale(subDescription, locale)) return t.subagentStep(label, subDescription);
+  return sub.tool ? t.subagentStep(label, t.toolRunningNamed(sub.tool)) : label;
+}
+
+/** The agent writes descriptions in the caller's language — when it doesn't, hide them. */
+function inLocale(text: string, locale: Locale): boolean {
+  return locale !== 'zh' || detectLocale([text]) === 'zh';
+}
+
+function oneLine(raw: string): string | undefined {
+  const line = raw.replace(/\s+/g, ' ').trim();
+  if (!line) return undefined;
+  return line.length > LABEL_MAX ? `${line.slice(0, LABEL_MAX)}…` : line;
 }
 
 function toolDescription(input: unknown): string | undefined {

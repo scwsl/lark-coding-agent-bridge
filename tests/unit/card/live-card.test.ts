@@ -85,6 +85,47 @@ describe('runningToolLabel', () => {
   });
 });
 
+describe('subagent progress in the footer', () => {
+  const agentRun = (step: AgentEvent): RunState =>
+    stateFrom([
+      { type: 'tool_use', id: 'agent-1', name: 'Agent', input: { description: '升级依赖', prompt: 'x' } },
+      step,
+    ]);
+
+  it('shows what the subagent is doing under the tool that started it', () => {
+    const state = agentRun({
+      type: 'subagent_activity',
+      parentToolUseId: 'agent-1',
+      tool: 'Bash',
+      description: '运行全量构建',
+      at: 1,
+    });
+    expect(state.blocks).toHaveLength(1);
+    expect(runningToolLabel(state)).toBe('升级依赖（Agent） › 子任务：运行全量构建');
+  });
+
+  it('falls back to the tool name when the step description is in the wrong language', () => {
+    const state = agentRun({
+      type: 'subagent_activity',
+      parentToolUseId: 'agent-1',
+      tool: 'Bash',
+      description: 'Run the full build',
+      at: 1,
+    });
+    expect(runningToolLabel(state)).toBe('升级依赖（Agent） › 子任务：正在调用 Bash');
+  });
+
+  it('ignores activity from a subagent whose tool already returned', () => {
+    const state = stateFrom([
+      { type: 'tool_use', id: 'agent-1', name: 'Agent', input: { description: '升级依赖' } },
+      { type: 'subagent_activity', parentToolUseId: 'agent-1', tool: 'Bash', description: '构建', at: 1 },
+      { type: 'tool_result', id: 'agent-1', output: 'done', isError: false },
+      { type: 'tool_use', id: 't2', name: 'Bash', input: { description: '提交代码' } },
+    ]);
+    expect(runningToolLabel(state)).toBe('提交代码（Bash）');
+  });
+});
+
 describe('stop button', () => {
   it('asks for confirmation before stopping', () => {
     const text = cardText(renderCard(initialState));
