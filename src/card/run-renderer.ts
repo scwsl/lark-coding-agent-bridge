@@ -34,7 +34,26 @@ export interface RunCardMeta {
 export interface RunCardRenderOptions {
   signCallback?: (action: string) => string;
   meta?: RunCardMeta;
+  /** Live clock for the running footer. See {@link RunActivity}. */
+  activity?: RunActivity;
 }
+
+/**
+ * How long the run has been going and how long since the agent last did
+ * anything. The bridge re-renders the card with a fresh one on a timer, so a
+ * footer that keeps ticking proves the bridge and the card are alive even
+ * while the agent is quiet inside a long tool call — and a frozen one means
+ * they are not.
+ */
+export interface RunActivity {
+  elapsedMs: number;
+  idleMs: number;
+  /** What the in-flight tool is doing, e.g. `查 bridge 日志（Bash）`. */
+  toolLabel?: string;
+}
+
+/** Quiet this long and the footer turns into a warning. */
+export const STALL_WARN_MS = 3 * 60_000;
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
   const elements: object[] = [];
@@ -65,7 +84,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   if (state.terminal === 'running') {
-    if (state.footer) elements.push(footerStatus(state.footer));
+    if (state.footer) elements.push(footerStatus(state.footer, options.activity));
     elements.push(stopButton(options));
   } else {
     elements.push(...byline(options.meta));
@@ -240,18 +259,48 @@ function stopButton(options: RunCardRenderOptions): object {
     tag: 'button',
     text: { tag: 'plain_text', content: '⏹ 终止' },
     type: 'danger',
+    // Feishu asks for confirmation before the click is sent: a stop kills the
+    // agent and every command it started, and can't be undone.
+    confirm: {
+      title: { tag: 'plain_text', content: '终止这个任务？' },
+      text: { tag: 'plain_text', content: '任务和它启动的命令都会被结束，无法恢复。' },
+    },
     behaviors: [{ type: 'callback', value }],
   };
 }
 
-function footerStatus(status: Exclude<FooterStatus, null>): object {
-  const text =
+function footerStatus(status: Exclude<FooterStatus, null>, activity?: RunActivity): object {
+  const base =
     status === 'thinking'
       ? '🧠 正在思考'
       : status === 'tool_running'
-        ? '🧰 正在调用工具'
+        ? activity?.toolLabel
+          ? `🧰 ${activity.toolLabel}`
+          : '🧰 正在调用工具'
         : '✍️ 正在输出';
-  return noteMd(text);
+  if (!activity) return noteMd(base);
+  const clock = `已运行 ${formatClock(activity.elapsedMs)}`;
+  if (activity.idleMs >= STALL_WARN_MS) {
+    const mins = Math.floor(activity.idleMs / 60_000);
+    return noteMd(`⚠️ ${base} · ${clock} · 已 ${mins} 分钟没有新动静`);
+  }
+  return noteMd(`${base} · ${clock} · 上次动静 ${formatAgo(activity.idleMs)}`);
+}
+
+/** `6:12`, `1:02:03`. */
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+/** `8 秒前`, `2 分钟前`. */
+export function formatAgo(ms: number): string {
+  const secs = Math.max(0, Math.floor(ms / 1000));
+  if (secs < 60) return `${secs} 秒前`;
+  return `${Math.floor(secs / 60)} 分钟前`;
 }
 
 function summaryText(state: RunState): string {

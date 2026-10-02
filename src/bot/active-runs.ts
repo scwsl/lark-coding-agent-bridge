@@ -21,6 +21,11 @@ export interface RunHandle {
   /** When the run was registered — the in-memory fallback for elapsed-time
    * display when no durable RunRecord exists (e.g. comment runs). */
   startedAt: number;
+  /** Last time the agent produced an event — drives the card's live clock
+   * and `/status`. Starts at `startedAt`. */
+  lastActivityAt: number;
+  /** What the in-flight tool is doing, while one is running. */
+  toolLabel?: string;
 }
 
 export class ActiveRuns {
@@ -45,7 +50,7 @@ export class ActiveRuns {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle: RunHandle = { run, interrupted: false, startedAt };
+    const handle: RunHandle = { run, interrupted: false, startedAt, lastActivityAt: startedAt };
     this.handles.set(chatId, handle);
     return handle;
   }

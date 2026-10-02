@@ -61,6 +61,18 @@ export type CallbackVerifyResult =
 
 const PREFIX = 'bridge_cb.v1';
 
+/**
+ * Operator placeholder for buttons anyone may click, whose permission is
+ * decided by policy at click time instead (the stop button: see canStopRun).
+ * The token then only proves the bridge rendered the button for this run.
+ */
+export const ANY_OPERATOR = '*';
+
+/** Actions signed for {@link ANY_OPERATOR} rather than one person. */
+export function operatorForAction(action: string, operatorOpenId: string): string {
+  return action === 'stop' ? ANY_OPERATOR : operatorOpenId;
+}
+
 export class CallbackAuth {
   private readonly keys: CallbackKey[];
   private readonly nonceStore: CallbackNonceStore;

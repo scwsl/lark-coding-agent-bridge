@@ -9,6 +9,7 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
+import { isAlive, listDescendants, signalAll } from '../process-tree';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
   type AgentAdapter,
@@ -155,6 +156,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     return {
       runId: opts.runId,
+      pid: child.pid,
       events: createEventStream(child, stderrChunks, () => runtimeError, input),
       inject(prompt: string, preview: string): boolean {
         const ok = input.write(prompt, preview);
@@ -166,21 +168,39 @@ export class ClaudeAdapter implements AgentAdapter {
       },
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
-        log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
+        // Take the whole tree down, not just claude: a stop has to end the
+        // commands it started too (see listDescendants).
+        const descendants = child.pid ? listDescendants(child.pid) : [];
+        log.info('agent', 'stop-sigterm', {
+          pid: child.pid ?? null,
+          graceMs: stopGraceMs,
+          descendants: descendants.length,
+        });
         child.kill('SIGTERM');
+        signalAll(descendants, 'SIGTERM');
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
+            const survivors = descendants.filter(isAlive);
             if (child.exitCode === null && child.signalCode === null) {
+              // Anything spawned during the grace window is still attached.
+              if (child.pid) survivors.push(...listDescendants(child.pid));
               log.warn('agent', 'stop-sigkill', {
                 pid: child.pid ?? null,
                 graceMs: stopGraceMs,
                 reason: 'grace-period-expired',
+                descendants: survivors.length,
               });
               child.kill('SIGKILL');
+            } else if (survivors.length > 0) {
+              log.warn('agent', 'stop-sigkill-descendants', { count: survivors.length });
             }
+            signalAll(survivors, 'SIGKILL');
             resolve();
           }, stopGraceMs);
           child.once('exit', () => {
+            // claude is gone, but a child that ignored SIGTERM may not be:
+            // then let the timer above force it once the grace window ends.
+            if (descendants.some(isAlive)) return;
             clearTimeout(timer);
             resolve();
           });

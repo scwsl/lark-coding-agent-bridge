@@ -23,10 +23,12 @@ import {
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
-import { CallbackAuth } from '../card/callback-auth';
+import { CallbackAuth, operatorForAction } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
+import { fitCardToBudget, fullText } from '../card/card-budget';
+import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
-import type { RunCardRenderOptions } from '../card/run-renderer';
+import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
 import { initialState, stripNoReply, type RunState, type Terminal } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
@@ -56,7 +58,8 @@ import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
-import { ActiveRuns } from './active-runs';
+import { ActiveRuns, type RunHandle } from './active-runs';
+import { CardPatchHealth, instrumentCardPatches, larkErrorCode } from './card-patch-health';
 import { processAgentStream } from './agent-stream';
 import { createRunsMonitor } from './runs-monitor';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -1299,7 +1302,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               runId: execution.runId,
               scope,
               chatId,
-              operatorOpenId: firstMsg.senderId,
+              operatorOpenId: operatorForAction(action, firstMsg.senderId),
               action,
               policyFingerprint: flow.policy.policyFingerprint,
               ttlMs: 24 * 60 * 60 * 1000,
@@ -1385,6 +1388,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
         | undefined;
+      let cardMessageId: string | undefined;
+      // Whether the last card rendered had to cut the answer to fit.
+      let cardTrimmed = false;
+      const cardHealth = new CardPatchHealth((code) => {
+        void channel
+          .send(chatId, { markdown: cardBrokenNotice(code) }, sendOpts)
+          .catch((err) => log.fail('stream', err, { step: 'card-broken-notice' }));
+      });
+      // The card as the user should see it now: live clock while running,
+      // shrunk to fit Feishu's size limit (see fitCardToBudget).
+      const renderLiveCard = (state: RunState): object => {
+        const running = state.terminal === 'running';
+        const options: RunCardRenderOptions = running
+          ? { ...cardRenderOptions, activity: runActivity(handle, state) }
+          : cardRenderOptions;
+        const fitted = fitCardToBudget(filterForPrefs(state), (s) => renderCard(s, options));
+        cardTrimmed = fitted.trimmed;
+        return fitted.card;
+      };
       const progress = createLazyProgressStream(scope, replyMode, () =>
         channel.stream(
           chatId,
@@ -1395,8 +1417,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 producerStarted = true;
                 if (progress.abandoned()) return;
                 cardCtrl = ctrl;
+                cardMessageId = ctrl.messageId;
+                instrumentCardPatches(ctrl, cardHealth);
                 supplementTarget.replyIds.add(ctrl.messageId);
-                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+                await ctrl.update(renderLiveCard(latestState));
                 await renderDone;
               },
             },
@@ -1414,11 +1438,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           latestState = state;
           if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
           if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+            await cardCtrl.update(renderLiveCard(state));
           }
         },
       );
       if (opensProgressEagerly(controls.profileConfig.agentKind)) progress.ensureOpen();
+      // Keep the clock ticking while the agent is quiet. Only touches a card
+      // that is still running, so it can never overwrite the final one.
+      const heartbeat = setInterval(() => {
+        if (cardCtrl && latestState.terminal === 'running') {
+          void cardCtrl.update(renderLiveCard(latestState));
+        }
+      }, CARD_HEARTBEAT_MS);
+      heartbeat.unref?.();
       try {
         await awaitRenderAwareStream({
           mode: replyMode,
@@ -1428,16 +1460,27 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           fallback: async (state) => {
             if (controls.profileConfig.agentKind === 'codex') return;
             if (renderText(filterForPrefs(state)).trim() === '') return;
-            await channel.send(
-              chatId,
-              { card: renderCard(filterForPrefs(state), cardRenderOptions) },
-              sendOpts,
+            const fitted = fitCardToBudget(filterForPrefs(state), (s) =>
+              renderCard(s, cardRenderOptions),
             );
+            await channel.send(chatId, { card: fitted.card }, sendOpts);
+            if (fitted.trimmed) {
+              await deliverAnswerOutsideCard({
+                channel,
+                chatId,
+                scope,
+                sendOpts,
+                reason: 'too-long',
+                state: filterForPrefs(state),
+              });
+            }
           },
         });
       } catch (err) {
         if (controls.profileConfig.agentKind !== 'codex') throw err;
         log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
+      } finally {
+        clearInterval(heartbeat);
       }
       await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
       if (controls.profileConfig.agentKind === 'codex') {
@@ -1450,6 +1493,30 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
         });
+      } else if (progress.opened() && !progress.abandoned()) {
+        // The card is the reply. If it doesn't hold the whole answer — its
+        // last update was rejected, or the answer outgrew it — post the
+        // answer as ordinary messages so it is never lost.
+        const reason = cardHealth.lastFailed ? 'card-broken' : cardTrimmed ? 'too-long' : undefined;
+        if (reason) {
+          await deliverAnswerOutsideCard({
+            channel,
+            chatId,
+            scope,
+            sendOpts,
+            reason,
+            state: filterForPrefs(latestState),
+            ...(reason === 'card-broken' && cardMessageId
+              ? {
+                  messageId: cardMessageId,
+                  pointerCard: renderCard(
+                    pointerState(latestState, cardHealth.lastErrorCode),
+                    cardRenderOptions,
+                  ),
+                }
+              : {}),
+          });
+        }
       }
       runTerminal = latestState.terminal;
     } else if (replyMode === 'markdown') {
@@ -1551,6 +1618,74 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
     if (runTerminal === 'done') void addDoneReaction(channel, lastMsg.messageId);
+  }
+}
+
+/** How often a running card re-renders its clock when nothing else changes. */
+const CARD_HEARTBEAT_MS = 15_000;
+
+function runActivity(handle: RunHandle, state: RunState): RunActivity {
+  const now = Date.now();
+  const toolLabel = runningToolLabel(state);
+  return {
+    elapsedMs: now - handle.startedAt,
+    idleMs: now - handle.lastActivityAt,
+    ...(toolLabel ? { toolLabel } : {}),
+  };
+}
+
+function cardBrokenNotice(code: number | undefined): string {
+  return (
+    `⚠️ 进度卡片更新不了了（飞书错误 ${code ?? '未知'}），任务还在继续。` +
+    '卡片恢复不了的话，结束后结果会另发一条消息。'
+  );
+}
+
+/** The finished card, reduced to a pointer at the message that carries the answer. */
+function pointerState(state: RunState, code: number | undefined): RunState {
+  return {
+    ...state,
+    reasoning: { content: '', active: false },
+    footer: null,
+    blocks: [
+      {
+        kind: 'text',
+        content: `_卡片更新失败（飞书错误 ${code ?? '未知'}），完整回复见下一条消息。_`,
+        streaming: false,
+      },
+    ],
+  };
+}
+
+async function deliverAnswerOutsideCard(input: {
+  channel: LarkChannel;
+  chatId: string;
+  scope: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  reason: 'card-broken' | 'too-long';
+  state: RunState;
+  messageId?: string;
+  pointerCard?: object;
+}): Promise<void> {
+  const { channel, chatId, scope, reason } = input;
+  if (input.messageId && input.pointerCard) {
+    try {
+      await channel.updateCard(input.messageId, input.pointerCard);
+    } catch (err) {
+      log.warn('stream', 'pointer-card-failed', {
+        scope,
+        code: larkErrorCode(err) ?? null,
+      });
+    }
+  }
+  const text = fullText(input.state);
+  log.info('outbound', 'answer-outside-card', { scope, reason, chars: text.length });
+  if (!text) return;
+  try {
+    // The SDK splits long markdown across several messages.
+    await channel.send(chatId, { markdown: text }, input.sendOpts);
+  } catch (err) {
+    log.fail('stream', err, { step: 'answer-outside-card', reason });
   }
 }
 

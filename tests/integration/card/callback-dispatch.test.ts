@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
-import { CallbackAuth } from '../../../src/card/callback-auth.js';
+import { CallbackAuth, operatorForAction } from '../../../src/card/callback-auth.js';
 import { CallbackNonceStore } from '../../../src/card/callback-store.js';
 import { handleCardAction } from '../../../src/card/dispatcher.js';
 import type { Controls } from '../../../src/commands/index.js';
@@ -21,28 +21,62 @@ describe('signed card callback dispatch', () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
-  it('runs built-in command callbacks only when the bridge token verifies', async () => {
+  it('lets the run initiator stop it from the card', async () => {
     const h = await createHarness();
-    const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
-    h.activeRuns.register('oc_group', activeRun);
+    const run = registerRun(h, ['ou_operator']);
+
+    await h.dispatch({ cmd: 'stop', __bridge_cb: true, bridge_token: h.token('stop') });
+
+    expect(run.stopped).toBe(true);
+  });
+
+  it('refuses a stop from someone else in the group, without spending the button', async () => {
+    const h = await createHarness();
+    const run = registerRun(h, ['ou_initiator']);
+    const token = h.token('stop');
+
+    await h.dispatch({ cmd: 'stop', __bridge_cb: true, bridge_token: token }, undefined, 'ou_bystander');
+
+    expect(run.stopped).toBe(false);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('只有任务的发起人');
+
+    // The refused click must not have used up the token: the initiator's
+    // click on the same button still works.
+    await h.dispatch({ cmd: 'stop', __bridge_cb: true, bridge_token: token }, undefined, 'ou_initiator');
+    expect(run.stopped).toBe(true);
+  });
+
+  it('lets the owner and the stoppers allowlist stop anyone\'s run', async () => {
+    const owner = await createHarness();
+    const ownerRun = registerRun(owner, ['ou_initiator']);
+    await owner.dispatch(
+      { cmd: 'stop', __bridge_cb: true, bridge_token: owner.token('stop') },
+      undefined,
+      'ou_owner',
+    );
+    expect(ownerRun.stopped).toBe(true);
+
+    const guarded = await createHarness({ stoppers: ['ou_guard'] });
+    const guardedRun = registerRun(guarded, ['ou_initiator']);
+    await guarded.dispatch(
+      { cmd: 'stop', __bridge_cb: true, bridge_token: guarded.token('stop') },
+      undefined,
+      'ou_guard',
+    );
+    expect(guardedRun.stopped).toBe(true);
+  });
+
+  it('still requires a valid bridge token from people allowed to stop', async () => {
+    const h = await createHarness();
+    const run = registerRun(h, ['ou_operator']);
 
     await h.dispatch({
       cmd: 'stop',
       __bridge_cb: true,
-      bridge_token: h.token('stop'),
+      bridge_token: h.token('stop', { scope: 'oc_elsewhere' }),
     });
 
-    expect(activeRun.stopped).toBe(true);
-
-    const deniedRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
-    h.activeRuns.register('oc_group', deniedRun);
-    await h.dispatch({
-      cmd: 'stop',
-      __bridge_cb: true,
-      bridge_token: h.token('stop', { operatorOpenId: 'ou_other' }),
-    });
-
-    expect(deniedRun.stopped).toBe(false);
+    expect(run.stopped).toBe(false);
   });
 
   it('forwards signed bridge callbacks without leaking auth fields into the agent payload', async () => {
@@ -125,7 +159,11 @@ type Harness = {
   controls: Controls;
   pending: PendingQueue;
   auth: CallbackAuth;
-  dispatch(value: Record<string, unknown>, formValue?: Record<string, unknown>): Promise<void>;
+  dispatch(
+    value: Record<string, unknown>,
+    formValue?: Record<string, unknown>,
+    operatorOpenId?: string,
+  ): Promise<void>;
   token(
     action: string,
     overrides?: { operatorOpenId?: string; nonce?: string; scope?: string },
@@ -133,8 +171,16 @@ type Harness = {
 };
 
 async function createHarness(
-  opts: { callbackAuth?: boolean; chatMode?: 'p2p' | 'group' | 'topic' } = {},
+  opts: {
+    callbackAuth?: boolean;
+    chatMode?: 'p2p' | 'group' | 'topic';
+    stoppers?: string[];
+  } = {},
 ): Promise<Harness> {
+  const access = {
+    allowedChats: ['oc_group'],
+    ...(opts.stoppers ? { stoppers: opts.stoppers } : {}),
+  };
   const tmp = await createTmpProfile('callback-dispatch-test-');
   const channel = createFakeChannel();
   const sessions = new SessionStore(`${tmp.profile}/sessions.json`);
@@ -148,7 +194,7 @@ async function createHarness(
     profileConfig: createDefaultProfileConfig({
       agentKind: 'claude',
       accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
-      access: { allowedChats: ['oc_group'] },
+      access,
     }),
     botOwnerId: 'ou_owner',
     ownerRefreshState: 'ok',
@@ -159,7 +205,7 @@ async function createHarness(
     cfg: createDefaultProfileConfig({
       agentKind: 'claude',
       accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
-      access: { allowedChats: ['oc_group'] },
+      access,
     }),
     processId: 'proc-1',
   } satisfies Controls;
@@ -195,16 +241,16 @@ async function createHarness(
         runId: 'run-active',
         scope: overrides.scope ?? 'oc_group',
         chatId: 'oc_group',
-        operatorOpenId: overrides.operatorOpenId ?? 'ou_operator',
+        operatorOpenId: operatorForAction(action, overrides.operatorOpenId ?? 'ou_operator'),
         action,
         policyFingerprint: 'fp-1',
         ttlMs: 60_000,
       });
     },
-    dispatch: (value, formValue) =>
+    dispatch: (value, formValue, operatorOpenId) =>
       handleCardAction({
         channel: channel as unknown as Parameters<typeof handleCardAction>[0]['channel'],
-        evt: cardEvent(value, formValue),
+        evt: cardEvent(value, formValue, operatorOpenId),
         sessions,
         workspaces,
         activeRuns,
@@ -218,16 +264,29 @@ async function createHarness(
   };
 }
 
+/** Register a running scope whose run was started by `initiators`. */
+function registerRun(h: Harness, initiators: string[]): FakeAgentRun {
+  const run = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
+  const handle = h.activeRuns.register('oc_group', run);
+  handle.supplement = {
+    originIds: new Set(),
+    replyIds: new Set(),
+    initiators: new Set(initiators),
+  };
+  return run;
+}
+
 function cardEvent(
   value: Record<string, unknown>,
   formValue?: Record<string, unknown>,
+  operatorOpenId = 'ou_operator',
 ): CardActionEvent {
   return {
     action: { value },
     chatId: 'oc_group',
     messageId: 'om_card',
     operator: {
-      openId: 'ou_operator',
+      openId: operatorOpenId,
       name: 'Operator',
     },
     raw: formValue ? { action: { form_value: formValue } } : undefined,

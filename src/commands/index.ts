@@ -88,9 +88,11 @@ import type {
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
 import { resolveAppPaths } from '../config/app-paths';
+import { describeActiveRun } from '../bot/run-status';
 import { accessToClaudePermissionMode } from '../config/permissions';
 import {
   canRunAdminCommand,
+  canStopRun,
   canUseDm,
   canUseGroup,
   type OwnerRefreshState,
@@ -896,6 +898,7 @@ async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' 
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveWorkspaceCwd(ctx);
+  const activeHandle = ctx.activeRuns.get(ctx.scope);
   const sess = ctx.sessions.getRaw(ctx.scope);
   const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
   const catalogEntry =
@@ -914,6 +917,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     ...(await gitStatusLine(cwd)),
     ...(await knowledgeStatusLine(ctx)),
     activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
+    ...(activeHandle ? { activeRunDetail: describeActiveRun(activeHandle) } : {}),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
     queue: ctx.processPool?.snapshot(),
@@ -940,6 +944,26 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const scope = targetScope || ctx.scope;
+  if (!targetScope) {
+    const running = ctx.activeRuns.get(scope);
+    const decision = running
+      ? canStopRun(
+          ctx.controls.profileConfig,
+          ctx.controls,
+          ctx.msg.senderId,
+          running.supplement?.initiators,
+        )
+      : undefined;
+    if (decision && !decision.ok) {
+      log.info('command', 'stop-deny', {
+        scope,
+        sender: ctx.msg.senderId.slice(-6),
+        via: ctx.fromCardAction ? 'card' : 'command',
+      });
+      await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以终止这个任务。');
+      return;
+    }
+  }
   const ok = ctx.activeRuns.interrupt(scope);
   log.info('command', 'stop', {
     scope,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   accessPolicyDigest,
   canRunAdminCommand,
+  canStopRun,
   canUseDm,
   canUseGroup,
   isCreator,
@@ -15,6 +16,27 @@ const ownerControls: RuntimeControls = {
   botOwnerId: 'ou_owner',
   ownerRefreshState: 'ok',
 };
+
+describe('canStopRun', () => {
+  const initiators = new Set(['ou_starter']);
+
+  it('allows the owner, admins, the run initiators, and the stoppers list', () => {
+    const profile = profileWithAccess({ admins: ['ou_admin'], stoppers: ['ou_guard'] });
+    expect(canStopRun(profile, ownerControls, 'ou_owner', initiators)).toEqual({ ok: true, reason: 'owner' });
+    expect(canStopRun(profile, ownerControls, 'ou_admin', initiators).reason).toBe('allowed-admin');
+    expect(canStopRun(profile, ownerControls, 'ou_starter', initiators).reason).toBe('run-initiator');
+    expect(canStopRun(profile, ownerControls, 'ou_guard', initiators).reason).toBe('allowed-stopper');
+  });
+
+  it('refuses everyone else, including when the run has no known initiator', () => {
+    const profile = profileWithAccess({ stoppers: ['ou_guard'] });
+    expect(canStopRun(profile, ownerControls, 'ou_bystander', initiators)).toEqual({
+      ok: false,
+      reason: 'denied-stop',
+    });
+    expect(canStopRun(profile, ownerControls, 'ou_starter', undefined).ok).toBe(false);
+  });
+});
 
 describe('access policy', () => {
   it('lets the runtime owner use DMs, groups, and admin commands regardless of lists', () => {

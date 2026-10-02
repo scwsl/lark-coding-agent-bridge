@@ -59,6 +59,8 @@ export interface AgentRunOptions {
 export interface AgentRun {
   readonly runId: string;
   readonly events: AsyncIterable<AgentEvent>;
+  /** OS pid of the agent process, for `/status`. Absent when not spawned. */
+  readonly pid?: number;
   stop(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

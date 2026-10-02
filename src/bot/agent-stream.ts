@@ -7,6 +7,7 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
+import { runningToolLabel } from '../card/run-activity';
 import { log, reportMetric } from '../core/logger';
 import type { RunHandle } from './active-runs';
 
@@ -101,6 +102,8 @@ export async function processAgentStream(
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
+      handle.lastActivityAt = Date.now();
+      handle.toolLabel = runningToolLabel(state);
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }

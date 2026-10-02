@@ -21,10 +21,13 @@ export interface AccessDecision {
     | 'allowed-chat'
     | 'allowed-chat-user'
     | 'comment-mention'
+    | 'run-initiator'
+    | 'allowed-stopper'
     | 'denied-user'
     | 'denied-chat'
     | 'denied-chat-user'
-    | 'denied-admin';
+    | 'denied-admin'
+    | 'denied-stop';
 }
 
 export function isCreator(controls: RuntimeControls, senderId: string): boolean {
@@ -88,6 +91,24 @@ export function canRunAdminCommand(
   if (isCreator(controls, senderId)) return allow('owner');
   if (profile.access.admins.includes(senderId)) return allow('allowed-admin');
   return deny('denied-admin');
+}
+
+/**
+ * Who may stop a run: the owner, admins, the people whose messages started it,
+ * and the `access.stoppers` list. Everyone else in an allowed group can talk
+ * to the bot but not cancel someone else's task.
+ */
+export function canStopRun(
+  profile: ProfileConfig,
+  controls: RuntimeControls,
+  senderId: string,
+  initiators: ReadonlySet<string> | undefined,
+): AccessDecision {
+  const admin = canRunAdminCommand(profile, controls, senderId);
+  if (admin.ok) return admin;
+  if (initiators?.has(senderId)) return allow('run-initiator');
+  if (profile.access.stoppers?.includes(senderId)) return allow('allowed-stopper');
+  return deny('denied-stop');
 }
 
 function allow(reason: AccessDecision['reason']): AccessDecision {

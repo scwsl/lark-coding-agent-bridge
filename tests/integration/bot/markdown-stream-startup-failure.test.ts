@@ -65,6 +65,7 @@ interface FakeLarkChannel {
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
   send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
+  updateCard: ReturnType<typeof vi.fn>;
   addReaction(messageId: string, emojiType: string): Promise<string>;
   removeReaction(messageId: string, reactionId: string): Promise<void>;
 }
@@ -425,6 +426,62 @@ describe('markdown stream startup failures', () => {
     ).toBe(false);
   });
 
+  it('posts the answer as a message when Feishu keeps rejecting the card', async () => {
+    const h = await createHarness({
+      agentKind: 'claude',
+      messageReply: 'card',
+      events: [
+        { type: 'text', delta: 'ANSWER_SENTINEL' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      stream: sdkLikeCardStream(async () => {
+        throw Object.assign(new Error('Request failed with status code 400'), {
+          response: { data: { code: 230099 } },
+        });
+      }),
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_card_broken', 'run'));
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('ANSWER_SENTINEL'));
+
+    const sent = h.channel.sent.map((m) => JSON.stringify(m.content));
+    // The user is told the card is stuck while the run goes on…
+    expect(sent.some((m) => m.includes('进度卡片更新不了了') && m.includes('230099'))).toBe(true);
+    // …and the answer arrives as an ordinary message instead of being lost.
+    expect(lastMarkdown(h.channel)).toBe('ANSWER_SENTINEL');
+    // The frozen card is turned into a pointer at that message.
+    const pointer = JSON.stringify(h.channel.updateCard.mock.calls.at(-1));
+    expect(pointer).toContain('om_card_msg');
+    expect(pointer).toContain('完整回复见下一条消息');
+  });
+
+  it('sends the full answer separately when it outgrows the card', async () => {
+    const cards: unknown[] = [];
+    const long = `${'很长的分析内容。'.repeat(2500)}END_SENTINEL`;
+    const h = await createHarness({
+      agentKind: 'claude',
+      messageReply: 'card',
+      events: [
+        { type: 'text', delta: long },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      stream: sdkLikeCardStream(async (card) => {
+        cards.push(card);
+      }),
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_card_long', 'run'));
+    await waitFor(() => h.channel.sent.length > 0);
+
+    const finalCard = cards.at(-1) as object;
+    expect(Buffer.byteLength(JSON.stringify(finalCard))).toBeLessThanOrEqual(24_000);
+    expect(JSON.stringify(finalCard)).toContain('完整内容见下一条消息');
+    expect(lastMarkdown(h.channel)).toBe(long);
+    expect(h.channel.updateCard).not.toHaveBeenCalled();
+  });
+
   it('sends one dedicated final reply card after progress completes in card mode', async () => {
     const progressCards: unknown[] = [];
     const h = await createHarness({
@@ -620,6 +677,7 @@ function createFakeLarkChannel(harnessOptions: {
     stream: harnessOptions.stream ?? (async () => {
       await new Promise<void>(() => {});
     }),
+    updateCard: vi.fn(async () => {}),
     async addReaction(messageId, emojiType) {
       const r = await channel.rawClient.im.v1.messageReaction.create({
         path: { message_id: messageId },
@@ -634,6 +692,32 @@ function createFakeLarkChannel(harnessOptions: {
     },
   };
   return channel;
+}
+
+/**
+ * A card stream shaped like the SDK's: the producer gets the controller itself,
+ * every update goes out through `this.patch()`, and the stream ends with one
+ * final patch. `patch` decides what Feishu does with each card.
+ */
+function sdkLikeCardStream(patch: (card: unknown) => Promise<void>): StreamFn {
+  return async (_chatId, input) => {
+    const producer = (input as {
+      card?: { initial: unknown; producer?: (ctrl: object) => Promise<void> };
+    }).card;
+    const ctrl = {
+      messageId: 'om_card_msg',
+      current: producer?.initial,
+      async update(next: unknown): Promise<void> {
+        this.current = next;
+        await this.patch();
+      },
+      async patch(): Promise<void> {
+        await patch(this.current);
+      },
+    };
+    await producer?.producer?.(ctrl);
+    await ctrl.patch();
+  };
 }
 
 function deferred<T>(): {

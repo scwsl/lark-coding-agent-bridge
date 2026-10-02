@@ -78,6 +78,8 @@ export interface StatusInfo {
   /** One-line knowledge summary (memory counts, skills, sync state). */
   knowledge?: string;
   activeRun: boolean;
+  /** What this scope's run is doing right now, when one is running. */
+  activeRunDetail?: string;
   activeScopes?: string[];
   activeCommentScopes?: string[];
   queue?: { active: number; waiting: number; cap: number };
@@ -112,7 +114,7 @@ export function statusCard(info: StatusInfo): object {
     `🤖 **agent**: ${escapeMd(info.agentName)}`,
     `🛡 **${escapeMd(info.runtimeAccess.label)}**: ${escapeMd(info.runtimeAccess.value)}`,
     ...(info.larkCliStatus ? [`🔐 **lark-cli**: ${info.larkCliStatus}`] : []),
-    `🏃 **active run**: ${info.activeRun ? 'yes' : 'no'}`,
+    `🏃 **active run**: ${info.activeRun ? (info.activeRunDetail ? escapeMd(info.activeRunDetail) : 'yes') : 'no'}`,
     ...(info.activeScopes && info.activeScopes.length > 0
       ? [
           `🏃 **active scopes**: ${info.activeScopes.map((scope) => `\`${escapeCode(scope)}\``).join(', ')}`,

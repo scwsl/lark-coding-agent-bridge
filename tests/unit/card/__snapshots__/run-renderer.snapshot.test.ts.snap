@@ -83,6 +83,16 @@ _运行中…_",
             },
           },
         ],
+        "confirm": {
+          "text": {
+            "content": "任务和它启动的命令都会被结束，无法恢复。",
+            "tag": "plain_text",
+          },
+          "title": {
+            "content": "终止这个任务？",
+            "tag": "plain_text",
+          },
+        },
         "tag": "button",
         "text": {
           "content": "⏹ 终止",
@@ -202,6 +212,16 @@ exports[`run card renderer snapshots > renders active and completed thinking 1`]
             },
           },
         ],
+        "confirm": {
+          "text": {
+            "content": "任务和它启动的命令都会被结束，无法恢复。",
+            "tag": "plain_text",
+          },
+          "title": {
+            "content": "终止这个任务？",
+            "tag": "plain_text",
+          },
+        },
         "tag": "button",
         "text": {
           "content": "⏹ 终止",
@@ -388,6 +408,16 @@ exports[`run card renderer snapshots > renders initial running state 1`] = `
             },
           },
         ],
+        "confirm": {
+          "text": {
+            "content": "任务和它启动的命令都会被结束，无法恢复。",
+            "tag": "plain_text",
+          },
+          "title": {
+            "content": "终止这个任务？",
+            "tag": "plain_text",
+          },
+        },
         "tag": "button",
         "text": {
           "content": "⏹ 终止",
@@ -494,6 +524,16 @@ _运行中…_",
             },
           },
         ],
+        "confirm": {
+          "text": {
+            "content": "任务和它启动的命令都会被结束，无法恢复。",
+            "tag": "plain_text",
+          },
+          "title": {
+            "content": "终止这个任务？",
+            "tag": "plain_text",
+          },
+        },
         "tag": "button",
         "text": {
           "content": "⏹ 终止",
