@@ -32,7 +32,10 @@ interface Harness {
   codexHistory: CodexThreadHistoryEntry[];
   activeRuns: ActiveRuns;
   pending: PendingQueue;
-  run(content: string, options?: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' }): Promise<boolean>;
+  run(
+    content: string,
+    options?: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic'; senderId?: string },
+  ): Promise<boolean>;
   dispatchResumeArg(arg: string): Promise<void>;
 }
 
@@ -80,6 +83,40 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
+  it('shows people other than the owner only how their task is doing in /status', async () => {
+    const h = await createHarness('claude');
+    h.sessions.set('chat-1', 'sess-mine', h.identity.cwdRealpath);
+
+    await expect(h.run('/status', { senderId: 'ou-guest' })).resolves.toBe(true);
+    const guestView = JSON.stringify(lastContent(h.channel));
+    expect(guestView).toContain('没有正在运行的任务');
+    expect(guestView).not.toContain('cwd');
+    expect(guestView).not.toContain('sess-min');
+
+    await expect(h.run('/status')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('cwd');
+  });
+
+  it('lists only the sessions this chat has used', async () => {
+    const h = await createHarness('claude');
+    h.sessions.set('chat-1', 'sess-mine', h.identity.cwdRealpath);
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-mine', now: 1000 });
+    h.claudeHistory.push(
+      claudeSession('sess-mine', 'my prompt', 1_700_000_100_000),
+      claudeSession('sess-other-chat', 'someone else prompt', 1_700_000_200_000),
+    );
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    let rendered = JSON.stringify(lastContent(h.channel));
+    expect(rendered).toContain('my prompt');
+    expect(rendered).not.toContain('someone else prompt');
+
+    // `/resume all` is the owner's; anyone else still gets only their own.
+    await expect(h.run('/resume all', { senderId: 'ou-guest' })).resolves.toBe(true);
+    rendered = JSON.stringify(lastContent(h.channel));
+    expect(rendered).not.toContain('someone else prompt');
+  });
+
   it('resumes the selected Claude history entry from the card button callback', async () => {
     const h = await createHarness('claude');
     h.sessions.set('chat-1', 'sess-current', h.identity.cwdRealpath);
@@ -89,7 +126,8 @@ describe('agent-aware resume commands', () => {
       claudeSession('sess-target', 'target prompt', 1_700_000_000_000),
     );
 
-    await expect(h.run('/resume')).resolves.toBe(true);
+    // The owner can list every session of the workspace.
+    await expect(h.run('/resume all')).resolves.toBe(true);
 
     const card = lastContent(h.channel);
     const rendered = JSON.stringify(card);
@@ -306,11 +344,15 @@ async function createHarness(
 
   const run = (
     content: string,
-    runOptions: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' } = {},
+    runOptions: {
+      withCatalogIdentity?: boolean;
+      chatMode?: 'p2p' | 'group' | 'topic';
+      senderId?: string;
+    } = {},
   ): Promise<boolean> =>
     tryHandleCommand({
       channel: channel as unknown as CommandContext['channel'],
-      msg: message(content),
+      msg: message(content, runOptions.senderId),
       scope: 'chat-1',
       chatMode: runOptions.chatMode ?? 'p2p',
       sessions,
@@ -419,12 +461,12 @@ function appConfig(agentKind: AgentKind): ProfileConfig {
   });
 }
 
-function message(content: string): NormalizedMessage {
+function message(content: string, senderId = 'ou-user'): NormalizedMessage {
   return {
     messageId: `om-${content.replace(/\W+/g, '-').slice(0, 20)}`,
     chatId: 'chat-1',
     chatType: 'p2p',
-    senderId: 'ou-user',
+    senderId,
     senderName: 'User',
     content,
     resources: [],

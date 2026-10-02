@@ -44,6 +44,7 @@ import {
   resumeCard,
   skillsCard,
   statusCard,
+  taskStatusCard,
   usageCard,
   worktreeCard,
   workspacesCard,
@@ -689,7 +690,17 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
+  // Only this chat's own conversations: every chat shares the workspace, so
+  // the unfiltered list would let anyone resume (and read back) someone
+  // else's session. The owner can still see everything with `/resume all`.
+  const showAll =
+    sub === 'all' && canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
+  const own = scopeSessionIds(ctx);
+  const sessions = showAll
+    ? await listClaudeResumeHistory(ctx, cwd, RESUME_SCAN_LIMIT).then((all) => all.slice(0, 20))
+    : (await listClaudeResumeHistory(ctx, cwd, RESUME_SCAN_LIMIT))
+        .filter((s) => own.has(s.sessionId))
+        .slice(0, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
   const identity = ctx.sessionCatalogIdentity;
   const entries = sessions.map((s) => ({
@@ -810,6 +821,22 @@ function pruneResumeCandidates(now = Date.now()): void {
   }
 }
 
+/** How far back `/resume` looks before keeping only this chat's sessions. */
+const RESUME_SCAN_LIMIT = 200;
+
+/** Claude sessions this chat has used: its current one and any it moved on from. */
+function scopeSessionIds(ctx: CommandContext): Set<string> {
+  const ids = new Set<string>();
+  const current = ctx.sessions.getRaw(ctx.scope)?.sessionId;
+  if (current) ids.add(current);
+  for (const entry of ctx.sessionCatalog?.entries() ?? []) {
+    if (entry.scopeId === ctx.scope && entry.agentId === 'claude' && entry.sessionId) {
+      ids.add(entry.sessionId);
+    }
+  }
+  return ids;
+}
+
 async function listClaudeResumeHistory(
   ctx: CommandContext,
   cwd: string,
@@ -910,6 +937,20 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveWorkspaceCwd(ctx);
   const activeHandle = ctx.activeRuns.get(ctx.scope);
   const pendingResume = ctx.autoResumer?.get(ctx.scope);
+  // Workspace paths, session ids, git and account state are the owner's
+  // business; everyone else only needs to know how their task is doing.
+  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
+    const card = taskStatusCard({
+      ...(activeHandle ? { activeRun: describeActiveRun(activeHandle) } : {}),
+      ...(pendingResume
+        ? {
+            autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
+          }
+        : {}),
+    });
+    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+    return;
+  }
   const sess = ctx.sessions.getRaw(ctx.scope);
   const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
   const catalogEntry =

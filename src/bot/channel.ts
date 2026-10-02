@@ -1249,6 +1249,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     : ownerOnlyGuard({
         larkChannelHome: paths.appDir,
         guestRoots: controls.profileConfig.access.guestRoots ?? [],
+        deniedTools: controls.profileConfig.access.guestDeniedTools ?? [],
+        deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
         ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
       });
   const flow = await startRunFlow({

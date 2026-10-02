@@ -13,7 +13,10 @@
 // Config arrives in LARK_CHANNEL_GUARD as JSON:
 //   { "home": "/Users/x",
 //     "rules": [{ "path": "/abs", "bash": "any" | "write", "allow": ["regex"] }],
-//     "allowedRoots": ["/abs", …], "allowPatterns": ["regex", …] }
+//     "allowedRoots": ["/abs", …], "allowPatterns": ["regex", …],
+//     "deniedCommands": ["regex", …] }
+// `deniedCommands` are owner-only commands of this deployment (GitHub CLI,
+// Jira writes, device control …), from `access.guestDeniedCommands`.
 //
 // Exit 2 with a reason on stderr blocks the call; Claude shows the reason to
 // the model. String matching, not a sandbox: it stops the plain ways of doing
@@ -98,6 +101,9 @@ function writesInto(segment, rule) {
 function decideBash(command, cfg, cwd) {
   const cmd = normalize(String(command ?? ''), cfg.home);
   if (CONTROL.test(cmd)) return '这条命令会控制 bridge 进程（启停、重启或 launchd）';
+  for (const re of cfg.deniedCommands ?? []) {
+    if (new RegExp(re).test(cmd)) return '这条命令属于仅限主人的操作';
+  }
   let cdInto = null;
   for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
     const trimmed = segment.trim();

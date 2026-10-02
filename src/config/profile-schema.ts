@@ -51,6 +51,13 @@ export interface ProfileAccess {
    * limits to them. Omitted when empty.
    */
   guestRoots?: string[];
+  /**
+   * Claude permission rules denied to runs the owner didn't start, e.g.
+   * `mcp__github` (a whole MCP server) or `mcp__jira__jira_create_issue`.
+   */
+  guestDeniedTools?: string[];
+  /** Regexes for shell commands refused to runs the owner didn't start. */
+  guestDeniedCommands?: string[];
 }
 
 export interface SandboxConfig {
@@ -375,6 +382,8 @@ function normalizeAccess(
   const chatAllowedUsers = normalizeChatUserMap(access?.chatAllowedUsers);
   const stoppers = stringArray(access?.stoppers);
   const guestRoots = stringArray(access?.guestRoots);
+  const guestDeniedTools = stringArray(access?.guestDeniedTools);
+  const guestDeniedCommands = stringArray(access?.guestDeniedCommands);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -385,6 +394,8 @@ function normalizeAccess(
     ...(Object.keys(chatAllowedUsers).length > 0 ? { chatAllowedUsers } : {}),
     ...(stoppers.length > 0 ? { stoppers } : {}),
     ...(guestRoots.length > 0 ? { guestRoots } : {}),
+    ...(guestDeniedTools.length > 0 ? { guestDeniedTools } : {}),
+    ...(guestDeniedCommands.length > 0 ? { guestDeniedCommands } : {}),
   };
 }
 

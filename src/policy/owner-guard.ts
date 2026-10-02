@@ -34,6 +34,10 @@ export interface RunGuard {
   allowPatterns: string[];
   /** Absolute path globs the run may not read. */
   readDeny: string[];
+  /** Extra Claude permission rules to deny (`access.guestDeniedTools`). */
+  deniedTools: string[];
+  /** Regexes for refused shell commands (`access.guestDeniedCommands`). */
+  deniedCommands: string[];
   /** The PreToolUse hook script that applies the guard to tool calls. */
   hookScript: string;
 }
@@ -68,6 +72,8 @@ export function ownerOnlyGuard(opts: {
   larkChannelHome: string;
   /** Projects the owner opened to others (`access.guestRoots`). */
   guestRoots?: readonly string[];
+  deniedTools?: readonly string[];
+  deniedCommands?: readonly string[];
   /** The run's working directory. */
   workspace?: string;
   home?: string;
@@ -107,6 +113,8 @@ export function ownerOnlyGuard(opts: {
       join(lc, 'profiles', '*', 'lark-cli', '**'),
       join(lc, 'profiles', '*', 'logs', '**'),
     ],
+    deniedTools: [...(opts.deniedTools ?? [])],
+    deniedCommands: [...(opts.deniedCommands ?? [])],
     hookScript: join(root, 'bin', 'bridge-guard.mjs'),
   };
 }
@@ -141,6 +149,7 @@ export function claudeGuardArgs(
   const deny = [
     ...guard.rules.flatMap((r) => [`Edit(/${r.path})`, `Edit(/${r.path}/**)`]),
     ...guard.readDeny.map((p) => `Read(/${p})`),
+    ...guard.deniedTools,
   ];
   const settings = {
     hooks: {
@@ -160,6 +169,7 @@ export function claudeGuardArgs(
         rules: guard.rules,
         allowedRoots: guard.allowedRoots,
         allowPatterns: guard.allowPatterns,
+        deniedCommands: guard.deniedCommands,
       }),
     },
   };

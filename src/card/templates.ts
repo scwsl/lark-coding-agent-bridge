@@ -31,6 +31,15 @@ function shell(title: string, elements: object[]): object {
   };
 }
 
+/** `/status` for people other than the owner: only how this chat's task is doing. */
+export function taskStatusCard(info: { activeRun?: string; autoResume?: string }): object {
+  const lines = [
+    `🏃 **当前任务**: ${info.activeRun ? escapeMd(info.activeRun) : '没有正在运行的任务'}`,
+    ...(info.autoResume ? [`⏸ **自动续跑**: ${escapeMd(info.autoResume)}`] : []),
+  ];
+  return shell('📊 当前状态', [divMd(lines.join('\n'))]);
+}
+
 /** `/usage`: the plan's limit windows. `body` is markdown (code blocks allowed). */
 export function usageCard(body: string): object {
   return shell('📈 Claude 额度', [{ tag: 'markdown', content: body }]);

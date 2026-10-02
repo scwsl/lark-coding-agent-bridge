@@ -20,6 +20,12 @@ const guard = ownerOnlyGuard({
   workspace: WORKSPACE,
   home: HOME,
   root: ROOT,
+  deniedTools: ['mcp__github', 'mcp__jira__jira_create_issue'],
+  deniedCommands: [
+    '(^|[\\s;|&(])gh(\\s|$)',
+    '\\bgit\\s+push\\b',
+    'alphaq-tool\\b[\\s\\S]*--tool[=\\s]+[\'"]?(restart_device|set_site_work_mode)\\b',
+  ],
 });
 const { env } = claudeGuardArgs(guard);
 
@@ -104,6 +110,29 @@ describe('guest runs: file scope', () => {
 
   it('ignores tools that touch no files', () => {
     expect(hook('WebSearch', { query: 'rm -rf ~' }).code).toBe(0);
+  });
+});
+
+describe('guest runs: owner-only commands of this deployment', () => {
+  it.each([
+    ['the GitHub CLI', 'gh pr create --fill'],
+    ['pushing code', `cd ${OPEN}/antelope && git push origin dev`],
+    ['controlling a device', '~/.local/bin/alphaq-tool --region aus --json --tool restart_device --sn AL1'],
+  ])('refuses %s', (_label, command) => {
+    const res = bash(command);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('仅限主人的操作');
+  });
+
+  it('still allows read-only diagnosis and local git', () => {
+    expect(bash('~/.local/bin/alphaq-tool --region aus --json --tool ess_running_data --sn AL1').code).toBe(0);
+    expect(bash(`cd ${OPEN}/antelope && git log -3`).code).toBe(0);
+  });
+
+  it('denies the configured tools outright', () => {
+    const { args } = claudeGuardArgs(guard);
+    expect(args).toContain('mcp__github');
+    expect(args).toContain('mcp__jira__jira_create_issue');
   });
 });
 
