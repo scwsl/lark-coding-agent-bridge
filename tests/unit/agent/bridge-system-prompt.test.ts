@@ -13,6 +13,11 @@ describe('bridge system prompt bot collaboration rules', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('工具调用的说明字段');
   });
 
+  it('asks for a task ledger on long tasks, announced in a fixed format', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('📒 任务台账：');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不超过 30 分钟');
+  });
+
   it('reserves changes to the bridge and the agent itself for the owner', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('senderIsOwner');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('这项操作仅限 bot 主人发起');

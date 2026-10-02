@@ -26,6 +26,7 @@ export function interruptedNoticeText(
   rec: RunRecord,
   cause: InterruptCause,
   now: number = Date.now(),
+  autoResume = false,
 ): string {
   const why = cause === 'shutdown' ? 'bridge 关闭' : 'bridge 重启';
   const elapsed = formatElapsed(Math.max(0, now - rec.startedAt));
@@ -33,7 +34,9 @@ export function interruptedNoticeText(
   const lines = [
     `⏹ 这轮任务被中断了（${why}），已经跑了 ${elapsed}。`,
     ...(preview ? [`任务：${preview}`] : []),
-    '会话上下文没丢——回一句「继续」我就接着往下做。',
+    autoResume
+      ? `会话上下文没丢，bridge 恢复后会按任务台账自动继续（${rec.ledger}），不用再发「继续」。`
+      : '会话上下文没丢——回一句「继续」我就接着往下做。',
   ];
   return lines.join('\n');
 }
@@ -48,8 +51,9 @@ export async function sendInterruptedNotice(
   rec: RunRecord,
   cause: InterruptCause,
   now: number = Date.now(),
+  autoResume = false,
 ): Promise<void> {
-  const text = interruptedNoticeText(rec, cause, now);
+  const text = interruptedNoticeText(rec, cause, now, autoResume);
   const opts = {
     replyTo: rec.originMessageId,
     ...(rec.threadId ? { replyInThread: true } : {}),
@@ -80,10 +84,11 @@ export async function reportInterruptedRuns(
   records: RunRecord[],
   cause: InterruptCause,
   now: number = Date.now(),
+  autoResumed: ReadonlySet<string> = new Set(),
 ): Promise<void> {
   if (records.length === 0) return;
   log.info('interrupted-notice', 'reporting', { count: records.length, cause });
   for (const rec of records) {
-    await sendInterruptedNotice(channel, rec, cause, now);
+    await sendInterruptedNotice(channel, rec, cause, now, autoResumed.has(rec.runId));
   }
 }

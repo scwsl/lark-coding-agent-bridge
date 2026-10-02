@@ -30,6 +30,15 @@ export function autoResumePrompt(limitType: string | undefined, locale?: Locale)
   return runStrings(locale).autoResumePrompt(cardLimitLabel(limitType, locale));
 }
 
+/** The prompt for any pending resume, quota or interruption alike. */
+export function resumePromptFor(resume: PendingResume): string {
+  if (resume.kind === 'interrupted' && resume.ledger) {
+    const t = runStrings(resume.locale);
+    return t.interruptedResumePrompt(t.interruptReasons[resume.reason ?? 'killed'], resume.ledger);
+  }
+  return autoResumePrompt(resume.limitType, resume.locale);
+}
+
 /** One run waiting for its quota to reset. Persisted, so it survives restarts. */
 export interface PendingResume {
   scope: string;
@@ -48,6 +57,15 @@ export interface PendingResume {
   limitType?: string;
   /** Language the task was asked in; the resume prompt and card follow it. */
   locale?: Locale;
+  /**
+   * `quota` (default): the plan's quota ran out. `interrupted`: the run was
+   * killed or the bridge went down; it resumes from its task ledger.
+   */
+  kind?: 'quota' | 'interrupted';
+  /** The task ledger to resume from (`interrupted` only). */
+  ledger?: string;
+  /** What interrupted it, for the resume prompt. */
+  reason?: 'killed' | 'restart' | 'shutdown';
   /** 1 for the first resume of a task, +1 each time a resume hits the quota again. */
   attempt: number;
   createdAt: number;

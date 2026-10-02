@@ -542,6 +542,60 @@ describe('markdown stream startup failures', () => {
     await waitFor(() => h.controls.autoResumer?.get('oc_dm') === undefined);
   });
 
+  it("resumes the owner's task from its ledger after the run is killed", async () => {
+    const streams: Array<{ cards: unknown[] }> = [];
+    const killed: AgentEvent[] = [
+      { type: 'text', delta: '开始升级。\n📒 任务台账：/tmp/thinghub-ledger.md\n先跑构建' },
+      { type: 'error', message: 'claude exited with code 143', terminationReason: 'failed' },
+    ];
+    const h = await createHarness({
+      agentKind: 'claude',
+      messageReply: 'card',
+      events: [killed, [{ type: 'text', delta: 'RESUMED_SENTINEL' }, { type: 'done', terminationReason: 'normal' }]],
+      stream: async (_chatId, input) => {
+        const record = { cards: [] as unknown[] };
+        streams.push(record);
+        await sdkLikeCardStream(async (card) => {
+          record.cards.push(card);
+        })(_chatId, input);
+      },
+    });
+    Object.assign(h.controls, { botOwnerId: 'ou_user', ownerRefreshState: 'ok' });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_long_task', '升级依赖'));
+    await waitFor(() => h.controls.autoResumer?.get('oc_dm') !== undefined);
+
+    const resume = h.controls.autoResumer!.get('oc_dm')!;
+    expect(resume).toMatchObject({ kind: 'interrupted', ledger: '/tmp/thinghub-ledger.md', reason: 'killed' });
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('按任务台账自动继续'));
+
+    await h.controls.autoResumer!.tick(resume.resumeAt);
+    await waitFor(() => JSON.stringify(streams[1]?.cards ?? []).includes('RESUMED_SENTINEL'));
+    expect(h.agent.runs[1]?.opts.prompt).toContain('/tmp/thinghub-ledger.md');
+    expect(h.agent.runs[1]?.opts.prompt).toContain('进程被终止');
+  });
+
+  it("does not resume someone else's killed task on its own", async () => {
+    const h = await createHarness({
+      agentKind: 'claude',
+      messageReply: 'card',
+      events: [
+        [
+          { type: 'text', delta: '📒 任务台账：/tmp/other-ledger.md' },
+          { type: 'error', message: 'claude exited with code 143', terminationReason: 'failed' },
+        ],
+      ],
+      stream: sdkLikeCardStream(async () => {}),
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_guest_task', '帮我跑个长任务'));
+    await waitFor(() => h.agent.runs.length === 1);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(h.controls.autoResumer?.get('oc_dm')).toBeUndefined();
+  });
+
   it('sends one dedicated final reply card after progress completes in card mode', async () => {
     const progressCards: unknown[] = [];
     const h = await createHarness({

@@ -26,6 +26,12 @@ export interface RunHandle {
   lastActivityAt: number;
   /** What the in-flight tool is doing, while one is running. */
   toolLabel?: string;
+  /** The task ledger the agent announced in this run (see task-ledger.ts). */
+  ledger?: string;
+  /** Called once, when the agent first announces its ledger. */
+  onLedger?: (path: string) => void;
+  /** Why the run was stopped, when it was: a person, or the bridge shutting down. */
+  stopCause?: 'user' | 'shutdown';
 }
 
 export class ActiveRuns {
@@ -107,6 +113,7 @@ export class ActiveRuns {
     if (!h) return false;
     this.reservations.delete(chatId);
     h.interrupted = true;
+    h.stopCause = 'user';
     this.handles.delete(chatId);
     void h.run.stop().catch(() => {
       /* stop errors are non-fatal */
@@ -118,7 +125,10 @@ export class ActiveRuns {
     const all = [...this.handles.values()];
     this.handles.clear();
     this.reservations.clear();
-    for (const h of all) h.interrupted = true;
+    for (const h of all) {
+      h.interrupted = true;
+      h.stopCause = 'shutdown';
+    }
     await Promise.allSettled(all.map((h) => h.run.stop()));
   }
 

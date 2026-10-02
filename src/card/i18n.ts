@@ -64,6 +64,10 @@ export interface RunStrings {
   limitLabels: Record<string, string>;
   limitFallback: string;
   autoResumePrompt(label: string): string;
+  interruptReasons: Record<'killed' | 'restart' | 'shutdown', string>;
+  interruptedResumePrompt(reason: string, ledger: string): string;
+  /** Told in the chat right after a run with a ledger died. */
+  interruptedWillResume(reason: string, at: string): string;
 }
 
 const zh: RunStrings = {
@@ -122,6 +126,12 @@ const zh: RunStrings = {
   autoResumePrompt: (label) =>
     `[自动续跑] 上一轮任务因 Claude ${label}用完而暂停，额度已经重置。` +
     '请从中断的地方继续完成原任务，不要重复已经完成的步骤；如果原任务其实已经完成，简短说明即可。',
+  interruptReasons: { killed: '进程被终止', restart: 'bridge 重启', shutdown: 'bridge 关闭' },
+  interruptedResumePrompt: (reason, ledger) =>
+    `[自动续跑] 上一轮任务意外中断（${reason}）。请先读任务台账 ${ledger}，再用 git log 核对实际进度，` +
+    '从台账的「下一步」继续；已经完成并提交的部分不要重做。',
+  interruptedWillResume: (reason, at) =>
+    `⏯ 任务意外中断（${reason}）。将在 **${at}** 按任务台账自动继续，届时新开一张卡片接着做；发 \`/stop\` 可以取消。`,
 };
 
 const en: RunStrings = {
@@ -180,6 +190,12 @@ const en: RunStrings = {
   autoResumePrompt: (label) =>
     `[auto-resume] The previous task paused because the Claude ${label} was used up; it has reset now. ` +
     'Continue the original task from where it stopped without repeating finished steps; if it is actually done, just say so briefly.',
+  interruptReasons: { killed: 'the process was killed', restart: 'the bridge restarted', shutdown: 'the bridge shut down' },
+  interruptedResumePrompt: (reason, ledger) =>
+    `[auto-resume] The previous run was interrupted (${reason}). Read the task ledger ${ledger}, check the real progress ` +
+    'with git log, and continue from its next step; do not redo work that is already done and committed.',
+  interruptedWillResume: (reason, at) =>
+    `⏯ The task was interrupted (${reason}). It will resume from its task ledger at **${at}** in a new card; send \`/stop\` to cancel.`,
 };
 
 const TABLE: Record<Locale, RunStrings> = { zh, en };

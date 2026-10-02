@@ -8,6 +8,7 @@ import {
   type RunState,
 } from '../card/run-state';
 import { runningToolLabel } from '../card/run-activity';
+import { findLedger } from './task-ledger';
 import { log, reportMetric } from '../core/logger';
 import type { RunHandle } from './active-runs';
 
@@ -119,6 +120,15 @@ export async function processAgentStream(
       state = reduce(state, evt);
       handle.lastActivityAt = Date.now();
       handle.toolLabel = runningToolLabel(state);
+      if (evt.type === 'text' && !handle.ledger) {
+        const last = state.blocks[state.blocks.length - 1];
+        const ledger = last?.kind === 'text' ? findLedger(last.content) : undefined;
+        if (ledger) {
+          handle.ledger = ledger;
+          log.info('agent', 'task-ledger', { ledger });
+          handle.onLedger?.(ledger);
+        }
+      }
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
