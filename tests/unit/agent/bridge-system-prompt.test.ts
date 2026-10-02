@@ -11,6 +11,7 @@ describe('bridge system prompt bot collaboration rules', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('只要有中文');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('用对方的语言回复');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('工具调用的说明字段');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('回复语言**只看调用方**');
   });
 
   it('asks for a task ledger on long tasks, announced in a fixed format', () => {
