@@ -19,6 +19,10 @@ export function detectLocale(texts: readonly string[]): Locale {
 export interface RunStrings {
   thinking: string;
   toolRunning: string;
+  /** Footer label for a running tool: `查日志（Bash）`. */
+  toolLabel(description: string, tool: string): string;
+  /** Footer label when there is no usable description: `正在调用 Bash`. */
+  toolRunningNamed(tool: string): string;
   streaming: string;
   elapsed(clock: string): string;
   lastActivity(ago: string): string;
@@ -63,6 +67,8 @@ export interface RunStrings {
 const zh: RunStrings = {
   thinking: '🧠 正在思考',
   toolRunning: '🧰 正在调用工具',
+  toolLabel: (description, tool) => `${description}（${tool}）`,
+  toolRunningNamed: (tool) => `正在调用 ${tool}`,
   streaming: '✍️ 正在输出',
   elapsed: (clock) => `已运行 ${clock}`,
   lastActivity: (ago) => `上次动静 ${ago}`,
@@ -118,6 +124,8 @@ const zh: RunStrings = {
 const en: RunStrings = {
   thinking: '🧠 Thinking',
   toolRunning: '🧰 Running a tool',
+  toolLabel: (description, tool) => `${description} (${tool})`,
+  toolRunningNamed: (tool) => `Running ${tool}`,
   streaming: '✍️ Writing',
   elapsed: (clock) => `running ${clock}`,
   lastActivity: (ago) => `last activity ${ago}`,

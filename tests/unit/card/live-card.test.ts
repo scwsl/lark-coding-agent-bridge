@@ -63,7 +63,17 @@ describe('runningToolLabel', () => {
     const bare = stateFrom([
       { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'mysql -pS3cret' } },
     ]);
-    expect(runningToolLabel(bare)).toBe('Bash');
+    expect(runningToolLabel(bare)).toBe('正在调用 Bash');
+  });
+
+  it('hides a description written in the wrong language', () => {
+    const english = stateFrom([
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls', description: 'Probe the deny rule' } },
+    ]);
+    // A Chinese card never shows the English line…
+    expect(runningToolLabel(english)).toBe('正在调用 Bash');
+    // …while an English card does.
+    expect(runningToolLabel(english, 'en')).toBe('Probe the deny rule (Bash)');
   });
 
   it('is empty once the tool has returned', () => {

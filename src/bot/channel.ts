@@ -1495,7 +1495,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const renderLiveCard = (state: RunState): object => {
         const running = state.terminal === 'running';
         const options: RunCardRenderOptions = running
-          ? { ...cardRenderOptions, activity: runActivity(handle, state) }
+          ? { ...cardRenderOptions, activity: runActivity(handle, state, locale) }
           : cardRenderOptions;
         const fitted = fitCardToBudget(
           filterForPrefs(state),
@@ -1794,9 +1794,9 @@ function withResumedNote(card: object, at: number, locale: Locale | undefined): 
 /** How often a running card re-renders its clock when nothing else changes. */
 const CARD_HEARTBEAT_MS = 15_000;
 
-function runActivity(handle: RunHandle, state: RunState): RunActivity {
+function runActivity(handle: RunHandle, state: RunState, locale: Locale): RunActivity {
   const now = Date.now();
-  const toolLabel = runningToolLabel(state);
+  const toolLabel = runningToolLabel(state, locale);
   return {
     elapsedMs: now - handle.startedAt,
     idleMs: now - handle.lastActivityAt,
