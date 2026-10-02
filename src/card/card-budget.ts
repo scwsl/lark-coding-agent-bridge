@@ -1,3 +1,4 @@
+import { runStrings, type Locale } from './i18n';
 import type { Block, RunState } from './run-state';
 
 /**
@@ -15,9 +16,6 @@ export interface FittedCard {
   trimmed: boolean;
 }
 
-const RUNNING_NOTICE = '_（内容较长，卡片里只保留最新部分，完整内容会在结束后另发）_';
-const FINAL_NOTICE = '_（内容超出卡片上限，这里只保留结尾，完整内容见下一条消息）_';
-
 export function cardBytes(card: object): number {
   return Buffer.byteLength(JSON.stringify(card), 'utf8');
 }
@@ -31,6 +29,7 @@ export function fitCardToBudget(
   state: RunState,
   render: (state: RunState) => object,
   budget: number = CARD_BYTE_BUDGET,
+  locale?: Locale,
 ): FittedCard {
   const full = render(state);
   if (cardBytes(full) <= budget) return { card: full, trimmed: false };
@@ -44,7 +43,8 @@ export function fitCardToBudget(
   if (cardBytes(lean) <= budget) return { card: lean, trimmed: true };
 
   const text = fullText(state);
-  const notice = state.terminal === 'running' ? RUNNING_NOTICE : FINAL_NOTICE;
+  const t = runStrings(locale);
+  const notice = state.terminal === 'running' ? t.trimmedRunning : t.trimmedFinal;
   const withTail = (keep: number): object => {
     const tail = keep > 0 ? `…${text.slice(text.length - keep)}` : '';
     const block: Block = {

@@ -1,16 +1,19 @@
-import { formatMoment, limitLabel } from '../bot/auto-resume';
+import { formatMoment, runStrings, type Locale } from './i18n';
 import type { RunLimit } from './run-state';
 
+/** `five_hour` → `5 小时额度` / `5-hour quota`. */
+export function limitLabel(limitType: string | undefined, locale?: Locale): string {
+  const t = runStrings(locale);
+  return (limitType && t.limitLabels[limitType]) || t.limitFallback;
+}
+
 /** What a paused run's card says: why it stopped, and what happens next. */
-export function pauseNotice(limit: RunLimit | undefined): string {
-  const label = limitLabel(limit?.limitType);
-  const reset = limit?.resetsAt ? `（${formatMoment(limit.resetsAt)} 重置）` : '';
-  const why = `⏸ **任务暂停**：Claude ${label}已用完${reset}。`;
-  if (limit?.autoResumeAt) {
-    return (
-      `${why}\n将在 **${formatMoment(limit.autoResumeAt)}** 自动继续，届时新开一张卡片接着做；` +
-      '发 `/stop` 可以取消自动续跑。'
-    );
-  }
-  return `${why}\n额度重置后发「继续」，我会从中断的地方接着做。`;
+export function pauseNotice(limit: RunLimit | undefined, locale?: Locale): string {
+  const t = runStrings(locale);
+  const why = t.paused(
+    limitLabel(limit?.limitType, locale),
+    limit?.resetsAt ? formatMoment(limit.resetsAt) : undefined,
+  );
+  const next = limit?.autoResumeAt ? t.autoResumeAt(formatMoment(limit.autoResumeAt)) : t.resumeManually;
+  return `${why}\n${next}`;
 }

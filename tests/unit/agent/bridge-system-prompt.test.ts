@@ -6,6 +6,13 @@ import {
 } from '../../../src/agent/bridge-system-prompt';
 
 describe('bridge system prompt bot collaboration rules', () => {
+  it('tells the agent which language to answer in, tool descriptions included', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('默认用中文回复');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('只要有中文');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('用对方的语言回复');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('工具调用的说明字段');
+  });
+
   it('states that bots only receive messages via a real structured mention', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('只有被真实 @');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('收不到');

@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { formatMoment, runStrings, type Locale } from '../card/i18n';
+import { limitLabel as cardLimitLabel } from '../card/pause-notice';
 import type { RunLimit } from '../card/run-state';
+
+export { formatMoment };
 
 /** Wait this long past the reset before resuming, so the new window is open. */
 export const RESUME_GRACE_MS = 60_000;
@@ -16,39 +20,14 @@ export function resumeAtFor(limit: RunLimit): number {
   return Math.max(reset, limit.at) + RESUME_GRACE_MS;
 }
 
-/** `five_hour` → `5 小时额度`. */
-export function limitLabel(limitType: string | undefined): string {
-  switch (limitType) {
-    case 'five_hour':
-      return '5 小时额度';
-    case 'seven_day':
-      return '本周额度';
-    case 'seven_day_opus':
-      return '本周 Opus 额度';
-    case 'seven_day_sonnet':
-      return '本周 Sonnet 额度';
-    case 'seven_day_overage_included':
-      return '本周额度（含超额）';
-    case 'overage':
-      return '超额用量';
-    default:
-      return 'Claude 额度';
-  }
+/** `five_hour` → `5 小时额度`. Kept here for callers outside the card layer. */
+export function limitLabel(limitType: string | undefined, locale?: Locale): string {
+  return cardLimitLabel(limitType, locale);
 }
 
-/** `10-02 23:40`, in the bridge host's local time. */
-export function formatMoment(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** What the resumed run is told. */
-export function autoResumePrompt(limitType: string | undefined): string {
-  return (
-    `[自动续跑] 上一轮任务因 Claude ${limitLabel(limitType)}用完而暂停，额度已经重置。` +
-    '请从中断的地方继续完成原任务，不要重复已经完成的步骤；如果原任务其实已经完成，简短说明即可。'
-  );
+/** What the resumed run is told — in the caller's language, so the agent answers in it too. */
+export function autoResumePrompt(limitType: string | undefined, locale?: Locale): string {
+  return runStrings(locale).autoResumePrompt(cardLimitLabel(limitType, locale));
 }
 
 /** One run waiting for its quota to reset. Persisted, so it survives restarts. */
@@ -67,6 +46,8 @@ export interface PendingResume {
   card?: object;
   resumeAt: number;
   limitType?: string;
+  /** Language the task was asked in; the resume prompt and card follow it. */
+  locale?: Locale;
   /** 1 for the first resume of a task, +1 each time a resume hits the quota again. */
   attempt: number;
   createdAt: number;

@@ -1,4 +1,5 @@
 import { deepMaskEmails } from './mask-email';
+import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
 import type { Block, FooterStatus, RunState, Terminal, ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
@@ -37,6 +38,8 @@ export interface RunCardRenderOptions {
   meta?: RunCardMeta;
   /** Live clock for the running footer. See {@link RunActivity}. */
   activity?: RunActivity;
+  /** Language of the bridge's own words on the card; Chinese when absent. */
+  locale?: Locale;
 }
 
 /**
@@ -58,9 +61,10 @@ export const STALL_WARN_MS = 3 * 60_000;
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
   const elements: object[] = [];
+  const t = runStrings(options.locale);
 
   if (state.reasoning.content) {
-    elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
+    elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active, t));
   }
 
   for (const group of groupBlocks(state.blocks)) {
@@ -69,26 +73,25 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
         elements.push(markdown(group.content));
       }
     } else {
-      elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
+      elements.push(...renderToolGroup(group.tools, state.terminal !== 'running', t));
     }
   }
 
   if (state.terminal === 'interrupted') {
-    elements.push(noteMd('_⏹ 已被中断_'));
+    elements.push(noteMd(t.interrupted));
   } else if (state.terminal === 'idle_timeout') {
-    const mins = state.idleTimeoutMinutes ?? 0;
-    elements.push(noteMd(`_⏱ ${mins} 分钟无响应,已自动终止_`));
+    elements.push(noteMd(t.idleTimeout(state.idleTimeoutMinutes ?? 0)));
   } else if (state.terminal === 'paused') {
-    elements.push(markdown(pauseNotice(state.limit)));
+    elements.push(markdown(pauseNotice(state.limit, options.locale)));
   } else if (state.terminal === 'error' && state.errorMsg) {
-    elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
+    elements.push(noteMd(t.agentFailed(state.errorMsg)));
   } else if (state.terminal === 'done' && elements.length === 0) {
-    elements.push(noteMd('_（未返回内容）_'));
+    elements.push(noteMd(t.noContent));
   }
 
   if (state.terminal === 'running') {
-    if (state.footer) elements.push(footerStatus(state.footer, options.activity));
-    elements.push(stopButton(options));
+    if (state.footer) elements.push(footerStatus(state.footer, t, options.activity));
+    elements.push(stopButton(options, t));
   } else {
     elements.push(...byline(options.meta));
   }
@@ -102,7 +105,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
       // squeezed into a narrow strip on desktop.
       width_mode: 'fill',
       streaming_mode: state.terminal === 'running',
-      summary: { content: summaryText(state) },
+      summary: { content: summaryText(state, t) },
     },
     ...(options.meta ? { header: cardHeader(options.meta.title, state.terminal) } : {}),
     body: { elements },
@@ -159,25 +162,25 @@ function* groupBlocks(blocks: Block[]): Generator<Group> {
   if (toolBuf.length > 0) yield { kind: 'tools', tools: toolBuf };
 }
 
-function renderToolGroup(tools: ToolEntry[], finalized: boolean): object[] {
+function renderToolGroup(tools: ToolEntry[], finalized: boolean, t: RunStrings): object[] {
   if (tools.length === 0) return [];
   if (tools.length < COLLAPSE_TOOL_THRESHOLD) {
-    return tools.map((t) => toolPanel(t, false));
+    return tools.map((tool) => toolPanel(tool, false, t));
   }
   if (finalized) {
-    return [collapsedToolSummary(tools, true)];
+    return [collapsedToolSummary(tools, true, t)];
   }
   // Running: collapse prior tools, keep latest visible.
   const prior = tools.slice(0, -1);
   const latest = tools[tools.length - 1];
   const out: object[] = [];
-  if (prior.length > 0) out.push(collapsedToolSummary(prior, false));
-  if (latest) out.push(toolPanel(latest, true));
+  if (prior.length > 0) out.push(collapsedToolSummary(prior, false, t));
+  if (latest) out.push(toolPanel(latest, true, t));
   return out;
 }
 
-function reasoningPanel(content: string, active: boolean): object {
-  const title = active ? '🧠 **思考中**' : '🧠 **思考完成，点击查看**';
+function reasoningPanel(content: string, active: boolean, t: RunStrings): object {
+  const title = active ? t.reasoningActive : t.reasoningDone;
   return collapsiblePanel({
     title,
     expanded: active,
@@ -186,12 +189,12 @@ function reasoningPanel(content: string, active: boolean): object {
   });
 }
 
-function toolPanel(tool: ToolEntry, expanded: boolean): object {
+function toolPanel(tool: ToolEntry, expanded: boolean, t: RunStrings): object {
   return collapsiblePanel({
     title: toolHeaderText(tool),
     expanded,
     border: tool.status === 'error' ? 'red' : 'grey',
-    body: toolBodyMd(tool) || '_无输出_',
+    body: toolBodyMd(tool, t.toolRunningBody) || t.noOutput,
   });
 }
 
@@ -207,9 +210,8 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
  * The latest-running tool, when applicable, is rendered separately via
  * `toolPanel(latest, true)` so live observation isn't sacrificed.
  */
-function collapsedToolSummary(tools: ToolEntry[], finalized: boolean): object {
-  const suffix = finalized ? '（已结束）' : '';
-  const title = `☕ **${tools.length} 个工具调用${suffix}**`;
+function collapsedToolSummary(tools: ToolEntry[], finalized: boolean, t: RunStrings): object {
+  const title = t.toolCalls(tools.length, finalized);
   const headerList = tools.map((t) => `- ${toolHeaderText(t)}`).join('\n');
   return {
     tag: 'collapsible_panel',
@@ -259,7 +261,7 @@ function noteMd(content: string): object {
   return { tag: 'markdown', content, text_size: 'notation' };
 }
 
-function stopButton(options: RunCardRenderOptions): object {
+function stopButton(options: RunCardRenderOptions, t: RunStrings): object {
   const value: Record<string, unknown> = { cmd: 'stop' };
   if (options.signCallback) {
     value.__bridge_cb = true;
@@ -267,34 +269,37 @@ function stopButton(options: RunCardRenderOptions): object {
   }
   return {
     tag: 'button',
-    text: { tag: 'plain_text', content: '⏹ 终止' },
+    text: { tag: 'plain_text', content: t.stop },
     type: 'danger',
     // Feishu asks for confirmation before the click is sent: a stop kills the
     // agent and every command it started, and can't be undone.
     confirm: {
-      title: { tag: 'plain_text', content: '终止这个任务？' },
-      text: { tag: 'plain_text', content: '任务和它启动的命令都会被结束，无法恢复。' },
+      title: { tag: 'plain_text', content: t.stopConfirmTitle },
+      text: { tag: 'plain_text', content: t.stopConfirmText },
     },
     behaviors: [{ type: 'callback', value }],
   };
 }
 
-function footerStatus(status: Exclude<FooterStatus, null>, activity?: RunActivity): object {
+function footerStatus(
+  status: Exclude<FooterStatus, null>,
+  t: RunStrings,
+  activity?: RunActivity,
+): object {
   const base =
     status === 'thinking'
-      ? '🧠 正在思考'
+      ? t.thinking
       : status === 'tool_running'
         ? activity?.toolLabel
           ? `🧰 ${activity.toolLabel}`
-          : '🧰 正在调用工具'
-        : '✍️ 正在输出';
+          : t.toolRunning
+        : t.streaming;
   if (!activity) return noteMd(base);
-  const clock = `已运行 ${formatClock(activity.elapsedMs)}`;
+  const clock = t.elapsed(formatClock(activity.elapsedMs));
   if (activity.idleMs >= STALL_WARN_MS) {
-    const mins = Math.floor(activity.idleMs / 60_000);
-    return noteMd(`⚠️ ${base} · ${clock} · 已 ${mins} 分钟没有新动静`);
+    return noteMd(`⚠️ ${base} · ${clock} · ${t.quietFor(Math.floor(activity.idleMs / 60_000))}`);
   }
-  return noteMd(`${base} · ${clock} · 上次动静 ${formatAgo(activity.idleMs)}`);
+  return noteMd(`${base} · ${clock} · ${t.lastActivity(formatAgo(activity.idleMs, t))}`);
 }
 
 /** `6:12`, `1:02:03`. */
@@ -306,22 +311,22 @@ export function formatClock(ms: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-/** `8 秒前`, `2 分钟前`. */
-export function formatAgo(ms: number): string {
+/** `8 秒前`, `2 分钟前` (or the locale's wording). */
+export function formatAgo(ms: number, t: RunStrings = runStrings('zh')): string {
   const secs = Math.max(0, Math.floor(ms / 1000));
-  if (secs < 60) return `${secs} 秒前`;
-  return `${Math.floor(secs / 60)} 分钟前`;
+  if (secs < 60) return t.secondsAgo(secs);
+  return t.minutesAgo(Math.floor(secs / 60));
 }
 
-function summaryText(state: RunState): string {
-  if (state.terminal === 'interrupted') return '已中断';
-  if (state.terminal === 'idle_timeout') return '已超时';
-  if (state.terminal === 'paused') return '额度用完，已暂停';
-  if (state.terminal === 'error') return '出错';
-  if (state.terminal === 'done') return '已完成';
-  if (state.footer === 'tool_running') return '正在调用工具';
-  if (state.footer === 'streaming') return '正在输出';
-  return '思考中';
+function summaryText(state: RunState, t: RunStrings): string {
+  if (state.terminal === 'interrupted') return t.summary.interrupted;
+  if (state.terminal === 'idle_timeout') return t.summary.idleTimeout;
+  if (state.terminal === 'paused') return t.summary.paused;
+  if (state.terminal === 'error') return t.summary.error;
+  if (state.terminal === 'done') return t.summary.done;
+  if (state.footer === 'tool_running') return t.summary.toolRunning;
+  if (state.footer === 'streaming') return t.summary.streaming;
+  return t.summary.thinking;
 }
 
 function truncate(s: string, max: number): string {

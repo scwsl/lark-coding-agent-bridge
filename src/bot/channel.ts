@@ -26,6 +26,7 @@ import { handleCardAction } from '../card/dispatcher';
 import { CallbackAuth, operatorForAction } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { fitCardToBudget, fullText } from '../card/card-budget';
+import { detectLocale, runStrings, type Locale } from '../card/i18n';
 import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
@@ -449,7 +450,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     }
     if (resume.cardMessageId && resume.card) {
       await channel
-        .updateCard(resume.cardMessageId, withResumedNote(resume.card, Date.now()))
+        .updateCard(resume.cardMessageId, withResumedNote(resume.card, Date.now(), resume.locale))
         .catch((err) => log.warn('auto-resume', 'card-note-failed', { err: String(err) }));
     }
     pending.push(resume.scope, autoResumeMessage(resume));
@@ -1357,7 +1358,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       reasoning: { content: '', active: false },
     };
   };
+  // The bridge's own words on the reply follow the caller's language, the
+  // same rule the agent gets for its answer (see detectLocale).
+  const locale = detectLocale(batch.map((m) => m.content));
   const cardRenderOptions: RunCardRenderOptions = {
+    locale,
     meta: {
       title: channel.botIdentity?.name ?? controls.profile,
       agent: capability.agentId,
@@ -1468,7 +1473,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let lastLiveCard: object | undefined;
       const cardHealth = new CardPatchHealth((code) => {
         void channel
-          .send(chatId, { markdown: cardBrokenNotice(code) }, sendOpts)
+          .send(chatId, { markdown: runStrings(locale).cardBroken(String(code ?? '?')) }, sendOpts)
           .catch((err) => log.fail('stream', err, { step: 'card-broken-notice' }));
       });
       // The card as the user should see it now: live clock while running,
@@ -1478,7 +1483,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         const options: RunCardRenderOptions = running
           ? { ...cardRenderOptions, activity: runActivity(handle, state) }
           : cardRenderOptions;
-        const fitted = fitCardToBudget(filterForPrefs(state), (s) => renderCard(s, options));
+        const fitted = fitCardToBudget(
+          filterForPrefs(state),
+          (s) => renderCard(s, options),
+          undefined,
+          locale,
+        );
         cardTrimmed = fitted.trimmed;
         lastLiveCard = fitted.card;
         return fitted.card;
@@ -1536,8 +1546,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           fallback: async (state) => {
             if (controls.profileConfig.agentKind === 'codex') return;
             if (renderText(filterForPrefs(state)).trim() === '') return;
-            const fitted = fitCardToBudget(filterForPrefs(state), (s) =>
-              renderCard(s, cardRenderOptions),
+            const fitted = fitCardToBudget(
+              filterForPrefs(state),
+              (s) => renderCard(s, cardRenderOptions),
+              undefined,
+              locale,
             );
             await channel.send(chatId, { card: fitted.card }, sendOpts);
             if (fitted.trimmed) {
@@ -1586,7 +1599,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               ? {
                   messageId: cardMessageId,
                   pointerCard: renderCard(
-                    pointerState(latestState, cardHealth.lastErrorCode),
+                    pointerState(latestState, cardHealth.lastErrorCode, locale),
                     cardRenderOptions,
                   ),
                 }
@@ -1612,7 +1625,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               if (progress.abandoned()) return;
               markdownCtrl = ctrl;
               supplementTarget.replyIds.add(ctrl.messageId);
-              await ctrl.setContent(renderText(filterForPrefs(latestState)));
+              await ctrl.setContent(renderText(filterForPrefs(latestState), locale));
               await renderDone;
             },
           },
@@ -1629,7 +1642,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           latestState = state;
           if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
           if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+            await markdownCtrl.setContent(renderText(filterForPrefs(state), locale));
           }
         },
       );
@@ -1642,7 +1655,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           producerStarted: () => producerStarted,
           fallback: async (state) => {
             if (controls.profileConfig.agentKind === 'codex') return;
-            const body = renderText(filterForPrefs(state));
+            const body = renderText(filterForPrefs(state), locale);
             if (body.trim()) {
               await channel.send(chatId, { markdown: body }, sendOpts);
             }
@@ -1714,6 +1727,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           ...(pausedCard ? { cardMessageId: pausedCard.messageId, card: pausedCard.card } : {}),
           resumeAt: resumeAtFor(runLimit),
           ...(runLimit.limitType ? { limitType: runLimit.limitType } : {}),
+          locale,
           attempt: resumeAttempt,
           createdAt: Date.now(),
         });
@@ -1739,7 +1753,7 @@ function autoResumeMessage(resume: PendingResume): NormalizedMessage {
     ...(resume.threadId ? { threadId: resume.threadId } : {}),
     senderId: resume.senderId,
     ...(resume.senderName ? { senderName: resume.senderName } : {}),
-    content: autoResumePrompt(resume.limitType),
+    content: autoResumePrompt(resume.limitType, resume.locale),
     rawContentType: AUTO_RESUME_CONTENT_TYPE,
     resources: [],
     mentions: [],
@@ -1752,13 +1766,10 @@ function autoResumeMessage(resume: PendingResume): NormalizedMessage {
 const AUTO_RESUME_CONTENT_TYPE = 'auto_resume';
 
 /** The paused card, with a line saying the task went on in a new card. */
-function withResumedNote(card: object, at: number): object {
+function withResumedNote(card: object, at: number, locale: Locale | undefined): object {
   const c = card as { body?: { elements?: object[] } };
   const elements = [...(c.body?.elements ?? [])];
-  const note = {
-    tag: 'markdown',
-    content: `▶️ **已于 ${formatMoment(at)} 自动继续**，见下方新卡片。`,
-  };
+  const note = { tag: 'markdown', content: runStrings(locale).resumedNote(formatMoment(at)) };
   // Above the byline (`hr` + grey agent line) when there is one.
   const hr = elements.findIndex((e) => (e as { tag?: string }).tag === 'hr');
   if (hr === -1) elements.push(note);
@@ -1779,15 +1790,8 @@ function runActivity(handle: RunHandle, state: RunState): RunActivity {
   };
 }
 
-function cardBrokenNotice(code: number | undefined): string {
-  return (
-    `⚠️ 进度卡片更新不了了（飞书错误 ${code ?? '未知'}），任务还在继续。` +
-    '卡片恢复不了的话，结束后结果会另发一条消息。'
-  );
-}
-
 /** The finished card, reduced to a pointer at the message that carries the answer. */
-function pointerState(state: RunState, code: number | undefined): RunState {
+function pointerState(state: RunState, code: number | undefined, locale: Locale): RunState {
   return {
     ...state,
     reasoning: { content: '', active: false },
@@ -1795,7 +1799,7 @@ function pointerState(state: RunState, code: number | undefined): RunState {
     blocks: [
       {
         kind: 'text',
-        content: `_卡片更新失败（飞书错误 ${code ?? '未知'}），完整回复见下一条消息。_`,
+        content: runStrings(locale).pointer(String(code ?? '?')),
         streaming: false,
       },
     ],
@@ -2006,7 +2010,7 @@ async function sendFinalReply(input: {
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: RunCardRenderOptions;
 }): Promise<void> {
-  const body = renderText(input.state);
+  const body = renderText(input.state, input.cardRenderOptions.locale);
 
   // Nothing deliverable to send (agent produced no text on a clean finish;
   // error/interrupt/timeout keep `body` non-empty via their notices). Skip

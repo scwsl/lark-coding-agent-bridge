@@ -18,7 +18,7 @@ export function toolHeaderText(tool: ToolEntry): string {
   return summary ? `${icon} **${tool.name}** — ${summary}` : `${icon} **${tool.name}**`;
 }
 
-export function toolBodyMd(tool: ToolEntry): string {
+export function toolBodyMd(tool: ToolEntry, runningText = '_运行中…_'): string {
   const parts: string[] = [];
   const inputMd = renderInput(tool);
   if (inputMd) parts.push(inputMd);
@@ -33,7 +33,7 @@ export function toolBodyMd(tool: ToolEntry): string {
       parts.push(`**Output**\n\`\`\`\n${truncated}\n\`\`\``);
     }
   } else if (tool.status === 'running') {
-    parts.push('_运行中…_');
+    parts.push(runningText);
   }
 
   const body = parts.join('\n\n');

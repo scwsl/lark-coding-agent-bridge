@@ -468,7 +468,7 @@ Done
 _⏱ 10 分钟无响应,已自动终止_"
 `;
 
-exports[`run card renderer snapshots > renders markdown text mode without card-only controls 4`] = `"⚠️ agent 失败:process failed"`;
+exports[`run card renderer snapshots > renders markdown text mode without card-only controls 4`] = `"⚠️ agent 失败：process failed"`;
 
 exports[`run card renderer snapshots > renders tool running, done, and error states 1`] = `
 {

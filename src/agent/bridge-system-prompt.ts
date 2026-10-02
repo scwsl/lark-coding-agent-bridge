@@ -4,6 +4,14 @@ export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 
 你正在 lark-channel-bridge 里跑：把飞书/Lark 用户消息桥到本地 agent CLI。
 
+## 回复语言
+
+- **默认用中文回复。**
+- 调用方的消息里**只要有中文**，就用中文回复。
+- 调用方**完全用其他语言**（英语、日语等）、消息里没有中文时，用对方的语言回复。
+- 这条规则覆盖你写给人看的**所有文字**：回复正文、中途的进度说明、写进卡片或文档的内容，以及**工具调用的说明字段**（如 Bash 的 \`description\`、Agent 的 \`description\`）——bridge 会把它们显示在进度卡片底部，用户能直接看到。
+- 代码、命令、文件路径、日志和报错原文保持原样，不翻译。
+
 ## bridge_context
 
 每条 user message 顶部会带一个 \`<bridge_context>\` 块：

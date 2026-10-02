@@ -88,10 +88,10 @@ describe('markdown stream startup failures', () => {
     const h = await createHarness();
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await h.channel.handlers.message?.(message('om_first', '第一条'));
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    await h.channel.handlers.message?.(message('om_second', 'second'));
+    await h.channel.handlers.message?.(message('om_second', '第二条'));
     await waitFor(() => h.agent.runOptions.length === 2);
 
     expect(h.channel.rawClient.im.v1.messageReaction.delete).toHaveBeenCalledWith(
@@ -110,10 +110,10 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await h.channel.handlers.message?.(message('om_first', '第一条'));
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    await h.channel.handlers.message?.(message('om_second', 'second'));
+    await h.channel.handlers.message?.(message('om_second', '第二条'));
     await waitFor(() => h.agent.runOptions.length === 2, 1000);
 
     expect(lastMarkdown(h.channel)).toContain('agent 失败');
@@ -153,14 +153,14 @@ describe('markdown stream startup failures', () => {
     const fail = vi.spyOn(log, 'fail').mockImplementation(() => {});
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await h.channel.handlers.message?.(message('om_first', '第一条'));
     await waitFor(() => streamProducerStarted);
     await waitFor(
       () => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0,
       4500,
     );
 
-    await h.channel.handlers.message?.(message('om_second', 'second'));
+    await h.channel.handlers.message?.(message('om_second', '第二条'));
     await waitFor(() => h.agent.runOptions.length === 2);
 
     streamFailure.reject(new Error('late stream failed'));
@@ -196,7 +196,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_final', 'run'));
+    await h.channel.handlers.message?.(message('om_final', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1);
 
     expect(visibleProgress.some((markdown) => markdown.includes('progress update'))).toBe(true);
@@ -226,7 +226,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_final_only', 'run'));
+    await h.channel.handlers.message?.(message('om_final_only', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1);
     // give a stray stream / recall a chance to fire before asserting
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -261,7 +261,7 @@ describe('markdown stream startup failures', () => {
     h.profileConfig.preferences.showToolCalls = false;
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_eager', 'run'));
+    await h.channel.handlers.message?.(message('om_eager', '跑一下'));
     await waitFor(() => streamCalls.length === 1);
     await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -292,7 +292,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_no_final', 'run'));
+    await h.channel.handlers.message?.(message('om_no_final', '跑一下'));
     await waitFor(() => visibleProgress.some((markdown) => markdown.includes('这是答案')));
     // give a (duplicate) final reply a chance to fire before asserting
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -325,7 +325,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_slow_stream', 'run'));
+    await h.channel.handlers.message?.(message('om_slow_stream', '跑一下'));
     await waitFor(() => visibleProgress.some((markdown) => markdown.includes('ANSWER_ONCE')));
     await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -354,7 +354,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_stuck_stream', 'run'));
+    await h.channel.handlers.message?.(message('om_stuck_stream', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1, 6000);
     gate.resolve();
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -382,7 +382,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_stream_fail', 'run'));
+    await h.channel.handlers.message?.(message('om_stream_fail', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1);
 
     expect(lastMarkdown(h.channel)).toContain('FINAL_AFTER_STREAM_FAILURE');
@@ -415,7 +415,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_no_receipt', 'run'));
+    await h.channel.handlers.message?.(message('om_no_receipt', '跑一下'));
     await waitFor(() =>
       fail.mock.calls.some(
         (call) => call[1] instanceof Error && call[1].message.includes('missing message receipt'),
@@ -443,7 +443,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_card_broken', 'run'));
+    await h.channel.handlers.message?.(message('om_card_broken', '跑一下'));
     await waitFor(() => JSON.stringify(h.channel.sent).includes('ANSWER_SENTINEL'));
 
     const sent = h.channel.sent.map((m) => JSON.stringify(m.content));
@@ -473,7 +473,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_card_long', 'run'));
+    await h.channel.handlers.message?.(message('om_card_long', '跑一下'));
     await waitFor(() => h.channel.sent.length > 0);
 
     const finalCard = cards.at(-1) as object;
@@ -511,7 +511,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_task', 'do the long task'));
+    await h.channel.handlers.message?.(message('om_task', '做这个长任务'));
     await waitFor(() => h.controls.autoResumer?.get('oc_dm') !== undefined);
 
     // The original card says why it stopped and when it goes on.
@@ -564,7 +564,7 @@ describe('markdown stream startup failures', () => {
     });
     await startTestBridge(h);
 
-    await h.channel.handlers.message?.(message('om_card_final', 'run'));
+    await h.channel.handlers.message?.(message('om_card_final', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1);
 
     // Intermediate agent messages stream as progress; the final answer never

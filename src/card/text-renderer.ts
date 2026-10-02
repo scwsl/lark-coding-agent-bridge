@@ -1,4 +1,5 @@
 import { maskEmails } from './mask-email';
+import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
 import type { Block, RunState, ToolEntry } from './run-state';
 import { toolHeaderText } from './tool-render';
@@ -13,7 +14,8 @@ import { toolHeaderText } from './tool-render';
  *   - No reasoning / thinking output (no place to fold it; would be noise)
  *   - Footer is appended inline at the bottom while running
  */
-export function renderText(state: RunState): string {
+export function renderText(state: RunState, locale?: Locale): string {
+  const t = runStrings(locale);
   const parts: string[] = [];
 
   for (const block of state.blocks) {
@@ -22,16 +24,15 @@ export function renderText(state: RunState): string {
   }
 
   if (state.terminal === 'interrupted') {
-    parts.push('_⏹ 已被中断_');
+    parts.push(t.interrupted);
   } else if (state.terminal === 'idle_timeout') {
-    const mins = state.idleTimeoutMinutes ?? 0;
-    parts.push(`_⏱ ${mins} 分钟无响应,已自动终止_`);
+    parts.push(t.idleTimeout(state.idleTimeoutMinutes ?? 0));
   } else if (state.terminal === 'paused') {
-    parts.push(pauseNotice(state.limit));
+    parts.push(pauseNotice(state.limit, locale));
   } else if (state.terminal === 'error' && state.errorMsg) {
-    parts.push(`⚠️ agent 失败:${state.errorMsg}`);
+    parts.push(t.agentFailed(state.errorMsg));
   } else if (state.terminal === 'running' && state.footer) {
-    parts.push(footerLine(state.footer));
+    parts.push(footerLine(state.footer, t));
   }
 
   // Strip raw emails so the Feishu tenant audit doesn't reject the message
@@ -57,8 +58,8 @@ function toolLine(tool: ToolEntry): string {
   return `> ${toolHeaderText(tool)}`;
 }
 
-function footerLine(status: 'thinking' | 'tool_running' | 'streaming'): string {
-  if (status === 'thinking') return '_🧠 正在思考…_';
-  if (status === 'tool_running') return '_🧰 正在调用工具…_';
-  return '_✍️ 正在输出…_';
+function footerLine(status: 'thinking' | 'tool_running' | 'streaming', t: RunStrings): string {
+  if (status === 'thinking') return `_${t.thinking}…_`;
+  if (status === 'tool_running') return `_${t.toolRunning}…_`;
+  return `_${t.streaming}…_`;
 }
