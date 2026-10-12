@@ -58,6 +58,12 @@ export interface ProfileAccess {
   guestDeniedTools?: string[];
   /** Regexes for shell commands refused to runs the owner didn't start. */
   guestDeniedCommands?: string[];
+  /**
+   * open_id → entries of `guestDeniedTools` lifted for that person's runs,
+   * e.g. `{ "ou_x": ["mcp__jira__jira_create_issue"] }`. A run gets a tool back
+   * only when every sender in its batch has it. Omitted when empty.
+   */
+  guestToolGrants?: Record<string, string[]>;
 }
 
 export interface SandboxConfig {
@@ -384,6 +390,7 @@ function normalizeAccess(
   const guestRoots = stringArray(access?.guestRoots);
   const guestDeniedTools = stringArray(access?.guestDeniedTools);
   const guestDeniedCommands = stringArray(access?.guestDeniedCommands);
+  const guestToolGrants = normalizeChatUserMap(access?.guestToolGrants);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -396,6 +403,7 @@ function normalizeAccess(
     ...(guestRoots.length > 0 ? { guestRoots } : {}),
     ...(guestDeniedTools.length > 0 ? { guestDeniedTools } : {}),
     ...(guestDeniedCommands.length > 0 ? { guestDeniedCommands } : {}),
+    ...(Object.keys(guestToolGrants).length > 0 ? { guestToolGrants } : {}),
   };
 }
 
@@ -414,6 +422,7 @@ function normalizeChatMentionMap(input: unknown): Record<string, boolean> {
  * mapped to `[]` is kept (not dropped) — the empty array is the "restricted,
  * no members yet" state, distinct from the chat_id being absent entirely.
  */
+/** Keep only id → string[] entries (chat → users, user → tools). */
 function normalizeChatUserMap(input: unknown): Record<string, string[]> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
   const out: Record<string, string[]> = {};

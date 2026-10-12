@@ -73,6 +73,8 @@ export function ownerOnlyGuard(opts: {
   /** Projects the owner opened to others (`access.guestRoots`). */
   guestRoots?: readonly string[];
   deniedTools?: readonly string[];
+  /** Entries of `deniedTools` this run gets back (`access.guestToolGrants`). */
+  grantedTools?: readonly string[];
   deniedCommands?: readonly string[];
   /** The run's working directory. */
   workspace?: string;
@@ -113,7 +115,7 @@ export function ownerOnlyGuard(opts: {
       join(lc, 'profiles', '*', 'lark-cli', '**'),
       join(lc, 'profiles', '*', 'logs', '**'),
     ],
-    deniedTools: [...(opts.deniedTools ?? [])],
+    deniedTools: (opts.deniedTools ?? []).filter((t) => !(opts.grantedTools ?? []).includes(t)),
     deniedCommands: [...(opts.deniedCommands ?? [])],
     hookScript: join(root, 'bin', 'bridge-guard.mjs'),
   };
@@ -176,6 +178,20 @@ export function claudeGuardArgs(
 }
 
 /** Every message of the batch came from the bot owner themselves (not a bot). */
+/**
+ * Tools lifted for a guest run (`access.guestToolGrants`): only those every
+ * sender in the batch was granted. A bot in the batch gets nothing.
+ */
+export function grantedToolsFor(
+  grants: Readonly<Record<string, readonly string[]>> | undefined,
+  batch: readonly NormalizedMessage[],
+  isBot: (msg: NormalizedMessage) => boolean,
+): string[] {
+  if (!grants || batch.length === 0 || batch.some(isBot)) return [];
+  const [first, ...rest] = batch.map((m) => grants[m.senderId] ?? []);
+  return [...new Set(first)].filter((tool) => rest.every((tools) => tools.includes(tool)));
+}
+
 export function isOwnerBatch(
   controls: RuntimeControls,
   batch: readonly NormalizedMessage[],

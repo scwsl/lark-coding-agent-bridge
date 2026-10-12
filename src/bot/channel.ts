@@ -56,7 +56,7 @@ import {
   toPromptAttachment,
 } from '../media/attachment';
 import { canUseDm, canUseGroup, isCreator, requireMentionForChat } from '../policy/access';
-import { isOwnerBatch, ownerOnlyGuard } from '../policy/owner-guard';
+import { grantedToolsFor, isOwnerBatch, ownerOnlyGuard } from '../policy/owner-guard';
 import { paths } from '../config/paths';
 import { MeetingManager } from '../meeting/manager';
 import type { VcRequestClient } from '../meeting/api';
@@ -1261,6 +1261,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         larkChannelHome: paths.appDir,
         guestRoots: controls.profileConfig.access.guestRoots ?? [],
         deniedTools: controls.profileConfig.access.guestDeniedTools ?? [],
+        grantedTools: grantedToolsFor(
+          controls.profileConfig.access.guestToolGrants,
+          batch,
+          (m) => senderTypeOf(m) === 'bot',
+        ),
         deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
         ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
       });

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   bridgeRoot,
   claudeGuardArgs,
+  grantedToolsFor,
   isOwnerBatch,
   ownerOnlyGuard,
 } from '../../../src/policy/owner-guard';
@@ -192,5 +193,43 @@ describe('isOwnerBatch', () => {
     expect(
       isOwnerBatch({ ...controls, ownerRefreshState: 'unknown' }, [msg('ou_owner')], notBot),
     ).toBe(false);
+  });
+});
+
+describe('guest tool grants', () => {
+  const msg = (senderId: string): NormalizedMessage => ({ senderId }) as NormalizedMessage;
+  const notBot = (): boolean => false;
+  const grants = {
+    ou_a: ['mcp__jira__jira_create_issue', 'mcp__jira__jira_create_issue_link'],
+    ou_b: ['mcp__jira__jira_create_issue'],
+  };
+
+  it('gives a run only the tools every sender was granted', () => {
+    expect(grantedToolsFor(grants, [msg('ou_a')], notBot)).toEqual([
+      'mcp__jira__jira_create_issue',
+      'mcp__jira__jira_create_issue_link',
+    ]);
+    expect(grantedToolsFor(grants, [msg('ou_a'), msg('ou_b')], notBot)).toEqual([
+      'mcp__jira__jira_create_issue',
+    ]);
+    expect(grantedToolsFor(grants, [msg('ou_a'), msg('ou_c')], notBot)).toEqual([]);
+    expect(grantedToolsFor(undefined, [msg('ou_a')], notBot)).toEqual([]);
+    expect(grantedToolsFor(grants, [], notBot)).toEqual([]);
+  });
+
+  it('never grants anything when a bot is in the batch', () => {
+    expect(grantedToolsFor(grants, [msg('ou_a')], () => true)).toEqual([]);
+  });
+
+  it('lifts only the granted entries from the denied tools', () => {
+    const granted = ownerOnlyGuard({
+      larkChannelHome: LC,
+      home: HOME,
+      root: ROOT,
+      deniedTools: ['mcp__github', 'mcp__jira__jira_create_issue', 'mcp__jira__jira_delete_issue'],
+      grantedTools: ['mcp__jira__jira_create_issue', 'mcp__not_denied'],
+    });
+    expect(granted.deniedTools).toEqual(['mcp__github', 'mcp__jira__jira_delete_issue']);
+    expect(claudeGuardArgs(granted).args).not.toContain('mcp__jira__jira_create_issue');
   });
 });
