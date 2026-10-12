@@ -98,12 +98,28 @@ function writesInto(segment, rule) {
   return new RegExp(`>{1,2}\\s*['"]?${escapeRe(rule.path)}`).test(segment);
 }
 
+// `cat > notes.md <<'EOF' … EOF` only writes its body to a file: the quoted
+// delimiter turns off expansion and nothing runs it, so prose such as
+// "SEA / EUR" in there is not a path. Bodies fed to anything else
+// (`bash <<'EOF'`, `cat <<'EOF' | sh`) or left unquoted (`$(…)` expands) stay checked.
+const HEREDOC = /^([^\n]*<<-?[ \t]*(['"])([A-Za-z_][\w-]*)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*$/gm;
+
+function isDataSink(header) {
+  const segment = header.split(/&&|\|\||;/).find((s) => s.includes('<<')) ?? '';
+  return /^\s*(?:cat|tee)\b/.test(segment) && !segment.includes('|');
+}
+
+function stripDataHeredocs(cmd) {
+  return cmd.replace(HEREDOC, (whole, header) => (isDataSink(header) ? header : whole));
+}
+
 function decideBash(command, cfg, cwd) {
-  const cmd = normalize(String(command ?? ''), cfg.home);
-  if (CONTROL.test(cmd)) return '这条命令会控制 bridge 进程（启停、重启或 launchd）';
+  const full = normalize(String(command ?? ''), cfg.home);
+  if (CONTROL.test(full)) return '这条命令会控制 bridge 进程（启停、重启或 launchd）';
   for (const re of cfg.deniedCommands ?? []) {
-    if (new RegExp(re).test(cmd)) return '这条命令属于仅限主人的操作';
+    if (new RegExp(re).test(full)) return '这条命令属于仅限主人的操作';
   }
+  const cmd = stripDataHeredocs(full);
   let cdInto = null;
   for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
     const trimmed = segment.trim();

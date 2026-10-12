@@ -97,6 +97,22 @@ describe('guest runs: file scope', () => {
     expect(bash(command).code).toBe(0);
   });
 
+  it('reads a quoted heredoc written to a file as data, not paths', () => {
+    const doc = "cat > draft.md <<'EOF'\n三个中心（SEA / EUR / AUS）\n见 ~/Documents/notes.txt\nEOF\nlark-cli docs +create --content @draft.md";
+    expect(bash(doc).code).toBe(0);
+    expect(bash(`mkdir -p /tmp/d && cd /tmp/d && ${doc}`).code).toBe(0);
+    expect(bash("cat <<\"EOF\" > /tmp/a.md\nA / B\nEOF").code).toBe(0);
+  });
+
+  it.each([
+    ['a heredoc run by a shell', "bash <<'EOF'\ncat ~/Documents/notes.txt\nEOF"],
+    ['a heredoc piped to a shell', "cat <<'EOF' | sh\nls ~\nEOF"],
+    ['an unquoted heredoc that expands commands', 'cat > /tmp/a <<EOF\n$(cat ~/.ssh/id_rsa)\nEOF'],
+    ['a heredoc written into a private place', "cat > ~/Documents/x.md <<'EOF'\nhi\nEOF"],
+  ])('still checks %s', (_label, command) => {
+    expect(bash(command).code).toBe(2);
+  });
+
   it('applies the same scope to file tools', () => {
     expect(hook('Read', { file_path: `${HOME}/Desktop/coding/lark/thing-hub/CLAUDE.md` }).code).toBe(2);
     expect(hook('Grep', { pattern: 'x', path: `${HOME}/Desktop` }).code).toBe(2);
