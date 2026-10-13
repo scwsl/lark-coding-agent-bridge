@@ -315,8 +315,9 @@ async function reportConnectAfter(
 /**
  * `bridge start` — install (write file + reload) then start.
  *
- * Always re-installs so that `process.execPath` (current node binary)
- * and `process.env.PATH` reflect the user's current shell — important if
+ * Always re-installs so that the node binary (a stable Homebrew path when
+ * available, see `resolveLaunchdNodePath`) and `process.env.PATH` reflect
+ * the user's current shell — important if
  * they've switched runtime versions or updated their PATH since last install.
  */
 export async function runServiceStart(opts: ServiceStartOptions = {}): Promise<void> {

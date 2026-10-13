@@ -71,13 +71,32 @@ ${argStrings}
 `;
 }
 
+/**
+ * Homebrew node paths that survive `brew upgrade`, most specific first.
+ * `process.execPath` resolves to the versioned Cellar path
+ * (`/opt/homebrew/Cellar/node/<ver>/bin/node`), which `brew upgrade` deletes.
+ * A LaunchAgent pinned to it keeps running from a deleted binary, and macOS
+ * privacy protection (TCC) then denies its children any access to
+ * Desktop / Documents / Downloads.
+ */
+export const STABLE_NODE_PATHS = ['/opt/homebrew/opt/node/bin/node', '/opt/homebrew/bin/node'] as const;
+
+/** Node binary to pin in the plist: the first stable Homebrew path that
+ * exists, else the currently running binary. */
+export function resolveLaunchdNodePath(
+  execPath: string = process.execPath,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  return STABLE_NODE_PATHS.find((p) => exists(p)) ?? execPath;
+}
+
 export async function writePlist(profile: string, runArgs: string[] = ['run']): Promise<void> {
   const bridgeEntryPath = process.argv[1];
   if (!bridgeEntryPath) {
     throw new Error('cannot determine bridge entry path (process.argv[1] is empty)');
   }
   const content = buildPlist({
-    nodePath: process.execPath,
+    nodePath: resolveLaunchdNodePath(),
     bridgeEntryPath,
     envPath: process.env.PATH ?? '',
     profile,
