@@ -1260,6 +1260,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     : ownerOnlyGuard({
         larkChannelHome: paths.appDir,
         guestRoots: controls.profileConfig.access.guestRoots ?? [],
+        guestReadOnlyRoots: controls.profileConfig.access.guestReadOnlyRoots ?? [],
         deniedTools: controls.profileConfig.access.guestDeniedTools ?? [],
         grantedTools: grantedToolsFor(
           controls.profileConfig.access.guestToolGrants,

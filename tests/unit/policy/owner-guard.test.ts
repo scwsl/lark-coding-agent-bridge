@@ -14,10 +14,12 @@ const HOME = '/Users/someone';
 const LC = `${HOME}/.lark-channel`;
 const WORKSPACE = `${HOME}/.lark-channel-workspaces/claude/default`;
 const OPEN = `${HOME}/Desktop/coding/lark/alphaess`;
+const READ_ONLY = `${HOME}/Desktop/coding/alphaess/platform_EMS3.6`;
 const ROOT = bridgeRoot();
 const guard = ownerOnlyGuard({
   larkChannelHome: LC,
   guestRoots: ['~/Desktop/coding/lark/alphaess'],
+  guestReadOnlyRoots: ['~/Desktop/coding/alphaess/platform_EMS3.6'],
   workspace: WORKSPACE,
   home: HOME,
   root: ROOT,
@@ -127,6 +129,42 @@ describe('guest runs: file scope', () => {
 
   it('ignores tools that touch no files', () => {
     expect(hook('WebSearch', { query: 'rm -rf ~' }).code).toBe(0);
+  });
+});
+
+describe('guest runs: read-only roots', () => {
+  it.each([
+    ['reading a file', `cat ${READ_ONLY}/logic/dispatch.c`],
+    ['searching', `grep -rn Dispatch ${READ_ONLY}/logic | head -20`],
+    ['git history', `git -C ${READ_ONLY} log -5 --oneline`],
+    ['read-only git inside the project', `cd ${READ_ONLY} && git show HEAD --stat && git blame logic/a.c`],
+  ])('allows %s', (_label, command) => {
+    expect(bash(command).code).toBe(0);
+  });
+
+  it.each([
+    ['writing a file', `echo x > ${READ_ONLY}/a.txt`],
+    ['deleting', `rm -rf ${READ_ONLY}/logic`],
+    ['pulling', `git -C ${READ_ONLY} pull`],
+    ['switching branches inside it', `cd ${READ_ONLY} && git checkout -b x`],
+    ['cd then write', `cd ${READ_ONLY} && echo x > a.txt`],
+    ['an in-place edit', `sed -i '' s/a/b/ ${READ_ONLY}/a.c`],
+  ])('refuses %s', (_label, command) => {
+    const res = bash(command);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain(`会改动 ${READ_ONLY}`);
+  });
+
+  it('lets file tools read but not edit', () => {
+    expect(hook('Read', { file_path: `${READ_ONLY}/logic/a.c` }).code).toBe(0);
+    expect(hook('Grep', { pattern: 'Dispatch', path: READ_ONLY }).code).toBe(0);
+    expect(hook('Edit', { file_path: `${READ_ONLY}/logic/a.c` }).code).toBe(2);
+    expect(hook('Write', { file_path: `${READ_ONLY}/new.c` }).code).toBe(2);
+  });
+
+  it('opens them for reading and denies edits through the Claude flags', () => {
+    expect(guard.allowedRoots).toContain(READ_ONLY);
+    expect(claudeGuardArgs(guard).args).toContain(`Edit(/${READ_ONLY}/**)`);
   });
 });
 

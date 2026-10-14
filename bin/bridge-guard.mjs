@@ -8,7 +8,9 @@
 // 2. File scope: inside the owner's home, only `allowedRoots` (the projects
 //    opened to others, the run's workspace, skills, attachments) may be read
 //    or written. Everything else under home is the owner's alone; paths
-//    outside home (system dirs, /tmp) are not fenced.
+//    outside home (system dirs, /tmp) are not fenced. Read-only projects
+//    (`access.guestReadOnlyRoots`) are allowed roots that also carry a
+//    `write` rule: readable, but nothing may write into them.
 //
 // Config arrives in LARK_CHANNEL_GUARD as JSON:
 //   { "home": "/Users/x",
@@ -28,6 +30,10 @@ import { isAbsolute, resolve, sep } from 'node:path';
 const CONTROL = /\blark-channel-bridge\b|\blaunchctl\b|bridge-restart-when-idle|bridge_watchdog/;
 const WRITE_VERB =
   /^(?:sudo\s+)?(?:\w+=\S*\s+)*(?:cp|mv|rm|rmdir|ln|chmod|chown|touch|mkdir|install|truncate|rsync|unlink|tee|patch|git|dd)\b/;
+// Git subcommands that only read the repository, so read-only projects
+// (`access.guestReadOnlyRoots`) can still be browsed with git.
+const GIT_READ =
+  /^(?:sudo\s+)?(?:\w+=\S*\s+)*git\s+(?:(?:-C|-c)\s+\S+\s+|--no-pager\s+|--(?:git-dir|work-tree)=\S+\s+)*(?:log|show|diff|grep|blame|ls-files|ls-tree|cat-file|rev-parse|rev-list|describe|shortlog|merge-base|name-rev)\b/;
 const IN_PLACE = /\bsed\s+(?:-[a-zA-Z]*i|--in-place)|\bperl\s+-[a-zA-Z]*i/;
 const RELATIVE_REDIRECT = /(?:^|[^<>&\d])>{1,2}\s*(?!\/|&|\$|~)\S/;
 const BARE_CD = /(?:^|[;&|]\s*)cd\s*(?:$|[;&|])/;
@@ -92,9 +98,13 @@ function mentions(segment, rule) {
   }
 }
 
+function isWriteVerb(trimmed) {
+  return (WRITE_VERB.test(trimmed) && !GIT_READ.test(trimmed)) || IN_PLACE.test(trimmed);
+}
+
 function writesInto(segment, rule) {
   const trimmed = segment.trim();
-  if (WRITE_VERB.test(trimmed) || IN_PLACE.test(trimmed)) return true;
+  if (isWriteVerb(trimmed)) return true;
   return new RegExp(`>{1,2}\\s*['"]?${escapeRe(rule.path)}`).test(segment);
 }
 
@@ -125,7 +135,7 @@ function decideBash(command, cfg, cwd) {
     const trimmed = segment.trim();
     if (!trimmed) continue;
     // `cd <protected> && echo x > file` writes there without naming it again.
-    if (cdInto && (WRITE_VERB.test(trimmed) || IN_PLACE.test(trimmed) || RELATIVE_REDIRECT.test(trimmed))) {
+    if (cdInto && (isWriteVerb(trimmed) || RELATIVE_REDIRECT.test(trimmed))) {
       return `这条命令会改动 ${cdInto.path}`;
     }
     for (const rule of cfg.rules ?? []) {

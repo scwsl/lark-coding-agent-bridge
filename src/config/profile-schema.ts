@@ -52,6 +52,13 @@ export interface ProfileAccess {
    */
   guestRoots?: string[];
   /**
+   * Directories a run started by someone other than the owner may read but
+   * not change (`~` allowed): file tools may not edit them and shell commands
+   * may not write into them; read-only git (log, show, diff, grep, blame…)
+   * still works. Omitted when empty.
+   */
+  guestReadOnlyRoots?: string[];
+  /**
    * Claude permission rules denied to runs the owner didn't start, e.g.
    * `mcp__github` (a whole MCP server) or `mcp__jira__jira_create_issue`.
    */
@@ -388,6 +395,7 @@ function normalizeAccess(
   const chatAllowedUsers = normalizeChatUserMap(access?.chatAllowedUsers);
   const stoppers = stringArray(access?.stoppers);
   const guestRoots = stringArray(access?.guestRoots);
+  const guestReadOnlyRoots = stringArray(access?.guestReadOnlyRoots);
   const guestDeniedTools = stringArray(access?.guestDeniedTools);
   const guestDeniedCommands = stringArray(access?.guestDeniedCommands);
   const guestToolGrants = normalizeChatUserMap(access?.guestToolGrants);
@@ -401,6 +409,7 @@ function normalizeAccess(
     ...(Object.keys(chatAllowedUsers).length > 0 ? { chatAllowedUsers } : {}),
     ...(stoppers.length > 0 ? { stoppers } : {}),
     ...(guestRoots.length > 0 ? { guestRoots } : {}),
+    ...(guestReadOnlyRoots.length > 0 ? { guestReadOnlyRoots } : {}),
     ...(guestDeniedTools.length > 0 ? { guestDeniedTools } : {}),
     ...(guestDeniedCommands.length > 0 ? { guestDeniedCommands } : {}),
     ...(Object.keys(guestToolGrants).length > 0 ? { guestToolGrants } : {}),

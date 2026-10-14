@@ -72,6 +72,8 @@ export function ownerOnlyGuard(opts: {
   larkChannelHome: string;
   /** Projects the owner opened to others (`access.guestRoots`). */
   guestRoots?: readonly string[];
+  /** Projects others may read but not change (`access.guestReadOnlyRoots`). */
+  guestReadOnlyRoots?: readonly string[];
   deniedTools?: readonly string[];
   /** Entries of `deniedTools` this run gets back (`access.guestToolGrants`). */
   grantedTools?: readonly string[];
@@ -86,10 +88,13 @@ export function ownerOnlyGuard(opts: {
   const lc = opts.larkChannelHome;
   const claude = join(home, '.claude');
   const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
+  const readOnlyRoots = (opts.guestReadOnlyRoots ?? []).map(expand);
   return {
     home,
     allowedRoots: [
       ...(opts.guestRoots ?? []).map(expand),
+      // Readable like an opened project; the `write` rules below fence edits.
+      ...readOnlyRoots,
       ...(opts.workspace ? [opts.workspace] : []),
       // What the agent needs to do its job for anyone: skills (read and run,
       // never write — the rules below still apply) and command-line tools.
@@ -108,6 +113,7 @@ export function ownerOnlyGuard(opts: {
       ),
       { path: join(home, '.local', 'bin'), bash: 'write' },
       { path: join(home, 'Library', 'LaunchAgents'), bash: 'write' },
+      ...readOnlyRoots.map((path): GuardRule => ({ path, bash: 'write' })),
     ],
     readDeny: [
       join(lc, 'config.json*'),
