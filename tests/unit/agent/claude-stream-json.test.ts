@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -169,6 +169,44 @@ describe('Claude stream-json reader behavior', () => {
         message: `claude exited with code 7: ${stderr}`,
         terminationReason: 'failed',
       },
+    ]);
+  });
+});
+
+describe('Claude adapter stop', () => {
+  let cleanup: (() => Promise<void>) | undefined;
+
+  afterEach(async () => {
+    await cleanup?.();
+    cleanup = undefined;
+  });
+
+  it('reports a requested stop as interrupted, not as a failed exit 143', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'claude-stop-test-'));
+    const path = join(dir, 'fake-claude.mjs');
+    await writeFile(
+      path,
+      [
+        '#!/usr/bin/env node',
+        `console.log(${JSON.stringify(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } }))});`,
+        "process.on('SIGTERM', () => process.exit(143));",
+        'setInterval(() => {}, 1000);',
+      ].join('\n'),
+      'utf8',
+    );
+    await chmod(path, 0o755);
+    cleanup = () => rm(dir, { recursive: true, force: true });
+
+    const run = new ClaudeAdapter({ binary: path }).run({ runId: 'run-stop', prompt: 'hi', cwd: tmpdir(), stopGraceMs: 2000 });
+    const events: AgentEvent[] = [];
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'text') await run.stop();
+    }
+
+    expect(events).toEqual([
+      { type: 'text', delta: 'working' },
+      { type: 'done', terminationReason: 'interrupted' },
     ]);
   });
 });

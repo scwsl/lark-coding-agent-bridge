@@ -159,11 +159,14 @@ export class ClaudeAdapter implements AgentAdapter {
     // SIGKILL cascade. Callers (channel.ts, /doctor) override per-run with
     // a value derived from preferences.
     const stopGraceMs = opts.stopGraceMs ?? 5000;
+    // Set once stop() is asked for, so the SIGTERM exit (code 143) is read as
+    // a stop — the same `interrupted` the codex adapter reports — not a crash.
+    let stopRequested = false;
 
     return {
       runId: opts.runId,
       pid: child.pid,
-      events: createEventStream(child, stderrChunks, () => runtimeError, input),
+      events: createEventStream(child, stderrChunks, () => runtimeError, input, () => stopRequested),
       inject(prompt: string, preview: string): boolean {
         const ok = input.write(prompt, preview);
         log.info('agent', ok ? 'inject' : 'inject-refused', {
@@ -174,6 +177,7 @@ export class ClaudeAdapter implements AgentAdapter {
       },
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
+        stopRequested = true;
         // Take the whole tree down, not just claude: a stop has to end the
         // commands it started too (see listDescendants).
         const descendants = child.pid ? listDescendants(child.pid) : [];
@@ -315,6 +319,7 @@ async function* createEventStream(
   stderrChunks: Buffer[],
   getError: () => Error | null,
   input: ClaudeInput,
+  wasStopped: () => boolean = () => false,
 ): AsyncGenerator<AgentEvent> {
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
@@ -415,6 +420,13 @@ async function* createEventStream(
       child.once('exit', (code) => resolve(code));
     }
   });
+
+  if (wasStopped()) {
+    // Asked to stop (/stop, the card's stop button, idle timeout, shutdown):
+    // whatever the exit code, the run was ended on purpose.
+    yield { type: 'done', terminationReason: 'interrupted' };
+    return;
+  }
 
   const runtimeError = getError();
   if (exitCode !== 0 && exitCode !== null) {

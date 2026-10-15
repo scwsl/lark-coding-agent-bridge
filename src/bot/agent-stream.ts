@@ -155,7 +155,13 @@ export async function processAgentStream(
       state = finalizeIfRunning(state);
     }
   }
-  log.info('card', 'final', { scope, terminal: state.terminal, interrupted: handle.interrupted });
+  log.info('card', 'final', {
+    scope,
+    terminal: state.terminal,
+    interrupted: handle.interrupted,
+    // Who stopped it — the bridge watchdog leaves a person's own stop alone.
+    ...(handle.stopCause ? { stopCause: handle.stopCause } : {}),
+  });
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
   await flush(state);
   if (handle.interrupted) {
