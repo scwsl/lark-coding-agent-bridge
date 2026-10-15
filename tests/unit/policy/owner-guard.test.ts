@@ -270,4 +270,23 @@ describe('guest tool grants', () => {
     expect(granted.deniedTools).toEqual(['mcp__github', 'mcp__jira__jira_delete_issue']);
     expect(claudeGuardArgs(granted).args).not.toContain('mcp__jira__jira_create_issue');
   });
+
+  it('lifts a granted command regex and keeps the rest', () => {
+    const push = '\\bgit\\s+push\\b';
+    const gh = '(^|[\\s;|&(])gh(\\s|$)';
+    const granted = ownerOnlyGuard({
+      larkChannelHome: LC,
+      home: HOME,
+      root: ROOT,
+      deniedCommands: [gh, push],
+      grantedTools: [push],
+    });
+    expect(granted.deniedCommands).toEqual([gh]);
+    const res = spawnSync(process.execPath, [granted.hookScript], {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push origin dev' }, cwd: WORKSPACE }),
+      env: { ...process.env, ...claudeGuardArgs(granted).env },
+      encoding: 'utf8',
+    });
+    expect(res.status).toBe(0);
+  });
 });

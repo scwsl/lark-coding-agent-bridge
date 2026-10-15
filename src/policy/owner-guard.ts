@@ -75,7 +75,10 @@ export function ownerOnlyGuard(opts: {
   /** Projects others may read but not change (`access.guestReadOnlyRoots`). */
   guestReadOnlyRoots?: readonly string[];
   deniedTools?: readonly string[];
-  /** Entries of `deniedTools` this run gets back (`access.guestToolGrants`). */
+  /**
+   * Entries of `deniedTools` or `deniedCommands` (the exact regex string) this
+   * run gets back (`access.guestToolGrants`).
+   */
   grantedTools?: readonly string[];
   deniedCommands?: readonly string[];
   /** The run's working directory. */
@@ -122,7 +125,7 @@ export function ownerOnlyGuard(opts: {
       join(lc, 'profiles', '*', 'logs', '**'),
     ],
     deniedTools: (opts.deniedTools ?? []).filter((t) => !(opts.grantedTools ?? []).includes(t)),
-    deniedCommands: [...(opts.deniedCommands ?? [])],
+    deniedCommands: (opts.deniedCommands ?? []).filter((re) => !(opts.grantedTools ?? []).includes(re)),
     hookScript: join(root, 'bin', 'bridge-guard.mjs'),
   };
 }
@@ -185,8 +188,8 @@ export function claudeGuardArgs(
 
 /** Every message of the batch came from the bot owner themselves (not a bot). */
 /**
- * Tools lifted for a guest run (`access.guestToolGrants`): only those every
- * sender in the batch was granted. A bot in the batch gets nothing.
+ * Tools and commands lifted for a guest run (`access.guestToolGrants`): only
+ * those every sender in the batch was granted. A bot in the batch gets nothing.
  */
 export function grantedToolsFor(
   grants: Readonly<Record<string, readonly string[]>> | undefined,

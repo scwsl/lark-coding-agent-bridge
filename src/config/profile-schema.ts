@@ -67,8 +67,9 @@ export interface ProfileAccess {
   /** Regexes for shell commands refused to runs the owner didn't start. */
   guestDeniedCommands?: string[];
   /**
-   * open_id → entries of `guestDeniedTools` lifted for that person's runs,
-   * e.g. `{ "ou_x": ["mcp__jira__jira_create_issue"] }`. A run gets a tool back
+   * open_id → entries of `guestDeniedTools`, or of `guestDeniedCommands` (the
+   * exact regex string), lifted for that person's runs, e.g.
+   * `{ "ou_x": ["mcp__jira__jira_create_issue"] }`. A run gets an entry back
    * only when every sender in its batch has it. Omitted when empty.
    */
   guestToolGrants?: Record<string, string[]>;
