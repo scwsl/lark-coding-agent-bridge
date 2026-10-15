@@ -33,6 +33,7 @@ export function OnboardWizard({ onCreated }: { onCreated: (profile: string) => v
   const [profileName, setProfileName] = useState("");
   const [botName, setBotName] = useState("");
   const [detected, setDetected] = useState<AgentKind[]>([]);
+  const [agents, setAgents] = useState<OnboardState["agents"]>([]);
   const [existing, setExisting] = useState<string[]>([]);
   const [qr, setQr] = useState<{ sessionId: string; qrUrl: string; expireIn: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("loading");
@@ -45,8 +46,10 @@ export function OnboardWizard({ onCreated }: { onCreated: (profile: string) => v
       .then((s) => {
         setDetected(s.detectedAgents);
         setExisting(s.profiles);
-        if (s.detectedAgents.length && !s.detectedAgents.includes("claude"))
-          setAgentKind(s.detectedAgents[0]!);
+        setAgents(s.agents);
+        // Registry order puts the default agent first; prefer it unless only others are installed.
+        const preferred = s.agents[0]?.kind ?? "claude";
+        setAgentKind(s.detectedAgents.length && !s.detectedAgents.includes(preferred) ? s.detectedAgents[0]! : preferred);
       })
       .catch(() => {});
   }, []);
@@ -131,8 +134,9 @@ export function OnboardWizard({ onCreated }: { onCreated: (profile: string) => v
           <Select value={agentKind} onValueChange={(v) => setAgentKind(v as AgentKind)}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="claude">Claude Code</SelectItem>
-              <SelectItem value="codex">Codex</SelectItem>
+              {agents.map((a) => (
+                <SelectItem key={a.kind} value={a.kind}>{a.displayName}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -185,7 +189,7 @@ export function OnboardWizard({ onCreated }: { onCreated: (profile: string) => v
         )}
       </div>
       {detected.length === 0 && (
-        <p className="text-center text-xs text-muted-foreground">未检测到已安装的 agent，请确保 claude 或 codex 已安装。</p>
+        <p className="text-center text-xs text-muted-foreground">未检测到已安装的 agent，请先安装其中之一：{agents.map((a) => a.displayName).join("、")}。</p>
       )}
       <p className="text-center text-xs text-muted-foreground">扫码人会成为应用 owner，自动豁免访问控制。</p>
     </div>

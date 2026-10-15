@@ -1,3 +1,4 @@
+import { AGENT_KINDS, isAgentKind, type AgentKind } from '../agent/registry';
 import type {
   AppCredentials,
   AppPreferences,
@@ -13,7 +14,7 @@ import {
   type PermissionSource,
 } from './permissions';
 
-export type AgentKind = 'claude' | 'codex';
+export type { AgentKind } from '../agent/registry';
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
 
@@ -92,6 +93,14 @@ export interface CodexConfig {
   ignoreUserConfig?: boolean;
   ignoreRules?: boolean;
   /**
+   * How runs talk to Codex. `app-server` (default) keeps one process per
+   * conversation and runs later turns in it; `exec` spawns `codex exec` per
+   * message. The adapter falls back to `exec` on its own when the app-server
+   * can't honour the profile (ignoreUserConfig, or execpolicy rules that
+   * ignoreRules must keep out).
+   */
+  transport?: 'app-server' | 'exec';
+  /**
    * Extra environment for the `codex` child process only — e.g. a proxy the
    * Codex CLI needs while the bridge itself talks to Feishu directly.
    * Bridge-managed variables (`CODEX_HOME`, `LARK_CHANNEL*`,
@@ -158,6 +167,73 @@ export interface MeetingConfig {
   summaryTarget: MeetingSummaryTarget;
 }
 
+/**
+ * Approvals for runs a non-admin drives (#6). Admins' own runs never ask.
+ * Off unless a profile opts in.
+ */
+export interface ApprovalsConfig {
+  /**
+   * On: each side-effecting step a non-admin's run takes waits for an
+   * admin's approval card. Off (default): non-admins' runs get the same
+   * permissions as an admin's — no approval cards.
+   */
+  enabled: boolean;
+  /**
+   * Shell commands that run without asking, by their leading words — e.g.
+   * `python3 ~/.claude/skills/remote-tcpdump/scripts/tcpdump_client.py`
+   * covers every subcommand of that script. Each stage of a `&&` / `|` line
+   * must be covered (or plainly read-only); `;`, redirection and
+   * substitution still ask. See `isAllowedCommand`.
+   */
+  allowCommands: string[];
+  /**
+   * Tools that run without asking, by name; `*` matches anything
+   * (`mcp__tdengine-*__query`). `Bash` here would waive every command.
+   */
+  allowTools: string[];
+}
+
+/**
+ * One shared skill library: a git repository the bridge keeps a read-only
+ * mirror of and adds to the agent's skill index, next to the profile's own
+ * `knowledge/skills/`. See `src/knowledge/libraries.ts`.
+ */
+export interface SkillLibraryConfig {
+  /** Directory name of the mirror and the label shown as the skill's source. */
+  name: string;
+  /** Anything `git fetch` accepts that {@link isPlausibleGitUrl} lets through. */
+  url: string;
+  /** Branch, tag or commit to follow. Absent: the remote's default branch. */
+  ref?: string;
+  /** Directory inside the repository holding `<skill>/SKILL.md`. Absent: `skills/` if present, else the root. */
+  path?: string;
+  /** Only these skills (directory or skill name). Absent: all of them. */
+  include?: string[];
+  /** Never these skills (directory or skill name). */
+  exclude?: string[];
+}
+
+export interface SkillsConfig {
+  libraries: SkillLibraryConfig[];
+  /**
+   * Minutes between automatic pulls of every library. Absent: 60. `0`: only on
+   * start-up and `/skills lib sync`.
+   */
+  syncIntervalMinutes?: number;
+}
+
+/**
+ * The knowledge directory's own git sync (`/knowledge bind`). See
+ * `src/knowledge/auto-sync.ts`.
+ */
+export interface KnowledgeConfig {
+  /**
+   * Minutes between automatic syncs (commit, pull --rebase, push) once the
+   * directory is bound to a remote. Absent: 30. `0`: only `/knowledge sync`.
+   */
+  syncIntervalMinutes?: number;
+}
+
 export type LarkCliIdentityPreset = 'bot-only' | 'user-default';
 
 /**
@@ -214,6 +290,12 @@ export interface ProfileConfig {
   /** In-meeting agent settings. See {@link MeetingConfig}. */
   meeting: MeetingConfig;
   larkCli: LarkCliConfig;
+  /** Approvals for non-admins' runs. See {@link ApprovalsConfig}. */
+  approvals: ApprovalsConfig;
+  /** Shared skill libraries. Absent: none configured. See {@link SkillsConfig}. */
+  skills?: SkillsConfig;
+  /** Knowledge repo auto-sync. Absent: defaults. See {@link KnowledgeConfig}. */
+  knowledge?: KnowledgeConfig;
 }
 
 /**
@@ -292,13 +374,16 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     comments?: unknown;
     meeting?: unknown;
     larkCli?: unknown;
+    approvals?: unknown;
+    skills?: unknown;
+    knowledge?: unknown;
   };
 
   if (raw.schemaVersion !== 2) {
     throw new Error('profile schemaVersion must be 2');
   }
-  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex') {
-    throw new Error('agentKind must be claude or codex');
+  if (!isAgentKind(raw.agentKind)) {
+    throw new Error(`agentKind must be one of: ${AGENT_KINDS.join(', ')}`);
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -319,6 +404,8 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   const comments = normalizeComments(raw.comments);
   const meeting = normalizeMeeting(raw.meeting);
   const larkCli = normalizeLarkCli(raw.larkCli);
+  const skills = normalizeSkills(raw.skills);
+  const knowledge = normalizeKnowledge(raw.knowledge);
 
   return {
     schemaVersion: 2,
@@ -344,6 +431,9 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     comments,
     meeting,
     larkCli,
+    approvals: normalizeApprovals(raw.approvals),
+    ...(skills ? { skills } : {}),
+    ...(knowledge ? { knowledge } : {}),
   };
 }
 
@@ -465,6 +555,7 @@ function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
     inheritCodexHome: input.inheritCodexHome !== false,
     ignoreUserConfig: input.ignoreUserConfig === true,
     ignoreRules: input.ignoreRules !== false,
+    ...(input.transport === 'exec' || input.transport === 'app-server' ? { transport: input.transport } : {}),
   };
   const env = normalizeCodexEnv(input.env);
   if (env) codex.env = env;
@@ -537,6 +628,89 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+function normalizeApprovals(input: unknown): ApprovalsConfig {
+  const raw = (input && typeof input === 'object' && !Array.isArray(input) ? input : {}) as {
+    enabled?: unknown;
+    allowCommands?: unknown;
+    allowTools?: unknown;
+  };
+  const trimmed = (value: unknown): string[] =>
+    stringArray(value)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  return {
+    enabled: raw.enabled === true,
+    allowCommands: trimmed(raw.allowCommands),
+    allowTools: trimmed(raw.allowTools),
+  };
+}
+
+const SKILL_LIBRARY_NAME_RE = /^[A-Za-z0-9][\w.-]{0,63}$/;
+
+export function isValidSkillLibraryName(name: string): boolean {
+  return SKILL_LIBRARY_NAME_RE.test(name) && name !== '.' && name !== '..';
+}
+
+/**
+ * A library's `path` is joined onto the mirror directory, so it has to stay
+ * inside it: relative, no `..` segments, nothing that starts like an option.
+ */
+export function isSafeSkillLibraryPath(path: string): boolean {
+  if (!path || path.startsWith('/') || path.startsWith('\\') || /^[A-Za-z]:/.test(path)) return false;
+  const segments = path.split(/[\\/]+/).filter(Boolean);
+  return segments.length > 0 && segments.every((segment) => segment !== '..' && !segment.startsWith('-'));
+}
+
+/**
+ * Libraries with a broken entry (no url, unusable name, duplicate name) are
+ * dropped one by one instead of failing the whole profile: a typo in one
+ * library must not keep the bot from starting.
+ */
+function normalizeSkills(input: unknown): SkillsConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as { libraries?: unknown; syncIntervalMinutes?: unknown };
+  const trimmed = (value: unknown): string[] =>
+    stringArray(value)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  const libraries: SkillLibraryConfig[] = [];
+  const seen = new Set<string>();
+  for (const entry of Array.isArray(raw.libraries) ? raw.libraries : []) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const item = entry as Record<string, unknown>;
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    if (!url || !isValidSkillLibraryName(name) || seen.has(name)) continue;
+    seen.add(name);
+    const ref = typeof item.ref === 'string' ? item.ref.trim() : '';
+    const path = typeof item.path === 'string' ? item.path.trim() : '';
+    const include = trimmed(item.include);
+    const exclude = trimmed(item.exclude);
+    libraries.push({
+      name,
+      url,
+      ...(ref ? { ref } : {}),
+      ...(path && isSafeSkillLibraryPath(path) ? { path } : {}),
+      ...(include.length > 0 ? { include } : {}),
+      ...(exclude.length > 0 ? { exclude } : {}),
+    });
+  }
+  const interval =
+    typeof raw.syncIntervalMinutes === 'number' && Number.isFinite(raw.syncIntervalMinutes)
+      ? Math.max(0, Math.floor(raw.syncIntervalMinutes))
+      : undefined;
+  if (libraries.length === 0 && interval === undefined) return undefined;
+  return { libraries, ...(interval !== undefined ? { syncIntervalMinutes: interval } : {}) };
+}
+
+/** Same rules as the skills interval: a negative number means `0`, anything else invalid is dropped. */
+function normalizeKnowledge(input: unknown): KnowledgeConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as { syncIntervalMinutes?: unknown };
+  if (typeof raw.syncIntervalMinutes !== 'number' || !Number.isFinite(raw.syncIntervalMinutes)) return undefined;
+  return { syncIntervalMinutes: Math.max(0, Math.floor(raw.syncIntervalMinutes)) };
 }
 
 function normalizeLarkCli(input: unknown): LarkCliConfig {

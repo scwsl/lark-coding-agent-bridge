@@ -1,4 +1,5 @@
-export type AgentKind = "claude" | "codex";
+/** An agent id from the backend registry (src/agent/registry.ts); the server validates it. */
+export type AgentKind = string;
 export type ProfileMode = "personal" | "team";
 export type LarkCliIdentity = "bot-only" | "user-default";
 export type MessageReply = "card" | "markdown" | "text";
@@ -49,8 +50,15 @@ export interface ConfigView {
   effort: string;
   /** Empty for non-claude profiles — hide the field when this is empty. */
   effortOptions: ModelOption[];
+  effortHint: string;
   messageReply: MessageReply;
   showToolCalls: boolean;
+  smartSession: boolean;
+  autoWorktreeCleanup: boolean;
+  /** 梦境整理 switch (manual runs: /dream run or the dream card). */
+  dream: boolean;
+  /** 自动整理 on top of {@link dream}. */
+  dreamAuto: boolean;
   cotMessages: CotMessages;
   maxConcurrentRuns: number;
   runIdleTimeoutMinutes: number;
@@ -170,4 +178,127 @@ export interface OnboardState {
   activeProfile?: string;
   profiles: string[];
   detectedAgents: AgentKind[];
+  agents: { kind: AgentKind; displayName: string }[];
+}
+
+/** One shared skill library (`/skills lib`). */
+export interface SkillLibrary {
+  name: string;
+  /** Credentials masked. */
+  url: string;
+  ref?: string;
+  path?: string;
+  include?: string[];
+  exclude?: string[];
+  /** A local mirror exists. */
+  present: boolean;
+  commit?: string;
+  commitAt?: number;
+  lastSyncAt?: number;
+  lastError?: string;
+  skills: { name: string; description: string }[];
+  /** Not loaded: an earlier skill has the same name. */
+  shadowed: string[];
+}
+
+export interface LibrarySyncResult {
+  name: string;
+  ok: boolean;
+  commit?: string;
+  changed?: boolean;
+  error?: string;
+}
+
+export interface SkillsView {
+  /** True when this console's process runs the profile (settings apply at once). */
+  live: boolean;
+  syncIntervalMinutes: number;
+  libraries: SkillLibrary[];
+  results?: LibrarySyncResult[];
+}
+
+export interface KnowledgeSyncRecord {
+  at: number;
+  trigger: "auto" | "manual";
+  ok: boolean;
+  error?: string;
+}
+
+/** The profile's knowledge directory and its git remote (`/knowledge`). */
+export interface KnowledgeView {
+  live: boolean;
+  dir: string;
+  /** The directory is a git repository of its own. */
+  repo: boolean;
+  remote?: string;
+  branch?: string;
+  ahead?: number;
+  behind?: number;
+  dirty?: boolean;
+  profileMemories: number;
+  ownSkills: number;
+  syncIntervalMinutes: number;
+  autoSync?: { syncing: boolean; failures: number; last?: KnowledgeSyncRecord };
+  outcome?: { committed: number; pulled: boolean; pushed: boolean; note?: string };
+  note?: string;
+}
+
+export type DreamRunStatus = "queued" | "running" | "deferred" | "succeeded" | "failed" | "cancelled";
+
+export interface DreamRun {
+  id: string;
+  status: DreamRunStatus;
+  trigger: "manual" | "auto";
+  startedAt: number;
+  endedAt?: number;
+  note?: string;
+  sessions: number;
+  memoryItems: number;
+  skillItems: number;
+  rejected: number;
+  deferred: number;
+  targets: { label: string; phase: string; items: number; prUrl?: string; prNumber?: number; error?: string; revertPrUrl?: string }[];
+}
+
+/** One look by 自动整理: what it started, or what held it back. */
+export interface DreamAutoCheck {
+  at: number;
+  started?: string;
+  block?: string;
+  reason?: string;
+  material?: { scopes: number; sessions: number; chars: number; fallback?: boolean };
+  openPrs?: number;
+  quota?: { percent: number; label: string } | { unknown: true };
+}
+
+/** 梦境整理 (`/dream`): status, recent runs and their Draft PRs. */
+export interface DreamView {
+  /** True when this console's process runs the profile (run / cancel available). */
+  live: boolean;
+  enabled: boolean;
+  agent: string;
+  settings: { maxSessions: number; maxInputChars: number; maxRunMinutes: number; minIdleMinutes: number; skillLibrary?: string; scopes?: string[] };
+  targets: { knowledge: { url?: string; problem?: string }; skills: { library?: string; problem?: string } };
+  running?: DreamRun;
+  runs: DreamRun[];
+  lastSucceededAt?: number;
+  openedPrs: number;
+  pendingDrafts: number;
+  trackedSessions: number;
+  auto: {
+    enabled: boolean;
+    settings: {
+      window: { start: number; end: number; text: string };
+      timezone: string;
+      minScopes: number;
+      minInputChars: number;
+      minIntervalDays: number;
+      maxIntervalDays: number;
+      maxOpenPrs: number;
+      maxAutoFailures: number;
+      maxQuotaPercent: number;
+    };
+    ledger: { consecutiveFailures: number; lastCompletedAt?: number; lastCheck?: DreamAutoCheck };
+  };
+  message?: string;
 }

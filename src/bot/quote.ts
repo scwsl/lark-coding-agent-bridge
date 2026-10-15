@@ -50,7 +50,7 @@ export interface QuotedContext {
  * each sub's flattened form, so we have to inject expansion at the sub-fetch
  * layer.
  */
-function preExpandInteractive(item: ApiMessageItem): ApiMessageItem {
+export function preExpandInteractive(item: ApiMessageItem): ApiMessageItem {
   if (item.msg_type !== 'interactive') return item;
   const raw = item.body?.content;
   if (typeof raw !== 'string' || raw.length === 0) return item;
@@ -105,14 +105,16 @@ function mapSenderType(raw: unknown): 'user' | 'bot' | undefined {
 /**
  * Normalize a single fetched message item (from `im.v1.message.get` or
  * `im.v1.message.list`) into a {@link QuotedContext}. Shared by the reply-quote
- * path and the topic-context path. `fetchSubMessages` resolves merge_forward
- * children — callers decide whether to reuse an already-fetched batch or fetch
- * fresh.
+ * path and the chat-context path (`chat-context.ts`). `fetchSubMessages`
+ * resolves merge_forward children — callers decide whether to reuse an
+ * already-fetched batch or fetch fresh. `resolveSenderName` fills in display
+ * names, which list items don't carry.
  */
-async function normalizeItemToQuoted(
+export async function normalizeItemToQuoted(
   channel: LarkChannel,
   parent: ApiMessageItem,
   fetchSubMessages: (mid: string) => Promise<ApiMessageItem[]>,
+  resolveSenderName?: (openId: string) => string | undefined,
 ): Promise<QuotedContext | undefined> {
   if (!parent.message_id) return undefined;
   const senderOpenId = parent.sender?.id;
@@ -138,6 +140,7 @@ async function normalizeItemToQuoted(
       fetchSubMessages,
       // We want the raw content here, not the trimmed @bot mention form.
       stripBotMentions: false,
+      ...(resolveSenderName ? { resolveSenderName } : {}),
     });
     const createMs = parent.create_time
       ? Number.parseInt(String(parent.create_time), 10)
@@ -165,75 +168,6 @@ async function normalizeItemToQuoted(
 }
 
 /**
- * Fetch a Feishu topic's upstream messages (chronological) so the agent has the
- * conversation it's being pulled into. Feishu's `im.v1.message.list` with
- * `container_id_type=thread` returns every message in the topic — including the
- * root that may never have @-mentioned the bot. Used only on the bot's first
- * engagement in a topic (an already-engaged topic keeps its history in the
- * resumed session).
- *
- * `excludeIds` drops the triggering messages and any explicit reply-quotes so
- * they aren't duplicated. Capped at `maxMessages` (keeps the most recent when
- * the topic is longer). Returns `[]` on any error — context is best-effort.
- */
-export async function fetchTopicContext(
-  channel: LarkChannel,
-  threadId: string,
-  opts: { maxMessages: number; excludeIds?: Set<string> },
-): Promise<QuotedContext[]> {
-  const collected: ApiMessageItem[] = [];
-  let pageToken: string | undefined;
-  try {
-    do {
-      const res = await channel.rawClient.im.v1.message.list({
-        params: {
-          container_id_type: 'thread',
-          container_id: threadId,
-          sort_type: 'ByCreateTimeAsc',
-          page_size: 50,
-          // Without this, Feishu returns the v1-canonical fallback body for
-          // CardKit 2.0 cards ("请升级至最新版本客户端") instead of the real
-          // schema-2.0 DSL — see fetchQuotedContext/fetchSubTreeItems below,
-          // which already request it via fetchRawMessage's default.
-          card_msg_content_type: 'user_card_content',
-          ...(pageToken ? { page_token: pageToken } : {}),
-        },
-      });
-      const data = (res as {
-        data?: { items?: ApiMessageItem[]; messages?: ApiMessageItem[]; has_more?: boolean; page_token?: string };
-      }).data;
-      const items = data?.items ?? data?.messages ?? [];
-      collected.push(...items);
-      pageToken = data?.has_more ? data.page_token : undefined;
-    } while (pageToken && collected.length < opts.maxMessages * 4);
-  } catch (err) {
-    log.warn('topic', 'context-fetch-failed', {
-      threadId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-
-  const exclude = opts.excludeIds ?? new Set<string>();
-  const relevant = collected
-    .filter(
-      (m) => m.message_id && !exclude.has(m.message_id) && !(m as { deleted?: boolean }).deleted,
-    )
-    .slice(-opts.maxMessages);
-
-  const out: QuotedContext[] = [];
-  for (const item of relevant) {
-    const fetchSubMessages = async (mid: string): Promise<ApiMessageItem[]> => {
-      const source = mid === item.message_id ? [item] : await fetchSubTreeItems(channel, mid);
-      return source.map(preExpandInteractive);
-    };
-    const quoted = await normalizeItemToQuoted(channel, item, fetchSubMessages);
-    if (quoted) out.push(quoted);
-  }
-  return out;
-}
-
-/**
  * Fetch a nested sub-message's items for merge_forward expansion. Unlike a
  * best-effort context fetch, this RE-THROWS on failure: the SDK's
  * convertMergeForward turns a throw into the `<forwarded_messages
@@ -242,7 +176,7 @@ export async function fetchTopicContext(
  * same distinction @larksuite/channel makes on the live-event path. Passed into
  * `normalize` as `fetchSubMessages`.
  */
-async function fetchSubTreeItems(
+export async function fetchSubTreeItems(
   channel: LarkChannel,
   messageId: string,
 ): Promise<ApiMessageItem[]> {

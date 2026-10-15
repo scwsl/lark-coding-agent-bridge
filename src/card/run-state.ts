@@ -1,4 +1,5 @@
 import type { AgentEvent } from '../agent/types';
+import { stripNewSessionMarker } from '../session/smart-session';
 
 export type ToolStatus = 'running' | 'done' | 'error';
 
@@ -268,4 +269,33 @@ export function stripNoReply(state: RunState): RunState {
     state.finalText !== undefined && isNoReplyText(state.finalText) ? undefined : state.finalText;
   if (blocks.length === state.blocks.length && finalText === state.finalText) return state;
   return { ...state, blocks, finalText };
+}
+
+/**
+ * Drop a trailing `[[NEW_SESSION…]]` marker (会话智能压缩) from the answer the
+ * user sees — complete, or still streaming in on a live text block. The
+ * request itself is read from the raw state by the channel.
+ */
+export function stripSessionMarker(state: RunState): RunState {
+  let changed = false;
+  const blocks = state.blocks.map((b) => {
+    if (b.kind !== 'text') return b;
+    const content = stripNewSessionMarker(b.content, b.streaming);
+    if (content === b.content) return b;
+    changed = true;
+    return { ...b, content };
+  });
+  const finalText = state.finalText !== undefined ? stripNewSessionMarker(state.finalText) : undefined;
+  if (finalText !== state.finalText) changed = true;
+  if (!changed) return state;
+  return {
+    ...state,
+    blocks: blocks.filter((b) => !(b.kind === 'text' && b.content.trim() === '')),
+    finalText: finalText?.trim() ? finalText : undefined,
+  };
+}
+
+/** Both agent-side reply markers: `[[NO_REPLY]]` answers and a trailing `[[NEW_SESSION…]]`. */
+export function stripControlMarkers(state: RunState): RunState {
+  return stripNoReply(stripSessionMarker(state));
 }

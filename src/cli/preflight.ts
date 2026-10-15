@@ -61,8 +61,16 @@ async function checkLarkCli(opts: PreFlightOptions): Promise<void> {
     await writeLarkCliSourceProjection(bridgeConfig, appPaths);
   }
   const larkChannelEnv = opts.larkChannel ? buildLarkChannelEnv(opts.larkChannel) : undefined;
+  // The local-user probe must read the user's own lark-cli config. Omitting the
+  // key is not enough: runCapture merges this over process.env, so a
+  // LARKSUITE_CLI_CONFIG_DIR inherited from the parent (e.g. a restart issued
+  // from a bridge-spawned agent shell) would silently point the probe at a
+  // profile's private config dir. Unset it explicitly.
   const legacyLarkChannelEnv = opts.larkChannel
-    ? buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: undefined })
+    ? {
+        ...buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: undefined }),
+        LARKSUITE_CLI_CONFIG_DIR: undefined,
+      }
     : undefined;
   const profileArgs =
     privateBinding || !opts.larkChannel?.profile ? [] : ['--profile', opts.larkChannel.profile];

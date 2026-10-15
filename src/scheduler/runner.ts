@@ -1,6 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { agentAccountName } from '../agent/account';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { agentCapability } from '../agent/capability';
+import { agentDescriptor } from '../agent/registry';
 import { modelLabel, resolveEffortArg } from '../agent/models';
 import { processAgentStream } from '../bot/agent-stream';
 import { recordRunSessionEvent, startRunFlow } from '../bot/run-flow';
@@ -73,10 +74,7 @@ export async function runScheduledJob(
   // drag a year of unrelated transcript into every run.
   if (job.session === 'fresh') deps.sessions.clear(scopeId);
 
-  const capability =
-    deps.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(deps.controls.profileConfig)
-      : claudeCapability(deps.controls.profileConfig);
+  const capability = agentCapability(deps.controls.profileConfig);
 
   const flow = await startRunFlow({
     scopeId,
@@ -225,7 +223,7 @@ async function cardOptions(deps: JobRunnerDeps): Promise<RunCardRenderOptions> {
       agent: profileConfig.agentKind,
       model: modelLabel(profileConfig.agentKind, profileConfig.preferences.model),
       effort: resolveEffortArg(profileConfig.agentKind, profileConfig.preferences.effort),
-      provider: profileConfig.agentKind === 'codex' ? 'openai' : 'anthropic',
+      provider: agentDescriptor(profileConfig.agentKind).provider,
       sponsor: await agentAccountName(profileConfig),
     },
   };

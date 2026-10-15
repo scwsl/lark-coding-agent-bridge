@@ -247,12 +247,105 @@ describe('topic message quote handling', () => {
       }),
     );
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('<topic_context>');
+    expect(prompt).toContain('<chat_context>');
+    expect(prompt).toContain('"window":"topic_history"');
     expect(prompt).toContain('the real upstream question');
     // The triggering message is in the thread list too — it must be excluded so
-    // it isn't duplicated inside topic_context.
-    const topicBlock = prompt.slice(prompt.indexOf('<topic_context>'), prompt.indexOf('</topic_context>'));
+    // it isn't duplicated inside chat_context.
+    const topicBlock = prompt.slice(prompt.indexOf('<chat_context>'), prompt.indexOf('</chat_context>'));
     expect(topicBlock).not.toContain('om_at_in_topic');
+  });
+
+  it('catches up on what the topic said since the last run, leaving out its own replies', async () => {
+    // Between two @-mentions the bot receives nothing, so a colleague's
+    // follow-up in the topic would be invisible. The second run reads back
+    // only what came after the first one — the bot's own reply is already in
+    // the session, and so is everything before the cursor.
+    const threadMessages: Array<Record<string, unknown>> = [
+      textItem('om_topic_root', 'ou_asker', 1760000000000, 'the real upstream question'),
+    ];
+    const h = await createHarness({ chatMode: 'topic', threadMessages });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_first_at',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 看下这个',
+        createTime: 1760000001000,
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    threadMessages.push(
+      textItem('om_first_at', 'ou_user', 1760000001000, '@Bridge 看下这个'),
+      { ...textItem('om_bot_reply', 'cli_test', 1760000002000, 'bot answer'), sender: { id: 'cli_test', sender_type: 'app' } },
+      textItem('om_colleague', 'ou_colleague', 1760000003000, 'colleague follow-up without at'),
+      textItem('om_second_at', 'ou_user', 1760000004000, '@Bridge 他说的对吗'),
+    );
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_second_at',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 他说的对吗',
+        createTime: 1760000004000,
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    const prompt = h.agent.runOptions[1]?.prompt ?? '';
+    const block = prompt.slice(prompt.indexOf('<chat_context>'), prompt.indexOf('</chat_context>'));
+    expect(block).toContain('"window":"catch_up"');
+    expect(block).toContain('colleague follow-up without at');
+    expect(block).not.toContain('the real upstream question');
+    expect(block).not.toContain('bot answer');
+    expect(block).not.toContain('om_second_at');
+  });
+
+  it('reads the group timeline back on the first mention in a regular group', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      threadMessages: [
+        textItem('om_earlier', 'ou_asker', 1760000000000, 'prod is throwing 500s since noon'),
+        textItem('om_group_at', 'ou_user', 1760000001000, '@Bridge 看下上面这个'),
+      ],
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_group_at',
+        rootId: 'om_group_at',
+        parentId: 'om_group_at',
+        content: '@Bridge 看下上面这个',
+        createTime: 1760000001000,
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          container_id_type: 'chat',
+          container_id: 'oc_topic_chat',
+          start_time: expect.any(String),
+          end_time: '1760000001',
+        }),
+      }),
+    );
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    const block = prompt.slice(prompt.indexOf('<chat_context>'), prompt.indexOf('</chat_context>'));
+    expect(block).toContain('"scope":"group"');
+    expect(block).toContain('"window":"recent"');
+    expect(block).toContain('prod is throwing 500s since noon');
+    expect(block).not.toContain('om_group_at');
   });
 
   it('does not fetch topic context when the topic session already exists', async () => {
@@ -289,7 +382,7 @@ describe('topic message quote handling', () => {
 
     expect(h.channel.rawClient.im.v1.message.list).not.toHaveBeenCalled();
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).not.toContain('<topic_context>');
+    expect(prompt).not.toContain('<chat_context>');
   });
 
   it('opens the progress card at once and recalls it when a Claude run produces no content', async () => {
@@ -416,6 +509,74 @@ describe('topic message quote handling', () => {
   });
 });
 
+describe('long-run notice', () => {
+  it('@-mentions the requester when a group run finishes after the threshold', async () => {
+    // The reply card was created when the run started and is edited in place,
+    // which Feishu doesn't push. Opening that card is where the clock jumps
+    // past the threshold, so the run ends "long" and owes a pushing notice.
+    const realNow = Date.now.bind(Date);
+    let offsetMs = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs);
+    cleanups.push(async () => clock.mockRestore());
+    const h = await createHarness({
+      chatMode: 'group',
+      agentEvents: [
+        { type: 'text', delta: '查完了' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      onStream: () => {
+        offsetMs = 6 * 60_000;
+      },
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_long',
+        rootId: 'om_long',
+        parentId: 'om_long',
+        content: '@Bridge 查一下',
+        senderType: 'user',
+      }),
+    );
+    // Not waitFor: its deadline is read from the clock this test moves.
+    for (let i = 0; i < 100 && h.channel.sent.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    clock.mockRestore();
+
+    expect(h.channel.sent).toHaveLength(1);
+    const notice = h.channel.sent[0];
+    expect((notice?.content as { text?: string }).text).toContain('任务完成');
+    expect((notice?.content as { text?: string }).text).toContain('6 分钟');
+    expect(notice?.options).toMatchObject({
+      replyTo: 'om_long',
+      mentions: [{ openId: 'ou_user', name: 'User' }],
+    });
+  });
+
+  it('stays quiet when the run is short', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      agentEvents: [
+        { type: 'text', delta: '好' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({ messageId: 'om_short', rootId: 'om_short', parentId: 'om_short', content: '@Bridge ping', senderType: 'user' }),
+    );
+    await waitFor(() => h.channel.streams.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(h.channel.sent).toHaveLength(0);
+  });
+});
+
 describe('merge_forward fetch failure', () => {
   it('skips the run and hints the user when the SDK could not fetch a merge_forward', async () => {
     // @larksuite/channel >= 0.4.1 normalizes an un-fetchable merge_forward to
@@ -470,6 +631,7 @@ async function createHarness(options: {
   rawThreadIds?: Record<string, string>;
   threadMessages?: Array<Record<string, unknown>>;
   agentEvents?: AgentEvent[];
+  onStream?: () => void;
 } = {}):Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
@@ -547,6 +709,7 @@ function createFakeLarkChannel(options: {
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
   threadMessages?: Array<Record<string, unknown>>;
+  onStream?: () => void;
 } = {}):FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
   const sent: Array<{ chatId: string; content: unknown; options: unknown }> = [];
@@ -557,6 +720,7 @@ function createFakeLarkChannel(options: {
   };
   const rawThreadIds = options.rawThreadIds ?? {};
   const threadMessages = options.threadMessages ?? [];
+  const onStream = options.onStream;
   return {
     handlers,
     sent,
@@ -609,6 +773,7 @@ function createFakeLarkChannel(options: {
     },
     async stream(chatId, input, options) {
       streams.push({ chatId, options });
+      onStream?.();
       if (isMarkdownStreamInput(input)) {
         await input.markdown({ setContent: async () => {} });
       }
@@ -641,6 +806,8 @@ function message(input: {
   rawContentType?: string;
   mentionedBot?: boolean;
   mentions?: Array<{ key: string; openId: string; name: string; isBot: boolean }>;
+  createTime?: number;
+  senderType?: 'user' | 'app';
 }): NormalizedMessage {
   const mentionedBot = input.mentionedBot ?? true;
   return {
@@ -663,8 +830,19 @@ function message(input: {
     parentId: input.parentId,
     ...(input.threadId ? { threadId: input.threadId } : {}),
     replyToMessageId: input.parentId,
-    createTime: 1760000001000,
+    createTime: input.createTime ?? 1760000001000,
+    ...(input.senderType ? { raw: { sender: { sender_type: input.senderType } } } : {}),
   } as unknown as NormalizedMessage;
+}
+
+function textItem(messageId: string, senderId: string, createTime: number, text: string): Record<string, unknown> {
+  return {
+    message_id: messageId,
+    msg_type: 'text',
+    body: { content: JSON.stringify({ text }) },
+    sender: { id: senderId, sender_type: 'user' },
+    create_time: String(createTime),
+  };
 }
 
 interface MarkdownStreamInput {

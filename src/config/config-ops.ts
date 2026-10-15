@@ -9,7 +9,7 @@ import {
 } from './profile-store';
 import { saveConfig } from './store';
 import { secretKeyForApp, type AppConfig, type AppPreferences } from './schema';
-import type { ProfileAccess, ProfileConfig, ProfileMode } from './profile-schema';
+import type { KnowledgeConfig, ProfileAccess, ProfileConfig, ProfileMode, SkillsConfig } from './profile-schema';
 import { applyLarkCliIdentityPolicy } from '../lark-cli/identity-policy';
 import { log, reportMetric } from '../core/logger';
 
@@ -121,6 +121,54 @@ export async function saveAccessConfig(
 }
 
 /**
+ * Mutate the profile's shared skill libraries under the config file lock,
+ * persist, and refresh the in-memory state. Only profile (v2) configs carry
+ * this section; a legacy single-profile file has nowhere to put it.
+ */
+export async function saveSkillsConfig(
+  state: MutableProfileState,
+  mutate: (skills: SkillsConfig) => SkillsConfig,
+): Promise<SkillsConfig> {
+  return withConfigFileLock(state.configPath, async () => {
+    const root = await loadRootConfig(state.configPath);
+    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，先运行 `lark-channel-bridge migrate` 再配置 skill 库。');
+    const profile = root.profiles[state.profile];
+    if (!profile) throw new Error(`profile not found: ${state.profile}`);
+    const skills = mutate(profile.skills ?? { libraries: [] });
+    root.profiles[state.profile] = { ...profile, skills };
+    await saveRootConfig(root, state.configPath);
+    state.profileConfig = root.profiles[state.profile]!;
+    state.cfg = runtimeProfileConfig(root, state.profile);
+    log.info('config-ops', 'skills-mutated', { libraries: skills.libraries.length });
+    return skills;
+  });
+}
+
+/**
+ * Mutate the profile's knowledge repo settings (auto-sync interval) under the
+ * config file lock, persist, and refresh the in-memory state. Profile (v2)
+ * configs only, like {@link saveSkillsConfig}.
+ */
+export async function saveKnowledgeConfig(
+  state: MutableProfileState,
+  mutate: (knowledge: KnowledgeConfig) => KnowledgeConfig,
+): Promise<KnowledgeConfig> {
+  return withConfigFileLock(state.configPath, async () => {
+    const root = await loadRootConfig(state.configPath);
+    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，先运行 `lark-channel-bridge migrate` 再配置知识库。');
+    const profile = root.profiles[state.profile];
+    if (!profile) throw new Error(`profile not found: ${state.profile}`);
+    const knowledge = mutate(profile.knowledge ?? {});
+    root.profiles[state.profile] = { ...profile, knowledge };
+    await saveRootConfig(root, state.configPath);
+    state.profileConfig = root.profiles[state.profile]!;
+    state.cfg = runtimeProfileConfig(root, state.profile);
+    log.info('config-ops', 'knowledge-mutated', { syncIntervalMinutes: knowledge.syncIntervalMinutes });
+    return knowledge;
+  });
+}
+
+/**
  * Store a new App Secret in the keystore and persist the account config
  * (SecretRef in config.json, plaintext only in the keystore), refreshing
  * in-memory state. Callers restart the bridge afterwards to reconnect with
@@ -165,9 +213,15 @@ export async function savePreferencesConfig(
   requireMentionInGroup: boolean,
   larkCliIdentity: ProfileConfig['larkCli']['identityPreset'],
   mode: ProfileMode,
-  /** In-meeting agent settings; omitted by callers that don't edit them. */
-  meeting?: ProfileConfig['meeting'],
+  /** Settings only some callers edit; omitted ones keep their stored value. */
+  extra: {
+    /** In-meeting agent settings. */
+    meeting?: ProfileConfig['meeting'];
+    /** Non-admin approvals on/off; the allowlists are never touched here. */
+    approvalsEnabled?: boolean;
+  } = {},
 ): Promise<void> {
+  const { meeting, approvalsEnabled } = extra;
   const larkCli = {
     identityPreset: larkCliIdentity,
     localUserImport: {
@@ -183,6 +237,7 @@ export async function savePreferencesConfig(
       state.profileConfig.larkCli = larkCli;
       state.profileConfig.mode = mode;
       if (meeting) state.profileConfig.meeting = meeting;
+      if (approvalsEnabled !== undefined) state.profileConfig.approvals.enabled = approvalsEnabled;
       await saveConfig(state.cfg, state.configPath);
       return;
     }
@@ -202,6 +257,7 @@ export async function savePreferencesConfig(
         requireMentionInGroup,
       },
       ...(meeting ? { meeting } : {}),
+      ...(approvalsEnabled !== undefined ? { approvals: { ...profile.approvals, enabled: approvalsEnabled } } : {}),
       larkCli,
     };
     await saveRootConfig(root, state.configPath);

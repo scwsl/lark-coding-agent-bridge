@@ -33,8 +33,25 @@ interface ClaudeRawEvent {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
   total_cost_usd?: number;
+  num_turns?: number;
+  /** `system/background_tasks_changed`: the full list of running background tasks. */
+  tasks?: unknown[];
+}
+
+/**
+ * A `result` that closes a turn in which the model never ran. On `--resume`
+ * Claude Code first drains task notifications left over from the previous
+ * process (e.g. a background Bash that died when the bridge reaped that
+ * process after `done`) and closes that drain with its own `num_turns: 0`
+ * result — before our prompt has reached the model. It is not the answer.
+ */
+export function isNoTurnResult(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const evt = raw as ClaudeRawEvent;
+  return evt.type === 'result' && evt.num_turns === 0;
 }
 
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
@@ -62,6 +79,11 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
         : {}),
       at: Date.now(),
     };
+    return;
+  }
+
+  if (evt.type === 'system' && evt.subtype === 'background_tasks_changed') {
+    yield { type: 'background', count: Array.isArray(evt.tasks) ? evt.tasks.length : 0 };
     return;
   }
 
@@ -131,14 +153,28 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
 
   if (evt.type === 'result') {
     if (evt.usage) {
+      // Claude counts cache reads / writes apart from `input_tokens`; the
+      // bridge's usage event reports the whole prompt, cached part included
+      // (Codex's convention). `total_cost_usd` is cumulative for the process —
+      // the adapter turns it into a per-turn figure.
+      const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens } = evt.usage;
+      const anyInput =
+        input_tokens !== undefined || cache_read_input_tokens !== undefined || cache_creation_input_tokens !== undefined;
       yield {
         type: 'usage',
-        inputTokens: evt.usage.input_tokens,
+        inputTokens: anyInput
+          ? (input_tokens ?? 0) + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0)
+          : undefined,
         outputTokens: evt.usage.output_tokens,
-        cachedInputTokens: evt.usage.cache_read_input_tokens,
+        cachedInputTokens: cache_read_input_tokens,
         costUsd: evt.total_cost_usd,
       };
     }
     yield { type: 'done', sessionId: evt.session_id, terminationReason: 'normal' };
   }
+}
+
+/** Encode one prompt as a stream-json user message (`--input-format stream-json`). */
+export function encodeUserMessage(prompt: string): string {
+  return `${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }] } })}\n`;
 }

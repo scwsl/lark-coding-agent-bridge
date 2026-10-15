@@ -7,6 +7,8 @@ interface PendingEntry {
 }
 
 export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
+/** Called with a scope's full queued list whenever it changes ([] once it is gone). */
+export type ChangeHandler = (scope: string, messages: readonly NormalizedMessage[]) => void;
 
 /**
  * Per-scope debounce queue. `scope` is the session scope string (typically
@@ -25,10 +27,12 @@ export class PendingQueue {
   private readonly blocked = new Set<string>();
   private readonly delayMs: number;
   private readonly onFlush: FlushHandler;
+  private readonly onChange: ChangeHandler | undefined;
 
-  constructor(delayMs: number, onFlush: FlushHandler) {
+  constructor(delayMs: number, onFlush: FlushHandler, onChange?: ChangeHandler) {
     this.delayMs = delayMs;
     this.onFlush = onFlush;
+    this.onChange = onChange;
   }
 
   push(scope: string, msg: NormalizedMessage): number {
@@ -37,12 +41,15 @@ export class PendingQueue {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.push(msg);
       existing.timer = this.blocked.has(scope) ? undefined : this.armTimer(scope);
+      this.onChange?.(scope, existing.messages);
       return existing.messages.length;
     }
+    const messages = [msg];
     this.map.set(scope, {
-      messages: [msg],
+      messages,
       timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
     });
+    this.onChange?.(scope, messages);
     return 1;
   }
 
@@ -51,15 +58,37 @@ export class PendingQueue {
     return this.map.get(scope)?.messages.length ?? 0;
   }
 
+  /** Messages queued across every scope. */
+  totalDepth(): number {
+    let total = 0;
+    for (const entry of this.map.values()) total += entry.messages.length;
+    return total;
+  }
+
   cancel(scope: string): NormalizedMessage[] {
     const entry = this.map.get(scope);
     if (!entry) return [];
     if (entry.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
+    this.onChange?.(scope, []);
     return entry.messages;
   }
 
   cancelAll(): void {
+    for (const [scope, entry] of this.map.entries()) {
+      if (entry.timer) clearTimeout(entry.timer);
+      this.onChange?.(scope, []);
+    }
+    this.map.clear();
+    this.blocked.clear();
+  }
+
+  /**
+   * Stop all timers and forget the queue in memory *without* reporting the
+   * messages as gone, so a durable copy (see PendingStore) survives for the
+   * next process to pick up. Used on shutdown / reconnect.
+   */
+  stop(): void {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);
     }
@@ -98,6 +127,7 @@ export class PendingQueue {
     const entry = this.map.get(scope);
     if (!entry) return;
     this.map.delete(scope);
+    this.onChange?.(scope, []);
     try {
       this.onFlush(scope, entry.messages);
     } catch (err) {

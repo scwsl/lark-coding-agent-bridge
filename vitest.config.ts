@@ -5,6 +5,10 @@ import { defineConfig } from "vitest/config";
 // vitest too. Without this, vite's import-analysis tries to parse the built
 // console HTML as JS and fails.
 export default defineConfig({
+  test: {
+    // Keep the suite hermetic when run from inside a bridge-spawned agent.
+    setupFiles: ["./tests/setup/clear-bridge-env.ts"],
+  },
   plugins: [
     {
       name: "html-string-loader",

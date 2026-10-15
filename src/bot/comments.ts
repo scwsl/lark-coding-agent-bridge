@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { agentCapability } from '../agent/capability';
+import { runNeedsApproval } from '../policy/access';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { getAgentStopGraceMs } from '../config/schema';
 import type { Controls } from '../commands';
@@ -186,10 +187,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     : false;
 
   try {
-    const capability =
-      controls.profileConfig.agentKind === 'codex'
-        ? codexCapability(controls.profileConfig)
-        : claudeCapability(controls.profileConfig);
+    const capability = agentCapability(controls.profileConfig);
     const runTimeoutMs = commentRunTimeoutMs(sessions, runScopeId);
     const threadTimeoutMs = commentRunTimeoutMs(sessions, commentThreadScopeId);
     const commentTimeoutMs = runTimeoutMs !== undefined ? runTimeoutMs : threadTimeoutMs;
@@ -242,12 +240,17 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policyFingerprint: policy.policyFingerprint,
           })
         : undefined;
-      const sessionId =
-        canResumeAgentSession && capability.agentId === 'claude'
+      const { descriptor } = capability;
+      // Scope-store agents resume a doc from the doc-scoped SessionStore; the
+      // rest resume from the catalog entry.
+      const resumeHandle = !canResumeAgentSession
+        ? undefined
+        : descriptor.scopeSessionStore
           ? sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
             sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
-          : undefined;
-      const threadId = capability.agentId === 'codex' ? catalogEntry?.threadId : undefined;
+          : catalogEntry?.[descriptor.sessionHandle];
+      const sessionId = descriptor.sessionHandle === 'sessionId' ? resumeHandle : undefined;
+      const threadId = descriptor.sessionHandle === 'threadId' ? resumeHandle : undefined;
       log.info('comment', 'session', {
         commentScopeId: runScopeId,
         sessionScopeId: agentSessionScopeId,
@@ -262,6 +265,19 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         sessionId,
         threadId,
         stopGraceMs: getAgentStopGraceMs(controls.cfg),
+        actor: { id: evt.operator.openId },
+        // A doc comment from a non-admin runs gated, like an IM message would.
+        ...(!runNeedsApproval(controls.profileConfig, controls, evt.operator.openId)
+          ? {}
+          : {
+              gate: {
+                actor: { id: evt.operator.openId },
+                source: 'comment',
+                scopeId: runScopeId,
+                where: '云文档评论',
+                agent: capability.agentId,
+              },
+            }),
         observability: {
           profile: controls.profile,
           agent: capability.agentId,
@@ -328,8 +344,9 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policy,
             event: e,
           });
-          if (capability.agentId === 'claude' && e.type === 'system' && e.sessionId) {
-            sessions.set(docSessionScopeId, e.sessionId, policy.cwdRealpath);
+          const docHandle = e.type === 'system' ? e[descriptor.sessionHandle] : undefined;
+          if (descriptor.scopeSessionStore && docHandle) {
+            sessions.set(docSessionScopeId, docHandle, policy.cwdRealpath);
           }
           switch (e.type) {
             case 'text':

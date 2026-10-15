@@ -183,6 +183,7 @@ describe('/worktree', () => {
     const h = await createHarness();
     await h.run('/worktree add fix/bug-1');
     const worktreeCwd = h.workspaces.cwdFor('chat-1');
+    expect(h.workspaces.listManagedWorktrees()).toMatchObject([{ branch: 'fix/bug-1', ownedBranch: true, path: worktreeCwd }]);
 
     await expect(h.run('/worktree use main')).resolves.toBe(true);
     expect(h.workspaces.cwdFor('chat-1')).toBe(h.repo);
@@ -207,6 +208,7 @@ describe('/worktree', () => {
 
     await expect(h.run('/worktree remove fix/bug-1')).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('已删除 worktree');
+    expect(h.workspaces.listManagedWorktrees()).toEqual([]);
   });
 
   it('rejects an unsafe branch name', async () => {

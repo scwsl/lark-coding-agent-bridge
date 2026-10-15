@@ -6,7 +6,7 @@ export interface KnowledgeContext {
   /** Notes recorded for this chat / topic only. */
   chatMemory?: string[];
   /** Index only — the agent reads a skill's body itself when it needs it. */
-  skills?: Array<{ name: string; description: string; path: string }>;
+  skills?: SkillRef[];
   /** Set when notes were dropped to stay inside the budget. */
   truncated?: boolean;
 }
@@ -18,8 +18,23 @@ export interface BuildKnowledgeContextInput {
   maxChars?: number;
 }
 
+export interface SkillRef {
+  name: string;
+  description: string;
+  path: string;
+  /** Shared library the skill comes from; absent for the profile's own. */
+  source?: string;
+}
+
 const DEFAULT_MAX_CHARS = 6000;
-const MAX_SKILLS = 40;
+const MAX_SKILLS = 80;
+/**
+ * The index rides along on every message, and shared libraries can bring dozens
+ * of skills with paragraph-long descriptions. One sentence is enough to decide
+ * whether to open the body, and the whole index gets its own budget.
+ */
+const MAX_DESCRIPTION_CHARS = 240;
+const SKILL_INDEX_MAX_CHARS = 16_000;
 
 /**
  * Assemble what the agent should know before answering, or `undefined` when
@@ -39,7 +54,7 @@ export async function buildKnowledgeContext(
   ]);
 
   const budgeted = applyBudget(profile, chat, input.maxChars ?? DEFAULT_MAX_CHARS);
-  const trimmedSkills = skills.slice(0, MAX_SKILLS);
+  const trimmedSkills = budgetSkills(skills.slice(0, MAX_SKILLS).map(toSkillRef));
   if (
     budgeted.profile.length === 0 &&
     budgeted.chat.length === 0 &&
@@ -51,13 +66,35 @@ export async function buildKnowledgeContext(
   return {
     ...(budgeted.profile.length > 0 ? { profileMemory: budgeted.profile } : {}),
     ...(budgeted.chat.length > 0 ? { chatMemory: budgeted.chat } : {}),
-    ...(trimmedSkills.length > 0 ? { skills: trimmedSkills.map(toSkillRef) } : {}),
+    ...(trimmedSkills.length > 0 ? { skills: trimmedSkills } : {}),
     ...(budgeted.truncated || skills.length > trimmedSkills.length ? { truncated: true } : {}),
   };
 }
 
-function toSkillRef(skill: SkillSummary): { name: string; description: string; path: string } {
-  return { name: skill.name, description: skill.description, path: skill.path };
+function toSkillRef(skill: SkillSummary): SkillRef {
+  const description =
+    skill.description.length > MAX_DESCRIPTION_CHARS
+      ? `${skill.description.slice(0, MAX_DESCRIPTION_CHARS - 1)}…`
+      : skill.description;
+  return {
+    name: skill.name,
+    description,
+    path: skill.path,
+    ...(skill.source ? { source: skill.source } : {}),
+  };
+}
+
+/** Keep skills in order until the index budget runs out (own skills come first). */
+function budgetSkills(skills: SkillRef[]): SkillRef[] {
+  const kept: SkillRef[] = [];
+  let used = 0;
+  for (const skill of skills) {
+    const size = skill.name.length + skill.description.length + skill.path.length + (skill.source?.length ?? 0);
+    if (used + size > SKILL_INDEX_MAX_CHARS) break;
+    kept.push(skill);
+    used += size;
+  }
+  return kept;
 }
 
 /**

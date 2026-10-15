@@ -34,10 +34,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "@/components/ui/sonner";
+import { DreamCard } from "./DreamCard";
+import { KnowledgeCard, SkillLibrariesCard } from "./KnowledgeCards";
 
 export function ConfigView({ profile }: { profile: string }) {
   const [cfg, setCfg] = useState<ConfigData | null>(null);
   const [saving, setSaving] = useState(false);
+  // Bumped after a save so cards showing derived state (the dream switch) reload.
+  const [savedCount, setSavedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // chat_id → display name, for the allowed-chats list. Seeded from the bot's
   // known chats and topped up with names captured when adding from the picker.
@@ -82,6 +86,10 @@ export function ConfigView({ profile }: { profile: string }) {
         effort: cfg.effort,
         messageReply: cfg.messageReply,
         showToolCalls: cfg.showToolCalls,
+        smartSession: cfg.smartSession,
+        autoWorktreeCleanup: cfg.autoWorktreeCleanup,
+        dream: cfg.dream,
+        dreamAuto: cfg.dreamAuto,
         cotMessages: cfg.cotMessages,
         maxConcurrentRuns: cfg.maxConcurrentRuns,
         runIdleTimeoutMinutes: cfg.runIdleTimeoutMinutes,
@@ -89,6 +97,7 @@ export function ConfigView({ profile }: { profile: string }) {
         larkCliIdentity: cfg.larkCliIdentity,
       });
       setCfg(next);
+      setSavedCount((n) => n + 1);
       toast.success(next.live ? "已保存，立即生效" : "已保存，下次启动该 profile 生效");
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
@@ -148,7 +157,7 @@ export function ConfigView({ profile }: { profile: string }) {
               options={cfg.models.map((m) => [m.value, m.label])} />
           </Field>
           {cfg.effortOptions.length > 0 && (
-            <Field label="Effort（推理强度）" hint={cfg.agentKind === "codex" ? "越高越慢越贵；跟随默认 = 用 Codex 配置里的 model_reasoning_effort；所选模型不支持的档位会自动降到它支持的最高档" : "越高越慢越贵，越低越快越便宜；跟随默认 = 不传 --effort，由 CLI 决定"}>
+            <Field label="Effort（推理强度）" hint={`越高越慢越贵；${cfg.effortHint}`}>
               <SelectRow value={cfg.effort} onChange={(v) => set("effort", v)}
                 options={[["", "跟随默认"], ...cfg.effortOptions.map((o) => [o.value, o.label] as [string, string])]} />
             </Field>
@@ -159,6 +168,14 @@ export function ConfigView({ profile }: { profile: string }) {
           </Field>
           <ToggleRow label="工具调用显示" hint="显示 bot 执行的命令与文件读写过程" checked={cfg.showToolCalls}
             onChange={(v) => set("showToolCalls", v)} />
+          <ToggleRow label="会话智能压缩" hint="空闲超 1 小时且上下文超 15 万 token，或空闲超 8 小时，下次消息自动开新会话；任务完成时可自动收尾，长会话提前压缩。旧会话可用 /resume 找回；后台任务运行中、进程保留期间或引用回复时不切换。阈值可在配置文件中调整。"
+            checked={cfg.smartSession} onChange={(v) => set("smartSession", v)} />
+          <ToggleRow label="Worktree 自动清理" hint="每小时检查 bridge 创建的 worktree；默认闲置 7 天、已合入主工作区且无会话引用才清理。改动、未跟踪/忽略文件、锁定目录会保留；只删除 bridge 新建的分支。天数可在配置文件调整。"
+            checked={cfg.autoWorktreeCleanup} onChange={(v) => set("autoWorktreeCleanup", v)} />
+          <ToggleRow label="梦境整理" hint="打开后可以手动触发（/dream run 或下方「梦境整理」卡片）：读取已结束的会话，只读整理出记忆、笔记和 skill 提案，在知识库和 skill 库开 Draft PR，合并前不生效。默认关闭。"
+            checked={cfg.dream} onChange={(v) => set("dream", v)} />
+          <ToggleRow label="自动整理" hint="需先打开梦境整理。不按天跑：新内容攒够（默认 5 个会话范围或 6 万字）、距上次至少 3 天、上一批 Draft PR 已审完、在允许时段（默认 01:00-07:00）且 bot 空闲时才自己整理一轮；有用户消息就让路，额度接近上限时跳过，不推送任何消息。条件在配置文件 dreamTuning 里调。默认关闭。"
+            checked={cfg.dreamAuto} onChange={(v) => set("dreamAuto", v)} />
           <Field label="COT 过程消息">
             <SelectRow value={cfg.cotMessages} onChange={(v) => set("cotMessages", v as ConfigData["cotMessages"])}
               options={[["off", "关闭"], ["brief", "简略"], ["detailed", "详细"]]} />
@@ -198,6 +215,10 @@ export function ConfigView({ profile }: { profile: string }) {
         cfg={cfg.meeting}
         onChange={(next) => set("meeting", next)}
       />
+
+      <SkillLibrariesCard profile={profile} />
+      <KnowledgeCard profile={profile} />
+      <DreamCard profile={profile} refreshKey={savedCount} />
 
       <Card>
         <CardHeader><CardTitle>访问控制</CardTitle></CardHeader>

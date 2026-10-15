@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import {
@@ -109,6 +109,77 @@ afterEach(async () => {
 });
 
 describe('ui server (supervisor-backed)', () => {
+  it.each(['claude', 'work', 'codex'])('persists smart-session toggle for online/offline profile %s', async (profile) => {
+    if (profile === 'codex') {
+      const root = (await loadRootConfig(configPath))!;
+      root.profiles.codex = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' }, accounts: { app } });
+      await saveRootConfig(root, configPath);
+    }
+    const url = `/api/config?profile=${profile}`;
+    expect((await json(await get(url, handle.token))).smartSession).toBe(false);
+    expect((await json(await get(url, handle.token))).autoWorktreeCleanup).toBe(false);
+    expect((await json(await post(url, handle.token, { autoWorktreeCleanup: true }))).autoWorktreeCleanup).toBe(true);
+    await post(url, handle.token, { autoWorktreeCleanup: 'false' });
+    expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.autoWorktreeCleanup).toBe(true);
+    expect((await json(await post(url, handle.token, { autoWorktreeCleanup: false }))).autoWorktreeCleanup).toBe(false);
+    expect((await json(await get(url, handle.token))).dream).toBe(false);
+    expect((await json(await post(url, handle.token, { dream: true }))).dream).toBe(true);
+    await post(url, handle.token, { dream: 'false' });
+    expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.dream).toBe(true);
+    expect((await json(await post(url, handle.token, { dream: false }))).dream).toBe(false);
+    expect((await json(await get(url, handle.token))).dreamAuto).toBe(false);
+    expect((await json(await post(url, handle.token, { dreamAuto: true }))).dreamAuto).toBe(true);
+    await post(url, handle.token, { dreamAuto: 'false' });
+    expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.dreamAuto).toBe(true);
+    expect((await json(await post(url, handle.token, { dreamAuto: false }))).dreamAuto).toBe(false);
+    expect((await json(await post(url, handle.token, { smartSession: true }))).smartSession).toBe(true);
+    if (online.has(profile)) expect(online.get(profile).cfg.preferences.smartSession).toBe(true);
+    expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.smartSession).toBe(true);
+    // Older clients/invalid submissions must preserve the existing preference.
+    await post(url, handle.token, { maxConcurrentRuns: 4 });
+    await post(url, handle.token, { smartSession: 'false' });
+    expect((await json(await get(url, handle.token))).smartSession).toBe(true);
+    expect((await json(await post(url, handle.token, { smartSession: false }))).smartSession).toBe(false);
+    expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.smartSession).toBe(false);
+  });
+  it('shows 梦境整理 status and runs it only for a profile this process hosts', async () => {
+    // offline profile: read from its state file, nothing written back, no actions
+    await writeFile(
+      join(rootDir, 'profiles', 'work', 'dream-state.json'),
+      JSON.stringify({
+        version: 1,
+        sessions: {},
+        published: [],
+        runs: [{ id: 'b1', status: 'running', actorId: 'ou', startedAt: 1, sessions: 0, scopes: 0, exchanges: 0, memoryItems: 0, skillItems: 0, rejected: 0, deferred: [], targets: [{ repo: 'knowledge', label: '知识库', branch: 'dream/b1', phase: 'pr-created', items: 1, prUrl: 'https://x/pull/3', prNumber: 3, checkoutDir: '/secret/path', body: 'draft text' }] }],
+      }),
+    );
+    const offline = await json(await get('/api/dream?profile=work', handle.token));
+    expect(offline).toMatchObject({ live: false, enabled: false, running: { id: 'b1', trigger: 'manual' }, openedPrs: 1, auto: { enabled: false } });
+    expect(JSON.stringify(offline)).not.toContain('/secret/path');
+    expect(JSON.stringify(offline)).not.toContain('draft text');
+    const refused = await post('/api/dream?profile=work', handle.token, { action: 'run' });
+    expect(refused.status).toBe(409);
+    expect(JSON.parse(await readFile(join(rootDir, 'profiles', 'work', 'dream-state.json'), 'utf8')).runs[0].status).toBe('running');
+
+    // hosted profile: actions go to its live service
+    const start = vi.fn(async () => ({ run: { id: 'b2' } }));
+    const revert = vi.fn(async (id: string) => ({ id, results: [{ label: '知识库', prUrl: 'https://x/pull/4', note: '撤销 Draft PR 已开' }] }));
+    online.get('claude').dream = {
+      status: async () => ({ enabled: true, settings: {}, agent: 'Claude Code', targets: { knowledge: {}, skills: {} }, runs: [], openedPrs: 0, pendingDrafts: 0, trackedSessions: 0, auto: { enabled: false, settings: {}, ledger: { consecutiveFailures: 0 } } }),
+      start,
+      cancel: () => false,
+      revert,
+    };
+    const started = await json(await post('/api/dream?profile=claude', handle.token, { action: 'run' }));
+    expect(started).toMatchObject({ live: true, message: expect.stringContaining('b2') });
+    expect(start).toHaveBeenCalledWith({ id: 'web-console', name: 'Web 控制台' });
+    const reverted = await json(await post('/api/dream?profile=claude', handle.token, { action: 'revert', id: 'b1' }));
+    expect(reverted).toMatchObject({ message: expect.stringContaining('撤销 Draft PR 已开') });
+    expect(revert).toHaveBeenCalledWith('b1');
+    expect((await post('/api/dream?profile=claude', handle.token, { action: 'revert' })).status).toBe(400);
+    expect((await post('/api/dream?profile=claude', handle.token, { action: 'nope' })).status).toBe(400);
+  });
+
   it('rejects API calls without the token', async () => {
     expect((await get('/api/status')).status).toBe(401);
     expect((await get('/api/config', 'wrong-token-value')).status).toBe(401);
@@ -238,6 +309,9 @@ describe('ui server (supervisor-backed)', () => {
   });
 
   it('lists runs from a hosted profile via its runsMonitor', async () => {
+    // Fixed before the request: computing it inside snapshot() would land
+    // after the server read its clock and make the elapsed time 4999ms.
+    const startedAt = Date.now() - 5_000;
     online.get('claude').runsMonitor = {
       snapshot: () => [
         {
@@ -245,7 +319,7 @@ describe('ui server (supervisor-backed)', () => {
           source: 'im',
           chatId: 'oc_chat_a',
           promptPreview: '写周报',
-          startedAt: Date.now() - 5_000,
+          startedAt,
           queueDepth: 1,
         },
       ],

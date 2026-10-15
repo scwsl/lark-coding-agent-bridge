@@ -10,7 +10,7 @@ const collectTsFiles = (path: string): string[] => {
   if (!existsSync(fullPath)) return [];
 
   if (statSync(fullPath).isFile()) {
-    return path.endsWith('.ts') ? [path] : [];
+    return /\.tsx?$/.test(path) ? [path] : [];
   }
 
   return readdirSync(fullPath)
@@ -52,11 +52,32 @@ describe('static architecture contracts', () => {
       'src/workspace/store.ts',
       'src/card/callback-store.ts',
       'src/scheduler/store.ts',
+      'src/bot/pending-store.ts',
+      'src/runtime/usage-ledger.ts',
+      'src/dream/state.ts',
     ]) {
       const source = read(file);
       expect(source, file).toContain('writeFileAtomic');
       expect(source, file).toContain('mode: 0o600');
       expect(source, file).not.toMatch(/\bwriteFile\(/);
+    }
+  });
+
+  it('branches on agent descriptors, not agent-kind string literals, outside agent-owned code', () => {
+    // Agent-owned code may single out its own agent: adapters and catalogs
+    // under src/agent, the codex config section in src/config and src/cli, and
+    // the legacy per-agent migrations in profile-runtime. Everything else goes
+    // through src/agent/registry.ts so a new agent is not silently treated as
+    // "the other one".
+    const allowed = [/^src\/ui\/generated\//, /^src\/agent\//, /^src\/config\//, /^src\/cli\//, /^src\/runtime\/profile-runtime\.ts$/];
+    const literalBranch =
+      /\b(?:agentKind|agentId|agent\.id)\s*[!=]==?\s*['"](?:claude|codex)['"]|['"](?:claude|codex)['"]\s*[!=]==?\s*[\w.]*\b(?:agentKind|agentId)\b/;
+    const files = [...collectTsFiles('src'), ...collectTsFiles('web/src')].filter(
+      (file) => !allowed.some((pattern) => pattern.test(file.split('\\').join('/'))),
+    );
+    expect(files.length).toBeGreaterThan(50);
+    for (const file of files) {
+      expect(read(file), file).not.toMatch(literalBranch);
     }
   });
 });

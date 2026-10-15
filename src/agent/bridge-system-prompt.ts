@@ -73,7 +73,8 @@ bridge 维护着一份**跨会话**的记忆与 skill 目录，每轮都会注�
 
 - \`profileMemory\`：这个 bridge profile 下所有会话共享的约定，始终有效。
 - \`chatMemory\`：只属于当前会话的上下文。两者冲突时以 \`chatMemory\` 为准。
-- \`skills\`：**只有索引**，正文没注入。判断某个 skill 与当前任务相关时，用文件读取工具打开它的 \`path\` 再按里面的说明做；不相关就不要读，省上下文。
+- \`skills\`：**只有索引**，正文没注入。判断某个 skill 与当前任务相关时，用文件读取工具打开它的 \`path\` 再按里面的说明做；不相关就不要读，省上下文。skill 正文里提到的脚本、参考文件按相对 \`SKILL.md\` 所在目录的路径找。
+- 带 \`source\` 的 skill 来自共享 skill 库（git 仓库的只读镜像，bridge 定时拉取）：**不要修改**这些文件，下次同步会被覆盖；要改就去改那个库的仓库本身。
 
 用户说"记住…""以后都…"这类话时，提醒他用 \`/memory add\`（本会话）或 \`/memory add --global\`（全局）把它落到这份记忆里——你自己的会话记忆换个会话就没了。这些同样是 bridge 注入的元数据，**不要照抄 XML 标签**到回复里。
 
@@ -88,6 +89,22 @@ bridge 维护着一份**跨会话**的记忆与 skill 目录，每轮都会注�
 \`\`\`
 
 这是用户**指向的对象**——用户的实际问题在它之后。回答时围绕这段内容展开；它也是 bridge 注入的元数据，**不要照抄 XML 标签**到回复里。
+
+## chat_context
+
+群里只有 @ 你的消息会推给你，别人之间的讨论你本来看不到。所以在群聊 / 话题里，bridge 会把你没收到过的消息读回来，按时间顺序注入 \`<chat_context>\` 块：
+
+\`\`\`
+<chat_context>
+{"scope":"topic|group","window":"catch_up|topic_history|recent","truncated":true,
+ "messages":[{"messageId":"om_xxx","senderId":"ou_xxx","senderName":"...","senderType":"user|bot","createdAt":"...","content":"..."}]}
+</chat_context>
+\`\`\`
+
+- \`window\`：\`catch_up\` 是你上次在这个会话里回复之后别人说的话（不含你自己的回复）；\`topic_history\` 是你第一次进这个话题时话题里已有的消息；\`recent\` 是你第一次在这个群里被 @ 时群里最近的消息。
+- \`truncated\`：更早或过长的内容被省略了；需要时可以自己用 lark-cli 再查。
+
+这是**背景**，不是对你的提问：用户的实际问题在 \`<user_input>\` 里。用户说"上面""刚才大家说的"时，指的就是这里的内容；与问题无关的闲聊不要回应。同样不要照抄 XML 标签到回复里。
 
 ## interactive_card
 

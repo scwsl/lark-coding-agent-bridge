@@ -61,6 +61,9 @@ describe('profile-aware account and config commands', () => {
     await h.command('/config submit', {
       message_reply: 'text',
       show_tool_calls: 'hide',
+      auto_worktree_cleanup: 'on',
+      dream: 'on',
+      dream_auto: 'on',
       max_concurrent_runs: '7',
       run_idle_timeout_minutes: '15',
       require_mention_in_group: 'no',
@@ -77,6 +80,9 @@ describe('profile-aware account and config commands', () => {
       messageReply: 'text',
       messageReplyMigrated: true,
       showToolCalls: false,
+      autoWorktreeCleanup: true,
+      dream: true,
+      dreamAuto: true,
       maxConcurrentRuns: 7,
       runIdleTimeoutMinutes: 15,
     });
@@ -88,6 +94,43 @@ describe('profile-aware account and config commands', () => {
     });
     expect(getRequireMentionInGroup(runtimeProfileConfig(root, 'claude'))).toBe(false);
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
+  });
+
+  it('switches non-admin approvals from /config, keeping the allowlist and applying it live', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({
+      approvals: { enabled: false, allowCommands: ['lark-cli docs +fetch'], allowTools: ['mcp__tdengine-*'] },
+    });
+
+    await h.command('/config submit', { message_reply: 'text', approvals_enabled: 'on' });
+    const on = await waitForRoot(h.rootDir, (candidate) =>
+      candidate.profiles.claude?.approvals?.enabled === true && h.controls.profileConfig.approvals.enabled === true,
+    );
+    expect(on.profiles.claude?.approvals).toEqual({
+      enabled: true,
+      allowCommands: ['lark-cli docs +fetch'],
+      allowTools: ['mcp__tdengine-*'],
+    });
+    // Gating reads the in-memory profile, so the switch needs no restart.
+    expect(h.controls.profileConfig.approvals.enabled).toBe(true);
+
+    await h.command('/config submit', { message_reply: 'text', approvals_enabled: 'off' });
+    const off = await waitForRoot(h.rootDir, (candidate) =>
+      candidate.profiles.claude?.approvals?.enabled === false && h.controls.profileConfig.approvals.enabled === false,
+    );
+    expect(off.profiles.claude?.approvals?.allowTools).toEqual(['mcp__tdengine-*']);
+    expect(h.controls.profileConfig.approvals.enabled).toBe(false);
+  });
+
+  it('keeps approvals as they are when the submit payload omits the switch', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({
+      approvals: { enabled: true, allowCommands: [], allowTools: [] },
+    });
+
+    await h.command('/config submit', { message_reply: 'text' });
+    const root = await waitForRoot(h.rootDir, (candidate) => candidate.profiles.claude?.preferences.messageReply === 'text');
+    expect(root.profiles.claude?.approvals?.enabled).toBe(true);
   });
 
   it('persists the picked model and clears it when "default" is chosen', async () => {
@@ -244,16 +287,18 @@ describe('profile-aware account and config commands', () => {
 
 async function createHarness(options: {
   preferences?: RootConfig['profiles'][string]['preferences'];
+  approvals?: RootConfig['profiles'][string]['approvals'];
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
+  controls: Controls;
   command(content: string, formValue?: Record<string, unknown>): Promise<boolean>;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
   roots.push(rootDir);
   const workspace = join(rootDir, 'workspace');
   await mkdir(workspace, { recursive: true });
-  const root = await writeRoot(rootDir, workspace, options.preferences);
+  const root = await writeRoot(rootDir, workspace, options.preferences, options.approvals);
   const profileConfig = root.profiles.claude!;
   const appPaths = resolveAppPaths({ rootDir, profile: 'claude' });
   const channel = createFakeChannel();
@@ -275,6 +320,7 @@ async function createHarness(options: {
   return {
     rootDir,
     channel,
+    controls,
     command: (content: string, formValue?: Record<string, unknown>) =>
       tryHandleCommand({
         channel: channel as unknown as CommandContext['channel'],
@@ -296,6 +342,7 @@ async function writeRoot(
   rootDir: string,
   workspace: string,
   preferences: RootConfig['profiles'][string]['preferences'] = {},
+  approvals?: RootConfig['profiles'][string]['approvals'],
 ): Promise<RootConfig> {
   const root: RootConfig = {
     schemaVersion: 2,
@@ -323,6 +370,7 @@ async function writeRoot(
     ...root.profiles.claude!.preferences,
     ...preferences,
   };
+  if (approvals) root.profiles.claude!.approvals = approvals;
   await writeJson(resolveAppPaths({ rootDir }).configFile, root);
   await writeFile(join(rootDir, 'active-profile'), 'claude\n', 'utf8');
   return root;

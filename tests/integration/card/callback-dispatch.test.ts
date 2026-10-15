@@ -134,6 +134,49 @@ describe('signed card callback dispatch', () => {
     expect(queued[0]?.content).toBe('[card-click] {"choice":"a"}');
   });
 
+  it('stops only the carrier topic when cached chat mode still says group', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    h.channel.rawThreadIds.set('om_card', 'th_topic');
+    const target = h.agent.run({ runId: 'run-active', prompt: 'target' }) as FakeAgentRun;
+    const chatRun = h.agent.run({ runId: 'run-chat', prompt: 'chat' }) as FakeAgentRun;
+    const sibling = h.agent.run({ runId: 'run-sibling', prompt: 'sibling' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group:th_topic', target);
+    h.activeRuns.register('oc_group', chatRun);
+    h.activeRuns.register('oc_group:th_other', sibling);
+
+    // The owner clicks: stopping someone else's run is permission-checked.
+    await h.dispatch(
+      {
+        cmd: 'stop',
+        __bridge_cb: true,
+        bridge_token: h.token('stop', { scope: 'oc_group:th_topic' }),
+      },
+      undefined,
+      'ou_owner',
+    );
+
+    expect(target.stopped).toBe(true);
+    expect(chatRun.stopped).toBe(false);
+    expect(sibling.stopped).toBe(false);
+  });
+
+  it('forwards callbacks to the carrier topic despite stale group mode', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    h.channel.rawThreadIds.set('om_card', 'th_topic');
+    h.activeRuns.register('oc_group:th_topic', h.agent.run({ runId: 'run-active', prompt: 'running' }));
+
+    await h.dispatch({
+      __bridge_cb: true,
+      bridge_token: h.token('agent_callback', { scope: 'oc_group:th_topic' }),
+      choice: 'a',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+    const queued = h.pending.cancel('oc_group:th_topic');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.threadId).toBe('th_topic');
+  });
+
   it('rejects bridge callbacks when callback auth is unavailable', async () => {
     const h = await createHarness({ callbackAuth: false });
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;

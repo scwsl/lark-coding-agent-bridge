@@ -142,6 +142,19 @@ describe('skills', () => {
     });
     expect(parseSkillHeader('dir', '')).toEqual({ name: 'dir', description: '' });
   });
+
+  it('unquotes values and folds block descriptions into one line', () => {
+    expect(
+      parseSkillHeader('dir', '---\nname: "cilab-jira"\ndescription: "Create Jira. Don\'t use for \\"reads\\"."\n---\n'),
+    ).toEqual({ name: 'cilab-jira', description: 'Create Jira. Don\'t use for "reads".' });
+    expect(parseSkillHeader('dir', "---\nname: 'x'\ndescription: 'it''s fine'\n---\n")).toEqual({
+      name: 'x',
+      description: "it's fine",
+    });
+    expect(
+      parseSkillHeader('dir', '---\nname: y\ndescription: >-\n  first line\n  second line\nlicense: MIT\n---\n'),
+    ).toEqual({ name: 'y', description: 'first line second line' });
+  });
 });
 
 describe('prompt injection', () => {

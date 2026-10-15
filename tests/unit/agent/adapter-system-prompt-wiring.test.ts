@@ -72,6 +72,20 @@ describe('ClaudeAdapter system prompt wiring', () => {
     expect(systemPromptFileContent()).toBe(buildBridgeSystemPrompt(undefined));
   });
 
+  it('asks Claude Code to auto-compact against the 会话智能压缩 window only when one is given', () => {
+    const child = fakeChild();
+    spawnMock.spawnProcess.mockReturnValue(child);
+    const adapter = new ClaudeAdapter();
+
+    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp', compactWindowTokens: 300_000 });
+    adapter.run({ runId: 'r2', prompt: 'hi', cwd: '/tmp' });
+
+    const envOf = (call: number) =>
+      (spawnMock.spawnProcess.mock.calls[call]?.[2] as { env: NodeJS.ProcessEnv }).env;
+    expect(envOf(0).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('300000');
+    expect(envOf(1).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+  });
+
   function systemPromptFileContent(): string {
     const args = spawnMock.spawnProcess.mock.calls[0]?.[1] as string[];
     const flagIndex = args.indexOf('--append-system-prompt-file');

@@ -16,8 +16,20 @@ export interface AppPaths {
   sessionsFile: string;
   workspacesFile: string;
   runsFile: string;
+  /** Durable copy of messages queued behind a run (PendingStore). */
+  pendingFile: string;
+  /** Agent-requested session closes awaiting the next message (PendingRotationStore). */
+  rotationsFile: string;
+  /** Per-scope cursor for the group / topic catch-up context (ChatContextCursorStore). */
+  contextCursorsFile: string;
+  /** Per-person token / cost consumption (UsageLedger). */
+  usageFile: string;
+  /** Who had the bot run what, and approvals (AuditLog). */
+  auditFile: string;
   /** Bridge-managed memory + skills for this profile (optionally a git repo). */
   knowledgeDir: string;
+  /** Read-only mirrors of the profile's shared skill libraries, one per directory. */
+  skillLibrariesDir: string;
   /** Scheduled jobs (`/cron`), one file per profile. */
   jobsFile: string;
   /** Tasks paused by the plan quota, waiting to be resumed after the reset. */
@@ -66,7 +78,13 @@ export function resolveAppPaths(opts: ResolveAppPathsOptions = {}): AppPaths {
     sessionsFile: join(profileDir, 'sessions.json'),
     workspacesFile: join(profileDir, 'workspaces.json'),
     runsFile: join(profileDir, 'runs.json'),
+    pendingFile: join(profileDir, 'pending.json'),
+    rotationsFile: join(profileDir, 'pending-rotations.json'),
+    contextCursorsFile: join(profileDir, 'chat-context-cursors.json'),
+    usageFile: join(profileDir, 'usage.json'),
+    auditFile: join(profileDir, 'audit.jsonl'),
     knowledgeDir: join(profileDir, 'knowledge'),
+    skillLibrariesDir: join(profileDir, 'skill-libraries'),
     jobsFile: join(profileDir, 'jobs.json'),
     autoResumeFile: join(profileDir, 'auto-resume.json'),
     secretsFile: join(profileDir, 'secrets.enc'),

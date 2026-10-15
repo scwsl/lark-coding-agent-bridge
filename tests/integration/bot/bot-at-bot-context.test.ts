@@ -10,7 +10,7 @@ import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js'
 
 const sdkMock = vi.hoisted(() => ({
   channel: undefined as FakeLarkChannel | undefined,
-  createLarkChannel: vi.fn(() => {
+  createLarkChannel: vi.fn((_opts: unknown) => {
     if (!sdkMock.channel) throw new Error('fake channel not configured');
     return sdkMock.channel;
   }),
@@ -23,6 +23,9 @@ vi.mock('@larksuite/channel', async (importOriginal) => {
     createLarkChannel: sdkMock.createLarkChannel,
   };
 });
+
+import { RunRegistry } from '../../../src/runtime/run-registry.js';
+import { resolveAppPaths } from '../../../src/config/app-paths.js';
 
 import { startChannel } from '../../../src/bot/channel.js';
 
@@ -419,3 +422,20 @@ interface MarkdownStreamInput {
 function isMarkdownStreamInput(input: unknown): input is MarkdownStreamInput {
   return Boolean(input && typeof input === 'object' && 'markdown' in input);
 }
+
+describe('durable task origin', () => {
+  it('records the group and requester names from the same triggering message', async () => {
+    const h = await createHarness();
+    const start = vi.spyOn(RunRegistry.prototype, 'start');
+    try {
+      const bridge = await startChannel({ cfg: h.profileConfig, agent: h.agent, sessions: h.sessions, workspaces: h.workspaces,
+        controls: { ...h.controls, knownChats: [{ id: 'oc_chat', name: '研发交流群' }] },
+        appPaths: resolveAppPaths({ rootDir: h.tmp.root, profile: 'test' }) });
+      cleanups.push(() => bridge.disconnect());
+      await h.channel.handlers.message?.(message({ messageId: 'om_source', senderId: 'ou_user', senderName: '张三', content: '整理接口文档' }));
+      await waitFor(() => start.mock.calls.length > 0);
+      expect(start.mock.calls[0]?.[0]).toMatchObject({ chatType: 'group', chatName: '研发交流群', actorId: 'ou_user', actorName: '张三' });
+      expect(sdkMock.createLarkChannel.mock.calls[0]?.[0]).toMatchObject({ resolveSenderNames: true });
+    } finally { start.mockRestore(); }
+  });
+});

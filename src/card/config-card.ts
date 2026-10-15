@@ -1,3 +1,4 @@
+import { agentDescriptor } from '../agent/registry';
 import { modelLabel, supportedEfforts, supportedModels } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset, ProfileMode } from '../config/profile-schema';
@@ -20,10 +21,24 @@ export interface ConfigFormOpts {
   runIdleTimeoutMinutes: number;
   requireMentionInGroup: boolean;
   larkCliIdentity: LarkCliIdentityPreset;
+  /** Whether non-admins' side-effecting steps wait for an admin's approval (#6). */
+  approvalsEnabled: boolean;
+  /** 会话智能压缩 on/off. Optional so callers predating the switch render it as off. */
+  smartSession?: boolean;
+  autoWorktreeCleanup?: boolean;
+  /** 梦境整理 on/off. Optional so callers predating the switch render it as off. */
+  dream?: boolean;
+  /** 自动整理 on/off (only acts with {@link dream} on). */
+  dreamAuto?: boolean;
   allowedUsers: string[];
   allowedChats: string[];
   admins: string[];
+  /** Groups the bot is in right now; empty when the lookup failed. */
   knownChats: KnownChat[];
+  /** Per-chat @ override (`access.chatRequireMention`); absent = follows the global switch. */
+  chatRequireMention?: Record<string, boolean>;
+  /** Per-chat member allowlist (`access.chatAllowedUsers`); absent = everyone in the chat. */
+  chatAllowedUsers?: Record<string, string[]>;
   /** URL of the running local web console (supervisor `--web-ui` mode). Shown
    * at the top of the card when present; omitted when no console is running. */
   consoleUrl?: string;
@@ -78,12 +93,95 @@ function atMentionLine(openIds: string[]): string {
   return openIds.map((id) => `<at id="${id}"></at>`).join('  ');
 }
 
-function chatList(chatIds: string[], knownChats: KnownChat[]): string {
-  if (chatIds.length === 0) return '_（暂无）_';
-  const nameMap = new Map(knownChats.map((chat) => [chat.id, chat.name]));
-  return chatIds
-    .map((id) => `- **${nameMap.get(id) ?? '(未知群)'}**（...${id.slice(-6)}）`)
-    .join('\n');
+function chatLabel(id: string, name: string | undefined): string {
+  return `**${name ?? '(未知群)'}**（...${id.slice(-6)}）`;
+}
+
+function mentionRuleLabel(override: boolean | undefined, globalRequire: boolean): string {
+  if (override === undefined) return `跟随全局（${globalRequire ? '需 @' : '无需 @'}）`;
+  return override ? '需 @' : '无需 @';
+}
+
+function memberRuleLabel(members: string[] | undefined): string {
+  if (members === undefined) return '群内所有人可用';
+  if (members.length === 0) return '仅管理员可用';
+  return `仅指定成员（${members.length}）：${atMentionLine(members)}`;
+}
+
+/**
+ * Every group the bot touches, split by how it is handled: answered (on the
+ * allowlist and the bot is in it), joined but not answered, and allowlisted
+ * after the bot has left. Membership comes from `knownChats`; when that lookup
+ * came back empty we can't tell joined from left, so only the allowlist shows.
+ */
+function groupPanel(opts: ConfigFormOpts): object {
+  const membershipKnown = opts.knownChats.length > 0;
+  const names = new Map(opts.knownChats.map((chat) => [chat.id, chat.name]));
+  const allowed = new Set(opts.allowedChats);
+  const answered = opts.allowedChats.filter((id) => !membershipKnown || names.has(id));
+  const idle = opts.knownChats.filter((chat) => !allowed.has(chat.id));
+  const left = membershipKnown ? opts.allowedChats.filter((id) => !names.has(id)) : [];
+  const mentionOverrides = opts.chatRequireMention ?? {};
+  const memberLists = opts.chatAllowedUsers ?? {};
+
+  const title = membershipKnown
+    ? `👥 **群管理**（bot 在 ${opts.knownChats.length} 个群，响应 ${answered.length} 个 · 点击展开）`
+    : `👥 **群管理**（响应 ${answered.length} 个 · 点击展开）`;
+
+  const notes: string[] = [];
+  if (opts.mode === 'team') {
+    notes.push('_⚠️ 团队版已开启：任何群里 @ bot 都会响应，下面的名单和成员限制暂不生效；切回个人版后恢复。_');
+  }
+  if (!membershipKnown) {
+    notes.push('_⚠️ bot 所在的群列表为空（bot 不在任何群，或飞书接口没取到），下面只列响应名单，看不出 bot 是否还在群里。_');
+  }
+
+  const sections: string[] = [
+    `**响应中**（${answered.length}）\n` +
+      (answered.length === 0
+        ? '_（暂无）_'
+        : answered
+            .map(
+              (id) =>
+                `- ${chatLabel(id, names.get(id))}\n` +
+                `  ${mentionRuleLabel(mentionOverrides[id], opts.requireMentionInGroup)} · ${memberRuleLabel(memberLists[id])}`,
+            )
+            .join('\n')),
+  ];
+  if (idle.length > 0) {
+    sections.push(
+      `**在群里但不响应**（${idle.length}）\n` +
+        idle.map((chat) => `- ${chatLabel(chat.id, chat.name)}`).join('\n') +
+        '\n_在该群发 `/invite group` 开启；私聊发 `/invite all group` 一键全部开启。_',
+    );
+  }
+  if (left.length > 0) {
+    sections.push(
+      `**名单里但 bot 已不在群**（${left.length}）\n` +
+        left.map((id) => `- ${chatLabel(id, undefined)}`).join('\n') +
+        '\n_bot 被拉回群后自动恢复响应；不再需要的私聊发 `/remove group <ID 末 6 位>` 移除。_',
+    );
+  }
+
+  const howTo =
+    '**管理方式**（在目标群里发）\n' +
+    '- `/invite group`：开启该群，群内所有人可用\n' +
+    '- `/invite group restricted @某人…`：开启该群，只对指定成员生效\n' +
+    '- `/invite member @某人` / `/remove member @某人`：增删该群的指定成员\n' +
+    '- `/remove group`：停止响应该群；私聊里发 `/remove group <ID 末 6 位>` 按 ID 移除\n' +
+    '_管理员在任何已开启的群里都可用。' +
+    (opts.consoleUrl
+      ? '单个群的「是否需要 @」在 Web 控制台里设置。_'
+      : '单个群的「是否需要 @」暂无群内命令，改配置文件里的 `access.chatRequireMention`。_');
+
+  const elements: object[] = [];
+  for (const note of notes) elements.push({ tag: 'markdown', content: note });
+  for (const section of sections) {
+    if (elements.length > 0) elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: section });
+  }
+  elements.push({ tag: 'hr' }, { tag: 'markdown', content: howTo });
+  return collapsedAccessPanel(title, elements);
 }
 
 /** Form card for `/config`. */
@@ -119,9 +217,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
       tag: 'markdown',
       content:
         `**允许响应的群**（共 ${opts.allowedChats.length} 个）\n` +
-        `${chatList(opts.allowedChats, opts.knownChats)}\n\n` +
-        '_一键加全部 bot 所在的群：_ `/invite all group`\n' +
-        '_加 / 删（在目标群里发）：_ `/invite group`  `/remove group`',
+        '_每个群的 @ 规则、成员限制和管理方式见下方「👥 群管理」。_',
     },
     { tag: 'hr' },
     {
@@ -196,9 +292,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
                 tag: 'markdown',
                 content:
                   '**Effort（推理强度）**\n<font color="grey">越高越慢越贵；' +
-                  (opts.agentKind === 'codex'
-                    ? '「跟随默认」= 用 Codex 配置里的 model_reasoning_effort；所选模型不支持的档位会自动降到它支持的最高档'
-                    : '「跟随默认」= 不传 --effort') +
+                  agentDescriptor(opts.agentKind).effortDefaultHint +
                   '</font>',
               },
               {
@@ -305,6 +399,75 @@ export function configFormCard(opts: ConfigFormOpts): object {
               {
                 tag: 'markdown',
                 content:
+                  '**非管理员操作审批**\n<font color="grey">开=非管理员让 bot 跑命令、写文件、调外部工具前，先发卡片给管理员审批；免审批清单在配置文件 approvals 段</font>',
+              },
+              {
+                tag: 'select_static',
+                name: 'approvals_enabled',
+                initial_option: opts.approvalsEnabled ? 'on' : 'off',
+                options: [
+                  { text: { tag: 'plain_text', content: '开' }, value: 'on' },
+                  { text: { tag: 'plain_text', content: '关(默认)' }, value: 'off' },
+                ],
+              },
+              {
+                tag: 'markdown',
+                content:
+                  '**会话智能压缩**\n<font color="grey">开=空闲超 1 小时且上下文超 15 万 token、或空闲超 8 小时，下一条消息自动开新会话；agent 判断事情做完也会收尾；长会话提前自动压缩。旧会话 /resume 可找回</font>',
+              },
+              {
+                tag: 'select_static',
+                name: 'smart_session',
+                initial_option: opts.smartSession ? 'on' : 'off',
+                options: [
+                  { text: { tag: 'plain_text', content: '开' }, value: 'on' },
+                  { text: { tag: 'plain_text', content: '关(默认)' }, value: 'off' },
+                ],
+              },
+              {
+                tag: 'markdown',
+                content: '**Worktree 自动清理**\n<font color="grey">每小时检查 bridge 创建的 worktree；默认闲置 7 天、分支已合入主工作区且无会话引用才清理。改动、未跟踪/忽略文件、锁定目录会保留。只删除 bridge 新建的分支；天数可在配置文件调整</font>',
+              },
+              {
+                tag: 'select_static',
+                name: 'auto_worktree_cleanup',
+                initial_option: opts.autoWorktreeCleanup ? 'on' : 'off',
+                options: [
+                  { text: { tag: 'plain_text', content: '开' }, value: 'on' },
+                  { text: { tag: 'plain_text', content: '关(默认)' }, value: 'off' },
+                ],
+              },
+              {
+                tag: 'markdown',
+                content:
+                  '**梦境整理**\n<font color="grey">开=管理员可用 /dream run 把已结束的会话整理成记忆 / 笔记 / skill 草稿，以 Draft PR 提交到知识库和自有 skill 库，审核合并后才生效；不推送日报</font>',
+              },
+              {
+                tag: 'select_static',
+                name: 'dream',
+                initial_option: opts.dream ? 'on' : 'off',
+                options: [
+                  { text: { tag: 'plain_text', content: '开' }, value: 'on' },
+                  { text: { tag: 'plain_text', content: '关(默认)' }, value: 'off' },
+                ],
+              },
+              {
+                tag: 'markdown',
+                content:
+                  '**自动整理**\n<font color="grey">需先开梦境整理。不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且 bot 空闲时才自己整理一轮，有用户消息就让路；条件在配置文件 dreamTuning 里调</font>',
+              },
+              {
+                tag: 'select_static',
+                name: 'dream_auto',
+                initial_option: opts.dreamAuto ? 'on' : 'off',
+                options: [
+                  { text: { tag: 'plain_text', content: '开' }, value: 'on' },
+                  { text: { tag: 'plain_text', content: '关(默认)' }, value: 'off' },
+                ],
+              },
+              {
+                tag: 'markdown',
+                content:
                   '**lark-cli 身份策略**\n<font color="grey">只允许应用身份=不碰个人资源；允许用户身份=可用已授权的个人日历/邮箱/云盘</font>' +
                   (teamMode ? teamOverrideNote : ''),
               },
@@ -319,6 +482,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               },
             ]),
             collapsedAccessPanel('🔒 **访问控制**（点击展开）', accessElements),
+            groupPanel(opts),
             {
               tag: 'column_set',
               flex_mode: 'flow',
@@ -421,6 +585,11 @@ export function configSavedCard(opts: ConfigFormOpts): object {
           ['并发上限', String(opts.maxConcurrentRuns)],
           ['run 探活', opts.runIdleTimeoutMinutes > 0 ? `${opts.runIdleTimeoutMinutes} 分钟` : '关闭'],
           ['群里需要 @ bot', opts.requireMentionInGroup ? '是' : '否'],
+          ['非管理员审批', opts.approvalsEnabled ? '开' : '关'],
+          ['会话智能压缩', opts.smartSession ? '开' : '关'],
+          ['Worktree 自动清理', opts.autoWorktreeCleanup ? '开' : '关'],
+          ['梦境整理', opts.dream ? '开' : '关'],
+          ['自动整理', opts.dreamAuto ? (opts.dream ? '开' : '开（梦境整理关着，不生效）') : '关'],
           [
             'lark-cli 身份策略',
             opts.mode === 'team'

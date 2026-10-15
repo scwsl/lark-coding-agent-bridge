@@ -37,6 +37,12 @@ export interface RunHandle {
 export class ActiveRuns {
   private readonly handles = new Map<string, RunHandle>();
   private readonly reservations = new Set<string>();
+  /**
+   * Processes whose user turn is over but which are still running background
+   * tasks the agent started (see RunExecutor). Not "active": new messages for
+   * the scope are handed to them rather than queued. Interrupts stop them.
+   */
+  private readonly lingering = new Map<string, { run: AgentRun; kind: 'background' | 'idle' }>();
   private pauseDepth = 0;
   private pauseReason: string | undefined;
 
@@ -104,13 +110,60 @@ export class ActiveRuns {
   }
 
   /**
-   * Interrupt the current run for this chat, if any. Returns true if an
-   * interrupt was issued. Fires stop() fire-and-forget — the old run's
-   * generator exits on its own as the subprocess dies.
+   * `background`: still running tasks the agent started. `idle`: merely kept
+   * up for the conversation's next message (Codex app-server).
+   */
+  setLingering(chatId: string, run: AgentRun, kind: 'background' | 'idle' = 'background'): void {
+    this.lingering.set(chatId, { run, kind });
+  }
+
+  clearLingering(chatId: string, run: AgentRun): void {
+    if (this.lingering.get(chatId)?.run === run) this.lingering.delete(chatId);
+  }
+
+  /** The scope's process is still running background tasks. */
+  isLingering(chatId: string): boolean {
+    return this.lingering.get(chatId)?.kind === 'background';
+  }
+
+  /** The scope has a process kept between turns, idle or busy with background work. */
+  hasKeptProcess(chatId: string): boolean {
+    return this.lingering.has(chatId);
+  }
+
+  /** Any live process kept between turns, including idle sessions. */
+  hasAnyKeptProcess(): boolean {
+    return this.lingering.size > 0;
+  }
+
+  lingeringScopes(): string[] {
+    return [...this.lingering.entries()].filter(([, l]) => l.kind === 'background').map(([scope]) => scope);
+  }
+
+  /**
+   * Interrupt the current run for this chat, if any, and any background
+   * tasks its process is still running. Returns true if anything was
+   * stopped. Fires stop() fire-and-forget — the old run's generator exits on
+   * its own as the subprocess dies.
    */
   interrupt(chatId: string): boolean {
+    // An idle kept process is stopped too, but quietly: nothing was running.
+    const result = this.interruptDetailed(chatId);
+    return result.active || result.background;
+  }
+
+  /** {@link interrupt}, reporting whether a user turn and/or background work was stopped. */
+  interruptDetailed(chatId: string): { active: boolean; background: boolean } {
+    const lingering = this.lingering.get(chatId);
+    if (lingering) {
+      this.lingering.delete(chatId);
+      void lingering.run.stop().catch(() => {
+        /* stop errors are non-fatal */
+      });
+    }
+    const background = lingering?.kind === 'background';
     const h = this.handles.get(chatId);
-    if (!h) return false;
+    if (!h) return { active: false, background };
     this.reservations.delete(chatId);
     h.interrupted = true;
     h.stopCause = 'user';
@@ -118,18 +171,20 @@ export class ActiveRuns {
     void h.run.stop().catch(() => {
       /* stop errors are non-fatal */
     });
-    return true;
+    return { active: true, background };
   }
 
   async stopAll(): Promise<void> {
     const all = [...this.handles.values()];
+    const lingering = [...this.lingering.values()].map((l) => l.run);
     this.handles.clear();
     this.reservations.clear();
+    this.lingering.clear();
     for (const h of all) {
       h.interrupted = true;
       h.stopCause = 'shutdown';
     }
-    await Promise.allSettled(all.map((h) => h.run.stop()));
+    await Promise.allSettled([...all.map((h) => h.run.stop()), ...lingering.map((run) => run.stop())]);
   }
 
   async waitForAll(timeoutMs = 300_000): Promise<void> {

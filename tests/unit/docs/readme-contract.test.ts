@@ -52,6 +52,8 @@ describe('README runtime contract', () => {
     for (const phrase of [
       '/memory add --global',
       '/knowledge bind',
+      'syncIntervalMinutes',
+      'merge=union',
       '/skills show',
       'Memory and skills',
       '记忆与 skills',

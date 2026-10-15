@@ -26,6 +26,7 @@ export async function processAgentStream(
   events: AsyncIterable<AgentEvent>,
   scope: string,
   idleTimeoutMs: number | undefined,
+  /** Sees every `system` and `usage` event: session bookkeeping, card byline. */
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
 ): Promise<RunState> {
@@ -101,6 +102,7 @@ export async function processAgentStream(
         continue;
       }
       if (evt.type === 'usage') {
+        recordSession(evt);
         const { costUsd, inputTokens, outputTokens } = evt;
         if (costUsd !== undefined || inputTokens !== undefined || outputTokens !== undefined) {
           log.info('agent', 'usage', {

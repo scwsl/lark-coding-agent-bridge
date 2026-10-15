@@ -179,7 +179,7 @@ export function reviewLabel(decision: string | undefined): string {
   }
 }
 
-function describeGhFailure(code: number | null, stderr: string): string {
+export function describeGhFailure(code: number | null, stderr: string): string {
   if (code === null) {
     return '本机没有安装 `gh`（GitHub CLI），或者它没能启动。装好后再试：https://cli.github.com';
   }

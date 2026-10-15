@@ -52,13 +52,13 @@ function record(over: Partial<RunRecord> = {}): Omit<RunRecord, 'ownerPid'> {
 describe('RunRegistry persistence', () => {
   it('round-trips a started run through the file', async () => {
     const a = makeRegistry(OWN_PID);
-    a.start(record());
+    a.start(record({ chatType: 'group', chatName: '研发群', actorId: 'ou_person', actorName: '张三' }));
     await a.flush();
 
     const b = makeRegistry(OWN_PID);
     await b.load();
     expect(b.size()).toBe(1);
-    expect(b.takeOwn()[0]).toMatchObject({ runId: 'run-1', ownerPid: OWN_PID });
+    expect(b.takeOwn()[0]).toMatchObject({ runId: 'run-1', ownerPid: OWN_PID, chatType: 'group', chatName: '研发群', actorId: 'ou_person', actorName: '张三' });
   });
 
   it('drops a finished run from the file', async () => {

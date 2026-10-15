@@ -210,7 +210,7 @@ describe('agent-aware resume commands', () => {
     await expect(h.run('/resume use thread-current', { withCatalogIdentity: false })).resolves.toBe(true);
 
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('当前上下文没有可恢复的 Codex thread');
+    expect(lastMarkdown(h.channel)).toContain('当前上下文没有可恢复的 Codex CLI 会话');
   });
 
   it('does not list Claude local history for Codex when no current thread is recorded', async () => {

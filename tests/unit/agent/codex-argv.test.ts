@@ -1,7 +1,18 @@
+import compactionCapture from '../../fixtures/codex-app-server-compaction-config.json';
 import { describe, expect, it } from 'vitest';
 import { buildCodexArgs } from '../../../src/agent/codex/argv.js';
 
 describe('Codex argv contract', () => {
+  it.each([undefined, 'thread-old'])('sets auto-compaction for fresh/resumed exec (%s)', (threadId) => {
+    const args = buildCodexArgs({ cwd: '/repo', sandbox: 'read-only', threadId, compactWindowTokens: compactionCapture.response.result.config.model_auto_compact_token_limit });
+    const i = args.indexOf('model_auto_compact_token_limit=300000');
+    expect(i).toBeGreaterThan(0);
+    expect(args[i - 1]).toBe('-c');
+    if (threadId) expect(i).toBeLessThan(args.indexOf('resume'));
+  });
+  it.each([undefined, 0, -1, NaN, Infinity, 1.5])('leaves native compaction defaults for invalid/unset window (%s)', (compactWindowTokens) => {
+    expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only', compactWindowTokens }).join(' ')).not.toContain('model_auto_compact_token_limit');
+  });
   it('builds the fresh exec argv without putting the prompt in argv', () => {
     expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' })).toEqual([
       'exec',

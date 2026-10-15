@@ -31,6 +31,10 @@ export interface RunCardMeta {
   provider?: string;
   /** Account paying for the run, e.g. the logged-in Claude account name. */
   sponsor?: string;
+  /** This turn's consumption, e.g. `24.8k in / 51 out · ≈$0.03`. */
+  usage?: string;
+  /** One-off note about the conversation itself, e.g. that 会话智能压缩 started a fresh one. */
+  notice?: string;
 }
 
 export interface RunCardRenderOptions {
@@ -138,11 +142,13 @@ function byline(meta: RunCardMeta | undefined): object[] {
     meta.effort ? `Effort: ${meta.effort}` : undefined,
     meta.provider ? `Provider: ${meta.provider}` : undefined,
     meta.sponsor ? `Sponsor: ${meta.sponsor}` : undefined,
+    meta.usage ? `Usage: ${meta.usage}` : undefined,
   ].filter((p): p is string => p !== undefined);
-  if (parts.length === 0) return [];
+  if (parts.length === 0 && !meta.notice) return [];
   return [
     { tag: 'hr' },
-    { tag: 'markdown', content: `<font color='grey'>${parts.join(' | ')}</font>` },
+    ...(meta.notice ? [{ tag: 'markdown', content: `<font color='grey'>🔄 ${meta.notice}</font>` }] : []),
+    ...(parts.length > 0 ? [{ tag: 'markdown', content: `<font color='grey'>${parts.join(' | ')}</font>` }] : []),
   ];
 }
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { open, readFile, rename, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { agentDescriptor, isAgentKind, type AgentDescriptor } from '../agent/registry';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import type { AgentCapabilityId } from '../agent/capability';
@@ -58,6 +59,7 @@ export function sessionCatalogKey(input: SessionCatalogIdentity): string {
 
 export class SessionCatalog {
   private data = new Map<string, SessionCatalogEntry>();
+  private readonly listeners = new Set<(entry: SessionCatalogEntry) => void>();
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
 
@@ -116,7 +118,24 @@ export class SessionCatalog {
     };
     this.data.set(key, entry);
     this.schedulePersist();
+    for (const listener of this.listeners) {
+      try {
+        listener({ ...entry });
+      } catch (err) {
+        log.fail('session-catalog', err, { step: 'listener' });
+      }
+    }
     return { ...entry };
+  }
+
+  /**
+   * Hear about every conversation {@link upsertActive} records. The catalog
+   * keeps only the latest conversation per identity, so a consumer that needs
+   * the ones replaced since (梦境整理) has to note them as they come.
+   */
+  onUpsert(listener: (entry: SessionCatalogEntry) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   archiveActive(input: ArchiveSessionCatalogInput): boolean {
@@ -214,7 +233,7 @@ function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
   if (
     typeof raw.key !== 'string' ||
     typeof raw.scopeId !== 'string' ||
-    (raw.agentId !== 'claude' && raw.agentId !== 'codex') ||
+    !isAgentKind(raw.agentId) ||
     typeof raw.cwdRealpath !== 'string' ||
     typeof raw.policyFingerprint !== 'string' ||
     (raw.status !== 'active' && raw.status !== 'archived') ||
@@ -247,18 +266,18 @@ function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdenti
 }
 
 function isValidAgentEntry(entry: SessionCatalogEntry): boolean {
-  if (entry.agentId === 'claude') return Boolean(entry.sessionId) && !entry.threadId;
-  return Boolean(entry.threadId) && !entry.sessionId;
+  const handle = agentDescriptor(entry.agentId).sessionHandle;
+  return Boolean(entry[handle]) && !entry[otherSessionHandle(handle)];
 }
 
 function assertAgentIdentity(input: UpsertSessionCatalogInput): void {
-  if (input.agentId === 'claude') {
-    if (!input.sessionId || input.threadId) {
-      throw new Error('Claude catalog entries require sessionId and must not include threadId');
-    }
-    return;
+  const { displayName, sessionHandle } = agentDescriptor(input.agentId);
+  const other = otherSessionHandle(sessionHandle);
+  if (!input[sessionHandle] || input[other]) {
+    throw new Error(`${displayName} catalog entries require ${sessionHandle} and must not include ${other}`);
   }
-  if (!input.threadId || input.sessionId) {
-    throw new Error('Codex catalog entries require threadId and must not include sessionId');
-  }
+}
+
+function otherSessionHandle(handle: AgentDescriptor['sessionHandle']): AgentDescriptor['sessionHandle'] {
+  return handle === 'sessionId' ? 'threadId' : 'sessionId';
 }

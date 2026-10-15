@@ -19,6 +19,7 @@ import {
   type AgentRun,
   type AgentRunOptions,
 } from '../types';
+import { restoredSessionCost } from './session-cost';
 import { translateEvent } from './stream-json';
 
 export interface ClaudeAdapterOptions {
@@ -86,21 +87,39 @@ export class ClaudeAdapter implements AgentAdapter {
       '--replay-user-messages',
       '--verbose',
       '--permission-mode',
-      opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
+      gatedPermissionMode(opts),
       '--append-system-prompt-file',
       systemPromptFile.path,
     ];
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);
     if (opts.effort) args.push('--effort', opts.effort);
+    // The owner guard (non-owner runs) and the approval hook (gated runs) are
+    // both PreToolUse hooks; Claude takes one `--settings`, so they share a
+    // single settings *file* (also keeps quotes off argv for cmd.exe).
     const guard = opts.guard ? claudeGuardArgs(opts.guard) : undefined;
-    if (guard) args.push(...guard.args);
+    const { args: guardArgs, settings: guardSettings } = splitSettingsArg(guard?.args ?? []);
+    args.push(...guardArgs);
+    const settings = mergeHookSettings(
+      guardSettings,
+      opts.approvals?.hookCommand
+        ? approvalHookSettings(opts.approvals.hookCommand, opts.approvals.hookTimeoutSec ?? 330)
+        : undefined,
+    );
+    const settingsFile = settings ? writeSettingsFile(settings) : undefined;
+    if (settingsFile) args.push('--settings', settingsFile.path);
+
+    // Read before spawn: the session total Claude is about to restore.
+    const costBaseline = opts.sessionId ? (restoredSessionCost(opts.sessionId, opts.cwd) ?? 0) : 0;
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(process.env, {
         ...buildLarkChannelEnv(this.larkChannel),
         ...(guard?.env ?? {}),
+        // 会话智能压缩: Claude Code auto-compacts against this window instead
+        // of the model's full (up to 1M-token) one.
+        ...(opts.compactWindowTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(opts.compactWindowTokens) } : {}),
       }),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ClaudeChild;
@@ -141,12 +160,14 @@ export class ClaudeAdapter implements AgentAdapter {
     child.on('error', (err) => {
       runtimeError = err;
       systemPromptFile.cleanup();
+      settingsFile?.cleanup();
     });
     const input = new ClaudeInput(child.stdin);
     child.on('exit', (code, signal) => {
       log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
       input.detach();
       systemPromptFile.cleanup();
+      settingsFile?.cleanup();
     });
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
@@ -166,7 +187,7 @@ export class ClaudeAdapter implements AgentAdapter {
     return {
       runId: opts.runId,
       pid: child.pid,
-      events: createEventStream(child, stderrChunks, () => runtimeError, input, () => stopRequested),
+      events: createEventStream(child, stderrChunks, () => runtimeError, input, () => stopRequested, costBaseline),
       inject(prompt: string, preview: string): boolean {
         const ok = input.write(prompt, preview);
         log.info('agent', ok ? 'inject' : 'inject-refused', {
@@ -320,7 +341,20 @@ async function* createEventStream(
   getError: () => Error | null,
   input: ClaudeInput,
   wasStopped: () => boolean = () => false,
+  costBaseline = 0,
 ): AsyncGenerator<AgentEvent> {
+  // `total_cost_usd` is the session's running total: restored on resume, then
+  // accumulated over every turn the process runs (supplements add turns).
+  // Report each turn's own share. A total below the baseline means Claude
+  // restored nothing, so count from zero rather than report a free turn.
+  let costSoFar = costBaseline;
+  const perTurnCost = (evt: AgentEvent): AgentEvent => {
+    if (evt.type !== 'usage' || evt.costUsd === undefined) return evt;
+    if (evt.costUsd < costSoFar) costSoFar = 0;
+    const turnCost = evt.costUsd - costSoFar;
+    costSoFar = evt.costUsd;
+    return { ...evt, costUsd: turnCost };
+  };
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
   if (!child.pid) {
@@ -344,6 +378,9 @@ async function* createEventStream(
   child.once('exit', closeSilentStdout);
   let sawResult = false;
   let finished = false;
+  // The `done` of the last turn that was not taken as the end: replayed if
+  // claude exits without a final one, so the session id is not lost.
+  let heldDone: AgentEvent | undefined;
   let nextTurnGuard: ReturnType<typeof setTimeout> | undefined;
   const clearNextTurnGuard = (): void => {
     if (nextTurnGuard) clearTimeout(nextTurnGuard);
@@ -376,7 +413,8 @@ async function* createEventStream(
             unread: input.unreadCount,
           });
           for (const evt of translateEvent(parsed)) {
-            if (evt.type !== 'done') yield evt;
+            if (evt.type === 'done') heldDone = evt;
+            else yield perTurnCost(evt);
           }
           nextTurnGuard = setTimeout(() => {
             log.warn('agent', 'next-turn-guard-expired', {
@@ -391,7 +429,7 @@ async function* createEventStream(
         input.close();
         finished = true;
       }
-      yield* translateEvent(parsed);
+      for (const evt of translateEvent(parsed)) yield perTurnCost(evt);
     }
   } finally {
     clearNextTurnGuard();
@@ -446,7 +484,7 @@ async function* createEventStream(
   } else if (sawResult && !finished) {
     // stdin was closed by the next-turn guard and claude exited cleanly
     // without another result: the last completed turn is the answer.
-    yield { type: 'done', terminationReason: 'normal' };
+    yield heldDone ?? { type: 'done', terminationReason: 'normal' };
   }
 }
 
@@ -466,6 +504,58 @@ function writeSystemPromptFile(content: string): { path: string; cleanup: () => 
         rmSync(dir, { recursive: true, force: true });
       } catch {
         // best-effort: the OS will reclaim the temp dir eventually
+      }
+    },
+  };
+}
+
+/** A gated run whose approval hook could not be set up stays read-only (plan mode). */
+function gatedPermissionMode(opts: AgentRunOptions): string {
+  if (opts.approvals && !opts.approvals.hookCommand) return 'plan';
+  return opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE;
+}
+
+/** Claude Code settings that route every tool call through the approval hook. */
+export function approvalHookSettings(command: string, timeoutSec: number): HookSettings {
+  return {
+    hooks: {
+      PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command, timeout: timeoutSec }] }],
+    },
+  };
+}
+
+interface HookSettings {
+  hooks: { PreToolUse: unknown[] };
+}
+
+/** Pull an inline `--settings <json>` out of an argv list. */
+function splitSettingsArg(argv: string[]): { args: string[]; settings?: HookSettings } {
+  const at = argv.indexOf('--settings');
+  if (at < 0 || at + 1 >= argv.length) return { args: argv };
+  return {
+    args: [...argv.slice(0, at), ...argv.slice(at + 2)],
+    settings: JSON.parse(argv[at + 1]!) as HookSettings,
+  };
+}
+
+/** One settings object carrying every PreToolUse hook given. */
+export function mergeHookSettings(...parts: (HookSettings | undefined)[]): HookSettings | undefined {
+  const present = parts.filter((p): p is HookSettings => Boolean(p));
+  if (present.length === 0) return undefined;
+  return { hooks: { PreToolUse: present.flatMap((p) => p.hooks?.PreToolUse ?? []) } };
+}
+
+function writeSettingsFile(settings: object): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'lark-claude-settings-'));
+  const path = join(dir, 'settings.json');
+  writeFileSync(path, JSON.stringify(settings), { encoding: 'utf8', mode: 0o600 });
+  return {
+    path,
+    cleanup: () => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best-effort
       }
     },
   };

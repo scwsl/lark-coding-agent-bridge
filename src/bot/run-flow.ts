@@ -15,9 +15,18 @@ import {
   type WorkingDirectoryRejectReason,
   type WorkingDirectoryResolveResult,
 } from '../policy/workspace';
-import type { RunExecution, RunExecutor } from '../runtime/run-executor';
+import type { BackgroundTurnHandler, RunExecution, RunExecutor } from '../runtime/run-executor';
+import type { GateContext } from '../runtime/approvals';
 import { RunRejected, type RunRejectedCode } from '../runtime/errors';
+import type { AgentSessionProbe } from '../agent/session-probe';
+import type { SmartSessionSettings } from '../config/schema';
 import type { SessionCatalog } from '../session/catalog';
+import {
+  decideRotation,
+  handoffSection,
+  type PendingRotation,
+  type RotationVerdict,
+} from '../session/smart-session';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import type { RunGuard } from '../policy/owner-guard';
@@ -35,9 +44,27 @@ export interface StartRunFlowInput {
   workspaces: WorkspaceStore;
   executor: RunExecutor;
   now: number;
+  /** Display name of `scope.actorId`, for usage reports. */
+  actorName?: string;
+  /** Set when a non-admin drives the run (see SubmitRunInput.gate). */
+  gate?: GateContext;
+  /** Passed to the executor as `SubmitRunInput.onBackgroundTurn`. */
+  onBackgroundTurn?: BackgroundTurnHandler;
   stopGraceMs?: number;
   /** Limits for a run the bot owner didn't start (see ownerOnlyGuard). */
   guard?: RunGuard;
+  /** 会话智能压缩: see AgentRunOptions.compactWindowTokens. */
+  compactWindowTokens?: number;
+  /**
+   * 会话智能压缩 (IM only): may leave the conversation this message would
+   * resume and start fresh. Leave unset to always resume.
+   */
+  rotation?: {
+    settings: SmartSessionSettings;
+    /** The agent asked to close the conversation at the end of its last answer. */
+    pending?: PendingRotation;
+    probe: (handle: string, cwd: string) => Promise<AgentSessionProbe | undefined>;
+  };
   observability?: {
     profile: string;
     agent: string;
@@ -58,6 +85,8 @@ export type StartRunFlowResult =
       policy: RunPolicyAllow;
       cwdRealpath: string;
       resumeFrom?: string;
+      /** Set when 会话智能压缩 archived the conversation this message would have resumed. */
+      rotated?: RotationVerdict;
     }
   | {
       ok: false;
@@ -113,9 +142,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
     };
   }
 
+  const { descriptor } = input.capability;
   let resumeFrom: string | undefined;
-  let sessionId: string | undefined;
-  let threadId: string | undefined;
   if (input.sessionCatalog) {
     const catalogEntry = input.sessionCatalog.activeFor({
       scopeId: input.scopeId,
@@ -123,28 +151,48 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       cwdRealpath: workspace.cwdRealpath,
       policyFingerprint: policy.policyFingerprint,
     });
-    if (catalogEntry?.agentId === 'claude') {
-      sessionId = catalogEntry.sessionId;
-      resumeFrom = sessionId;
-    } else if (catalogEntry?.agentId === 'codex') {
-      threadId = catalogEntry.threadId;
-      resumeFrom = threadId;
-    }
+    resumeFrom = catalogEntry?.[descriptor.sessionHandle];
   }
-  if (!resumeFrom && input.capability.agentId === 'claude') {
+  if (!resumeFrom && descriptor.scopeSessionStore) {
     resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
-    sessionId = resumeFrom;
     const stale = input.sessions.getRaw(input.scopeId);
     if (!resumeFrom && stale?.cwd && stale.cwd !== workspace.cwdRealpath) {
       input.sessions.clear(input.scopeId);
     }
   }
+  let runPolicy = policy;
+  let rotated: RotationVerdict | undefined;
+  if (resumeFrom && input.rotation) {
+    const probe = await input.rotation.probe(resumeFrom, workspace.cwdRealpath).catch(() => undefined);
+    rotated = decideRotation({
+      settings: input.rotation.settings,
+      probe,
+      ...(input.rotation.pending ? { pending: input.rotation.pending } : {}),
+      resumeHandle: resumeFrom,
+      now: input.now,
+    });
+    if (rotated) {
+      // Same as `/new`: the conversation stays listed in /resume.
+      input.sessionCatalog?.archiveActive({
+        scopeId: input.scopeId,
+        agentId: input.capability.agentId,
+        cwdRealpath: workspace.cwdRealpath,
+        policyFingerprint: policy.policyFingerprint,
+        now: input.now,
+      });
+      if (descriptor.scopeSessionStore) input.sessions.clear(input.scopeId);
+      resumeFrom = undefined;
+      runPolicy = { ...policy, prompt: `${handoffSection(rotated)}\n\n${policy.prompt}` };
+    }
+  }
+  const sessionId = descriptor.sessionHandle === 'sessionId' ? resumeFrom : undefined;
+  const threadId = descriptor.sessionHandle === 'threadId' ? resumeFrom : undefined;
 
   let execution: RunExecution;
   try {
     execution = await input.executor.submit({
       scopeId: input.scopeId,
-      policy,
+      policy: runPolicy,
       sessionId,
       threadId,
       model: resolveModelArg(
@@ -156,7 +204,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         input.profileConfig.preferences.effort,
       ),
       images:
-        input.capability.agentId === 'codex'
+        descriptor.imageArgs
           ? policy.attachments
               .filter((attachment) => attachment.kind === 'image' && attachment.decision === 'accepted')
               .map((attachment) => attachment.path)
@@ -164,6 +212,11 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
           : undefined,
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
+      ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      actor: { id: input.scope.actorId, ...(input.actorName ? { name: input.actorName } : {}) },
+      ...(input.scope.chatId ? { chatId: input.scope.chatId } : {}),
+      ...(input.gate ? { gate: input.gate } : {}),
+      onBackgroundTurn: input.onBackgroundTurn,
       observability: input.observability,
     });
   } catch (err) {
@@ -188,33 +241,25 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   return {
     ok: true,
     execution,
-    policy,
+    policy: runPolicy,
     cwdRealpath: workspace.cwdRealpath,
     ...(resumeFrom ? { resumeFrom } : {}),
+    ...(rotated ? { rotated } : {}),
   };
 }
 
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (input.event.type !== 'system') return;
-  if (input.capability.agentId === 'claude' && input.event.sessionId) {
-    const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
-    input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
-    input.sessionCatalog?.upsertActive({
-      scopeId: input.scopeId,
-      agentId: 'claude',
-      cwdRealpath,
-      policyFingerprint: input.policy.policyFingerprint,
-      sessionId: input.event.sessionId,
-    });
-    return;
-  }
-  if (input.capability.agentId === 'codex' && input.event.threadId) {
-    input.sessionCatalog?.upsertActive({
-      scopeId: input.scopeId,
-      agentId: 'codex',
-      cwdRealpath: input.policy.cwdRealpath,
-      policyFingerprint: input.policy.policyFingerprint,
-      threadId: input.event.threadId,
-    });
-  }
+  const { descriptor } = input.capability;
+  const handle = input.event[descriptor.sessionHandle];
+  if (!handle) return;
+  const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
+  if (descriptor.scopeSessionStore) input.sessions.set(input.scopeId, handle, cwdRealpath);
+  input.sessionCatalog?.upsertActive({
+    scopeId: input.scopeId,
+    agentId: input.capability.agentId,
+    cwdRealpath,
+    policyFingerprint: input.policy.policyFingerprint,
+    [descriptor.sessionHandle]: handle,
+  });
 }

@@ -33,6 +33,13 @@ export interface SkillSummary {
   description: string;
   /** Absolute path of SKILL.md — handed to the agent so it can read the body. */
   path: string;
+  /** Shared library the skill comes from; absent for the profile's own `skills/`. */
+  source?: string;
+}
+
+/** Extra skills merged behind the profile's own — the shared libraries. */
+export interface SkillSource {
+  listSkills(): Promise<SkillSummary[]>;
 }
 
 /** Bullet lines look like `- [a1b2c3] remember this`. */
@@ -40,9 +47,15 @@ const ENTRY_RE = /^-\s*\[([0-9a-f]{6})\]\s*(.*)$/;
 
 export class KnowledgeStore {
   readonly dir: string;
+  private readonly skillSources: SkillSource[] = [];
 
   constructor(dir: string = paths.knowledgeDir) {
     this.dir = dir;
+  }
+
+  /** Merge another source's skills behind this profile's own (`/skills lib`). */
+  addSkillSource(source: SkillSource): void {
+    this.skillSources.push(source);
   }
 
   get skillsDir(): string {
@@ -56,13 +69,7 @@ export class KnowledgeStore {
 
   async listMemories(scope: MemoryScope): Promise<MemoryEntry[]> {
     const raw = await readIfExists(this.memoryFile(scope));
-    if (!raw) return [];
-    const entries: MemoryEntry[] = [];
-    for (const line of raw.split('\n')) {
-      const match = ENTRY_RE.exec(line.trim());
-      if (match?.[1] && match[2]?.trim()) entries.push({ id: match[1], text: match[2].trim() });
-    }
-    return entries;
+    return raw ? parseMemoryEntries(raw) : [];
   }
 
   async addMemory(scope: MemoryScope, text: string): Promise<MemoryEntry> {
@@ -106,7 +113,34 @@ export class KnowledgeStore {
     return entries.length;
   }
 
+  /**
+   * Every skill the agent gets in its index: the profile's own first, then each
+   * shared library's. A name that is already taken is skipped, so a profile can
+   * override one library skill by writing its own under the same name.
+   */
   async listSkills(): Promise<SkillSummary[]> {
+    const own = await this.listOwnSkills();
+    if (this.skillSources.length === 0) return own;
+    const merged = [...own];
+    const taken = new Set(own.map((skill) => skill.name));
+    for (const source of this.skillSources) {
+      let extra: SkillSummary[] = [];
+      try {
+        extra = await source.listSkills();
+      } catch (err) {
+        log.warn('knowledge', 'skill-source-failed', { err: String(err) });
+      }
+      for (const skill of extra) {
+        if (taken.has(skill.name)) continue;
+        taken.add(skill.name);
+        merged.push(skill);
+      }
+    }
+    return merged;
+  }
+
+  /** Only the skills under this profile's `knowledge/skills/`. */
+  async listOwnSkills(): Promise<SkillSummary[]> {
     let names: string[];
     try {
       const dirents = await readdir(this.skillsDir, { withFileTypes: true });
@@ -129,11 +163,18 @@ export class KnowledgeStore {
   }
 
   async readSkill(name: string): Promise<{ summary: SkillSummary; body: string } | undefined> {
-    if (!isSafeSkillName(name)) return undefined;
-    const path = join(this.skillsDir, name, 'SKILL.md');
-    const raw = await readIfExists(path);
-    if (raw === undefined) return undefined;
-    return { summary: { ...parseSkillHeader(name, raw), path }, body: raw };
+    if (isSafeSkillName(name)) {
+      const path = join(this.skillsDir, name, 'SKILL.md');
+      const raw = await readIfExists(path);
+      if (raw !== undefined) return { summary: { ...parseSkillHeader(name, raw), path }, body: raw };
+    }
+    if (this.skillSources.length === 0) return undefined;
+    // Library skills are looked up by their indexed name, never by a path built
+    // from the request, so `show ../../x` cannot reach outside a mirror.
+    const summary = (await this.listSkills()).find((skill) => skill.source && skill.name === name);
+    if (!summary) return undefined;
+    const raw = await readIfExists(summary.path);
+    return raw === undefined ? undefined : { summary, body: raw };
   }
 
   /** Create the directory skeleton so a fresh profile has something to sync. */
@@ -164,7 +205,17 @@ async function readIfExists(path: string): Promise<string | undefined> {
   }
 }
 
-function defaultMemoryHeader(scope: MemoryScope): string {
+/** The `- [id] text` bullets of a memory file, in order. */
+export function parseMemoryEntries(raw: string): MemoryEntry[] {
+  const entries: MemoryEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const match = ENTRY_RE.exec(line.trim());
+    if (match?.[1] && match[2]?.trim()) entries.push({ id: match[1], text: match[2].trim() });
+  }
+  return entries;
+}
+
+export function defaultMemoryHeader(scope: MemoryScope): string {
   return scope.kind === 'profile'
     ? '# 记忆（全局）\n\n这个 profile 下所有会话都会看到下面的内容。\n'
     : '# 记忆（本会话）\n\n只有这个会话会看到下面的内容。\n';
@@ -194,8 +245,8 @@ export function parseSkillHeader(dirName: string, raw: string): { name: string; 
   const frontmatter = /^---\s*\n([\s\S]*?)\n---/.exec(raw);
   if (frontmatter?.[1]) {
     const block = frontmatter[1];
-    const name = /^name:\s*(.+)$/m.exec(block)?.[1]?.trim();
-    const description = /^description:\s*(.+)$/m.exec(block)?.[1]?.trim();
+    const name = frontmatterValue(block, 'name');
+    const description = frontmatterValue(block, 'description');
     if (name || description) {
       return { name: name || dirName, description: description || '' };
     }
@@ -207,4 +258,29 @@ export function parseSkillHeader(dirName: string, raw: string): { name: string; 
     (line) => line.trim() && !line.startsWith('#') && !line.startsWith('---'),
   );
   return { name: heading || dirName, description: (firstProse ?? '').trim() };
+}
+
+/**
+ * One top-level scalar from a YAML-ish frontmatter block: plain, quoted
+ * (`"…"` / `'…'`), or a folded / literal block (`>`, `|`) whose indented lines
+ * are joined into one line — the index wants a single line either way.
+ */
+function frontmatterValue(block: string, key: string): string | undefined {
+  const lines = block.split('\n');
+  const index = lines.findIndex((line) => line.startsWith(`${key}:`));
+  if (index < 0) return undefined;
+  let value = lines[index]!.slice(key.length + 1).trim();
+  if (/^[>|][+-]?$/.test(value)) {
+    const body: string[] = [];
+    for (const line of lines.slice(index + 1)) {
+      if (line.trim() && !/^\s/.test(line)) break;
+      if (line.trim()) body.push(line.trim());
+    }
+    value = body.join(' ');
+  } else if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.endsWith(value[0])) {
+    const quote = value[0];
+    value = value.slice(1, -1);
+    value = quote === '"' ? value.replace(/\\(["\\])/g, '$1') : value.replace(/''/g, "'");
+  }
+  return value.trim() || undefined;
 }

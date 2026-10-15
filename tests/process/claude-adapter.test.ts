@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ClaudeAdapter } from '../../src/agent/claude/adapter.js';
 import type { AgentEvent } from '../../src/agent/types.js';
+import { ownerOnlyGuard } from '../../src/policy/owner-guard.js';
 
 interface FakeBinary {
   path: string;
@@ -328,6 +329,70 @@ describe('ClaudeAdapter process contract', () => {
     ]);
   });
 
+  it('routes every tool call of a gated run through the approval hook', async () => {
+    const fake = await createFakeClaude({ lines: [{ type: 'result', session_id: 'sess-gated' }] });
+    cleanup.push(fake.dir);
+    const decide = async () => ({ decision: 'deny' as const, reason: 'n/a' });
+
+    await collect(
+      new ClaudeAdapter({ binary: fake.path }).run({
+        runId: 'run-gated',
+        prompt: 'x',
+        cwd: fake.dir,
+        approvals: { hookCommand: "node /opt/hook.mjs '/tmp/s.sock' tok", hookTimeoutSec: 330, decide },
+      }).events,
+    );
+    const gated = await readRecord(fake.recordPath);
+    expect(gated.settings).toEqual({
+      hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: "node /opt/hook.mjs '/tmp/s.sock' tok", timeout: 330 }] }] },
+    });
+    expect(gated.argv[gated.argv.indexOf('--permission-mode') + 1]).toBe('bypassPermissions');
+  });
+
+  it('puts the owner guard and the approval hook in one settings file', async () => {
+    const fake = await createFakeClaude({ lines: [{ type: 'result', session_id: 'sess-both' }] });
+    cleanup.push(fake.dir);
+    const guard = ownerOnlyGuard({
+      larkChannelHome: join(fake.dir, '.lark-channel'),
+      guestRoots: [],
+      workspace: fake.dir,
+      home: fake.dir,
+    });
+
+    await collect(
+      new ClaudeAdapter({ binary: fake.path }).run({
+        runId: 'run-both',
+        prompt: 'x',
+        cwd: fake.dir,
+        guard,
+        approvals: { hookCommand: 'node /opt/hook.mjs tok', hookTimeoutSec: 330, decide: async () => ({ decision: 'deny', reason: 'n/a' }) },
+      }).events,
+    );
+    const record = await readRecord(fake.recordPath);
+    // Claude takes a single `--settings`: both hooks must live in it.
+    expect(record.argv.filter((a) => a === '--settings')).toHaveLength(1);
+    const hooks = (record.settings as { hooks: { PreToolUse: Array<{ matcher: string }> } }).hooks.PreToolUse;
+    expect(hooks.map((h) => h.matcher)).toEqual(['Bash|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep', '*']);
+    // The guard's other flags still reach argv.
+    expect(record.argv).toContain('--disallowedTools');
+  });
+
+  it('keeps a gated run read-only when no approval hook could be set up', async () => {
+    const fake = await createFakeClaude({ lines: [{ type: 'result', session_id: 'sess-ro' }] });
+    cleanup.push(fake.dir);
+    await collect(
+      new ClaudeAdapter({ binary: fake.path }).run({
+        runId: 'run-ro',
+        prompt: 'x',
+        cwd: fake.dir,
+        approvals: { decide: async () => ({ decision: 'deny', reason: 'n/a' }) },
+      }).events,
+    );
+    const record = await readRecord(fake.recordPath);
+    expect(record.argv[record.argv.indexOf('--permission-mode') + 1]).toBe('plan');
+    expect(record.settings).toBeNull();
+  });
+
   it('requires cwd to be resolved by policy before spawning', () => {
     expect(() =>
       new ClaudeAdapter({ binary: 'unused' }).run({ runId: 'run-no-cwd', prompt: 'hi' }),
@@ -371,6 +436,8 @@ async function createFakeClaude(options: {
       'const argv = process.argv.slice(2);',
       'const spIdx = argv.indexOf("--append-system-prompt-file");',
       'const systemPrompt = spIdx !== -1 ? readFileSync(argv[spIdx + 1], "utf8") : null;',
+      'const setIdx = argv.indexOf("--settings");',
+      'const settings = setIdx !== -1 ? JSON.parse(readFileSync(argv[setIdx + 1], "utf8")) : null;',
       `const turns = ${JSON.stringify(turns)};`,
       `const REPLAY = ${JSON.stringify(REPLAY)};`,
       'const messages = [];',
@@ -380,6 +447,7 @@ async function createFakeClaude(options: {
       '    stdin: messages[0] ?? "",',
       '    messages,',
       '    systemPrompt,',
+      '    settings,',
       '    cwd: process.cwd(),',
       '    env: {',
       '      LARK_CHANNEL: process.env.LARK_CHANNEL,',
@@ -416,6 +484,7 @@ async function readRecord(path: string): Promise<{
   stdin: string;
   messages: string[];
   systemPrompt: string | null;
+  settings: unknown;
   cwd: string;
   env: {
     LARK_CHANNEL?: string;
@@ -430,6 +499,7 @@ async function readRecord(path: string): Promise<{
     stdin: string;
     messages: string[];
     systemPrompt: string | null;
+    settings: unknown;
     cwd: string;
     env: {
       LARK_CHANNEL?: string;
@@ -440,3 +510,4 @@ async function readRecord(path: string): Promise<{
     };
   };
 }
+

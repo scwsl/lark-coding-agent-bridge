@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
@@ -54,6 +54,41 @@ describe('/status and /doctor diagnostics', () => {
     expect(status).toContain('permission');
     expect(status).toContain('plan');
     expect(status).not.toContain('bypassPermissions');
+  });
+
+  it('shows how large the resumed conversation is and how long it has been idle', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+    const cwd = h.workspaces.cwdFor('chat-1')!;
+    h.sessions.set('chat-1', 'sess-live', cwd);
+    await writeTranscript(h, cwd, 'sess-live', { minutesAgo: 30, contextTokens: 452_000 });
+
+    await expect(h.run('/status')).resolves.toBe(true);
+
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain('约 45 万 token');
+    expect(status).toContain('上次对话 30 分钟前');
+    expect(status).not.toContain('自动开新会话');
+  });
+
+  it('says when 会话智能压缩 will start the next message fresh', async () => {
+    const h = await createHarness({ configuredWorkspace: true, smartSession: true });
+    const cwd = h.workspaces.cwdFor('chat-1')!;
+    h.sessions.set('chat-1', 'sess-live', cwd);
+    await writeTranscript(h, cwd, 'sess-live', { minutesAgo: 5, contextTokens: 20_000 });
+
+    await expect(h.run('/status')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).not.toContain('自动开新会话');
+
+    h.controls.pendingRotations = {
+      get: (scope) => (scope === 'chat-1' ? { handle: 'sess-live', requestedAt: Date.now() } : undefined),
+    };
+    await expect(h.run('/status')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('下一条消息会自动开新会话（上一件事已完成）');
+
+    h.controls.pendingRotations = { get: () => undefined };
+    await writeTranscript(h, cwd, 'sess-live', { minutesAgo: 90, contextTokens: 200_000 });
+    await expect(h.run('/status')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('缓存已过期且上下文偏大');
   });
 
   it('runs only self-checks when no cwd is selected', async () => {
@@ -125,6 +160,7 @@ async function createHarness(options: {
   configuredWorkspace: boolean;
   bindWorkspace?: boolean;
   defaultWorkspace?: boolean;
+  smartSession?: boolean;
 }): Promise<Harness> {
   const tmp = await createTmpProfile('doctor-status-');
   const channel = createFakeChannel();
@@ -139,7 +175,9 @@ async function createHarness(options: {
   if (options.defaultWorkspace) {
     profileConfig.workspaces.default = tmp.workspace;
   }
-  const controls = {
+  if (options.smartSession) profileConfig.preferences.smartSession = true;
+  vi.stubEnv('CLAUDE_CONFIG_DIR', join(tmp.root, 'claude-config'));
+  const controls: Controls = {
     profile: 'claude',
     profileConfig,
     botOwnerId: 'ou-owner',
@@ -151,7 +189,7 @@ async function createHarness(options: {
     configPath: join(tmp.profile, 'config.json'),
     cfg: profileConfig,
     processId: 'proc-1',
-  } satisfies Controls;
+  };
 
   if (options.bindWorkspace !== false) {
     workspaces.setCwd('chat-1', tmp.workspace);
@@ -183,9 +221,27 @@ async function createHarness(options: {
   cleanups.push(async () => {
     await Promise.all([sessions.flush(), workspaces.flush()]);
     await tmp.cleanup();
+    vi.unstubAllEnvs();
   });
 
   return { tmp, channel, sessions, workspaces, activeRuns, pool, agent, controls, run };
+}
+
+/** A Claude transcript whose last model call was `minutesAgo` with a `contextTokens` prompt. */
+async function writeTranscript(
+  h: Harness,
+  cwd: string,
+  sessionId: string,
+  opts: { minutesAgo: number; contextTokens: number },
+): Promise<void> {
+  const project = join(h.tmp.root, 'claude-config', 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'));
+  await mkdir(project, { recursive: true });
+  const record = {
+    type: 'assistant',
+    timestamp: new Date(Date.now() - opts.minutesAgo * 60_000).toISOString(),
+    message: { content: [], usage: { input_tokens: 0, cache_read_input_tokens: opts.contextTokens } },
+  };
+  await writeFile(join(project, `${sessionId}.jsonl`), `${JSON.stringify(record)}\n`);
 }
 
 function appConfig(defaultWorkspace: string | undefined): ProfileConfig {

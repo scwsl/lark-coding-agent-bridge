@@ -60,7 +60,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     | undefined;
   const formValue = raw?.action?.form_value;
 
-  // Resolve the click's session scope. For topic groups we need to know
+  // Resolve the click's session scope. For group cards we need to know
   // the message's thread_id so the action targets the right topic's
   // session — look up the carrier message (the card lives on it) once.
   // Done before the access check so we know the chat mode (p2p vs group)
@@ -158,10 +158,11 @@ async function resolveScope(
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
-  if (mode !== 'topic') {
+  if (mode === 'p2p') {
     return { scope: chatId, threadId: undefined, mode };
   }
-  // Topic group — need the carrier message's thread_id to compose scope.
+  // Match message intake: a carrier thread_id is stronger than cached chat
+  // mode (groups converted to topics can still resolve as ordinary groups).
   // One API call per click; could cache by messageId if it ever becomes hot.
   const threadId = await lookupMessageThreadId(deps.channel, deps.evt.messageId);
   if (!threadId) {
@@ -169,7 +170,7 @@ async function resolveScope(
     // scope than fail the click silently.
     return { scope: chatId, threadId: undefined, mode };
   }
-  return { scope: `${chatId}:${threadId}`, threadId, mode };
+  return { scope: `${chatId}:${threadId}`, threadId, mode: 'topic' };
 }
 
 function forwardToAgent(

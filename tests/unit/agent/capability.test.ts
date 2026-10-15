@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BRIDGE_SYSTEM_PROMPT } from '../../../src/agent/bridge-system-prompt';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability';
+import { agentCapability, claudeCapability, codexCapability } from '../../../src/agent/capability';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 
 describe('agent capability contract', () => {
@@ -9,9 +9,8 @@ describe('agent capability contract', () => {
 
     expect(capability).toMatchObject({
       agentId: 'claude',
-      sessionKind: 'claude-session',
+      descriptor: { sessionHandle: 'sessionId', scopeSessionStore: true, finalReply: 'stream' },
       promptInjection: 'append-system-prompt',
-      supportsNativeHistory: true,
       systemPrompt: BRIDGE_SYSTEM_PROMPT,
       callback: {
         marker: '__bridge_cb',
@@ -41,9 +40,8 @@ describe('agent capability contract', () => {
 
     expect(codexCapability(profile)).toMatchObject({
       agentId: 'codex',
-      sessionKind: 'codex-thread',
+      descriptor: { sessionHandle: 'threadId', scopeSessionStore: false, finalReply: 'separate' },
       promptInjection: 'stdin-prefix',
-      supportsNativeHistory: false,
       systemPrompt: BRIDGE_SYSTEM_PROMPT,
       permissions: {
         maxAccess: 'workspace',
@@ -71,5 +69,15 @@ describe('agent capability contract', () => {
     });
 
     expect(codexCapability(profile).permissions.maxAccess).toBe('read-only');
+  });
+
+  it('builds the same capability from a profile through agentCapability', () => {
+    const profile = createDefaultProfileConfig({
+      agentKind: 'codex',
+      accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
+      codex: { binaryPath: '/usr/local/bin/codex' },
+    });
+
+    expect(agentCapability(profile)).toEqual(codexCapability(profile));
   });
 });

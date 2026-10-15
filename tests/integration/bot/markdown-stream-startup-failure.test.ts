@@ -1,10 +1,10 @@
-import type { NormalizedMessage } from '@larksuite/channel';
-import { realpath } from 'node:fs/promises';
+import { LarkChannelError, type NormalizedMessage } from '@larksuite/channel';
+import { realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types.js';
 import type { AutoResumer } from '../../../src/bot/auto-resume.js';
-import type { FakeAgentEvents } from '../../helpers/fake-agent.js';
+import type { FakeAgentEvents, FakeBackgroundTurn } from '../../helpers/fake-agent.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
@@ -65,6 +65,7 @@ interface FakeLarkChannel {
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
   send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
+  updated: Array<{ messageId: string; card: unknown }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
   updateCard: ReturnType<typeof vi.fn>;
   addReaction(messageId: string, emojiType: string): Promise<string>;
@@ -73,6 +74,7 @@ interface FakeLarkChannel {
 
 type StreamFn = FakeLarkChannel['stream'];
 type SendFn = FakeLarkChannel['send'];
+type UpdateCardFn = (messageId: string, card: object) => Promise<void>;
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -207,6 +209,124 @@ describe('markdown stream startup failures', () => {
     // A successful run marks the triggering question itself as answered,
     // alongside (not instead of) the Typing reaction's own add/remove cycle.
     await waitFor(() => reactionTypesAdded(h.channel).includes('DONE'));
+  });
+
+  it('posts a background turn as a follow-up reply to the same message', async () => {
+    const streamed: string[] = [];
+    const h = await createHarness({
+      agentKind: 'claude',
+      events: [
+        { type: 'system', sessionId: 'sess-bg' },
+        { type: 'background', count: 1 },
+        { type: 'text', delta: 'BUILD_STARTED' },
+        { type: 'done', sessionId: 'sess-bg', terminationReason: 'normal' },
+      ],
+      background: {
+        afterMs: 50,
+        events: [
+          { type: 'background', count: 0 },
+          { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/tmp/out' } },
+          { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+          { type: 'text', delta: 'BUILD_OK' },
+          { type: 'done', sessionId: 'sess-bg', terminationReason: 'normal' },
+        ],
+      },
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        await producer?.({
+          setContent: vi.fn(async (markdown: string) => {
+            streamed.push(markdown);
+          }),
+        });
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_bg', 'build it'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    // Claude streams its answer; the background turn arrives later as its own reply.
+    expect(streamed.some((markdown) => markdown.includes('BUILD_STARTED'))).toBe(true);
+    const followUp = lastMarkdown(h.channel);
+    expect(followUp).toContain('BUILD_OK');
+    expect(followUp).toContain('后台任务');
+    expect(followUp).not.toContain('BUILD_STARTED');
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_bg' });
+    // The background turn ran to completion; nothing was killed.
+    expect(h.agent.runs[0]?.stopped).toBe(false);
+  });
+
+  it('processes messages a previous process left queued, and reports ones too old to act on', async () => {
+    const streamed: string[] = [];
+    const h = await createHarness({
+      agentKind: 'claude',
+      events: [{ type: 'text', delta: 'LEFTOVER_ANSWERED' }, { type: 'done', terminationReason: 'normal' }],
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        await producer?.({ setContent: vi.fn(async (markdown: string) => void streamed.push(markdown)) });
+      },
+    });
+    const appPaths = testAppPaths(h.tmp);
+    const stale = { ...message('om_old', 'stale question'), chatId: 'oc_other' };
+    await writeFile(
+      appPaths.pendingFile,
+      JSON.stringify({
+        oc_dm: { scope: 'oc_dm', queuedAt: Date.now() - 60_000, messages: [message('om_left', 'leftover question')] },
+        oc_other: { scope: 'oc_other', queuedAt: Date.now() - 60 * 60_000, messages: [stale] },
+      }),
+    );
+    await startTestBridge(h, appPaths);
+
+    await waitFor(() => h.agent.runOptions.length === 1 && streamed.some((m) => m.includes('LEFTOVER_ANSWERED')));
+    expect(h.agent.runOptions[0]?.prompt).toContain('leftover question');
+    await waitFor(() => h.channel.sent.some((m) => m.chatId === 'oc_other'));
+    const notice = h.channel.sent.find((m) => m.chatId === 'oc_other');
+    expect(JSON.stringify(notice?.content)).toContain('没来得及处理');
+    expect(notice?.options).toMatchObject({ replyTo: 'om_old' });
+    expect(h.agent.runOptions.some((o) => o.prompt.includes('stale question'))).toBe(false);
+  });
+
+  it('with approvals on, gates runs a non-admin drives, and only those', async () => {
+    const h = await createHarness({
+      agentKind: 'claude',
+      // Claude opens its progress card at run start; let that stream settle so
+      // the scope frees up for the second message.
+      stream: async () => {},
+      events: [
+        [{ type: 'done', terminationReason: 'normal' }],
+        [{ type: 'done', terminationReason: 'normal' }],
+        [{ type: 'done', terminationReason: 'normal' }],
+      ],
+    });
+    h.profileConfig.approvals.enabled = true;
+    await startTestBridge(h, testAppPaths(h.tmp));
+
+    await h.channel.handlers.message?.(message('om_user', 'please deploy'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    // A non-admin: the run carries an approval channel, with the Claude hook.
+    expect(h.agent.runOptions[0]?.approvals?.hookCommand).toContain('approval-hook.mjs');
+
+    h.profileConfig.access.admins = ['ou_user'];
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await h.channel.handlers.message?.(message('om_admin', 'now as admin'));
+    await waitFor(() => h.agent.runOptions.length === 2);
+    expect(h.agent.runOptions[1]?.approvals).toBeUndefined();
+  });
+
+  it('runs non-admins ungated by default, with approvals off', async () => {
+    const h = await createHarness({
+      agentKind: 'claude',
+      events: [[{ type: 'done', terminationReason: 'normal' }]],
+    });
+    await startTestBridge(h, testAppPaths(h.tmp));
+
+    await h.channel.handlers.message?.(message('om_user', 'please deploy'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    expect(h.agent.runOptions[0]?.approvals).toBeUndefined();
   });
 
   it('opens no progress stream for a final-only round', async () => {
@@ -641,17 +761,180 @@ describe('markdown stream startup failures', () => {
     await waitFor(() => reactionTypesAdded(h.channel).includes('DONE'));
     await waitFor(() => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0);
   });
+  describe('when a streamed card cannot take its final update', () => {
+    // Feishu rejected the finished card of long Claude runs (230099: too many
+    // tables / card content). The stream had already shown part of the run, so
+    // nothing re-sent the answer and the card stayed stuck mid-run.
+    const cardLimit = () => new Error('Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit');
+    const runEvents = (): AgentEvent[] => [
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'cat report.md' } },
+      { type: 'tool_result', id: 't1', output: 'TOOL_OUTPUT_SENTINEL', isError: false },
+      { type: 'text', delta: 'ANSWER_SENTINEL' },
+      { type: 'done', terminationReason: 'normal' },
+    ];
+    const failingFinalStream: StreamFn = async (_chatId, input) => {
+      const producer = (input as {
+        card?: { producer?: (ctrl: { update(next: unknown): Promise<void>; messageId: string }) => Promise<void> };
+      }).card?.producer;
+      await producer?.({ update: vi.fn(async () => {}), messageId: 'om_stream_card' });
+      throw cardLimit();
+    };
+
+    it('replaces the stuck card with the answer alone', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      const h = await createHarness({
+        agentKind: 'claude',
+        messageReply: 'card',
+        events: runEvents(),
+        stream: failingFinalStream,
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_card_limit', 'run'));
+      await waitFor(() => h.channel.updated.length === 1);
+
+      expect(h.channel.updated[0]?.messageId).toBe('om_stream_card');
+      const card = JSON.stringify(h.channel.updated[0]?.card);
+      expect(card).toContain('ANSWER_SENTINEL');
+      expect(card).not.toContain('TOOL_OUTPUT_SENTINEL');
+      expect(card).toContain('"streaming_mode":false');
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(h.channel.sent).toHaveLength(0);
+    });
+
+    it('sends the answer as a new card when the stuck card cannot be updated', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      const h = await createHarness({
+        agentKind: 'claude',
+        messageReply: 'card',
+        events: runEvents(),
+        stream: failingFinalStream,
+        updateCard: async () => {
+          throw cardLimit();
+        },
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_card_limit_new', 'run'));
+      await waitFor(() => h.channel.sent.length === 1);
+
+      const content = h.channel.sent[0]?.content as { card?: unknown };
+      expect(JSON.stringify(content.card)).toContain('ANSWER_SENTINEL');
+      expect(JSON.stringify(content.card)).not.toContain('TOOL_OUTPUT_SENTINEL');
+      expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_card_limit_new' });
+    });
+
+    it('falls back to a plain post when no card is accepted', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      const h = await createHarness({
+        agentKind: 'claude',
+        messageReply: 'card',
+        events: runEvents(),
+        stream: failingFinalStream,
+        updateCard: async () => {
+          throw cardLimit();
+        },
+        send: async (_chatId, content) => {
+          if ((content as { card?: unknown }).card) throw cardLimit();
+          return { messageId: 'om_post' };
+        },
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_card_limit_post', 'run'));
+      await waitFor(() => h.channel.sent.length === 2);
+
+      expect(lastMarkdown(h.channel)).toContain('ANSWER_SENTINEL');
+      expect(lastMarkdown(h.channel)).not.toContain('TOOL_OUTPUT_SENTINEL');
+    });
+
+    it('re-sends the answer as a post when a markdown stream fails its final update', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      const h = await createHarness({
+        agentKind: 'claude',
+        events: runEvents(),
+        stream: async (_chatId, input) => {
+          const producer = (input as {
+            markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+          }).markdown;
+          await producer?.({ setContent: vi.fn(async () => {}) });
+          throw cardLimit();
+        },
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_md_limit', 'run'));
+      await waitFor(() => h.channel.sent.length === 1);
+
+      expect(lastMarkdown(h.channel)).toContain('ANSWER_SENTINEL');
+      expect(lastMarkdown(h.channel)).not.toContain('TOOL_OUTPUT_SENTINEL');
+    });
+
+    it('does not re-send anything when the message it answers was recalled', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      const h = await createHarness({
+        agentKind: 'claude',
+        messageReply: 'card',
+        events: runEvents(),
+        stream: async (_chatId, input) => {
+          const producer = (input as {
+            card?: { producer?: (ctrl: { update(next: unknown): Promise<void>; messageId: string }) => Promise<void> };
+          }).card?.producer;
+          await producer?.({ update: vi.fn(async () => {}), messageId: 'om_recalled_card' });
+          throw new LarkChannelError('target_revoked', 'The message was withdrawn.');
+        },
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_recalled', 'run'));
+      await waitFor(() => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(h.channel.updated).toHaveLength(0);
+      expect(h.channel.sent).toHaveLength(0);
+    });
+
+    it('also rescues a final update that fails after the terminal grace window', async () => {
+      vi.spyOn(log, 'fail').mockImplementation(() => {});
+      vi.spyOn(log, 'warn').mockImplementation(() => {});
+      const streamFailure = deferred<void>();
+      const h = await createHarness({
+        agentKind: 'claude',
+        messageReply: 'card',
+        events: runEvents(),
+        stream: async (_chatId, input) => {
+          const producer = (input as {
+            card?: { producer?: (ctrl: { update(next: unknown): Promise<void>; messageId: string }) => Promise<void> };
+          }).card?.producer;
+          void producer?.({ update: vi.fn(async () => {}), messageId: 'om_slow_card' });
+          await streamFailure.promise;
+        },
+      });
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message('om_card_limit_late', 'run'));
+      await new Promise((resolve) => setTimeout(resolve, 3_300));
+      streamFailure.reject(cardLimit());
+      await waitFor(() => h.channel.updated.length === 1);
+
+      expect(h.channel.updated[0]?.messageId).toBe('om_slow_card');
+      expect(JSON.stringify(h.channel.updated[0]?.card)).toContain('ANSWER_SENTINEL');
+    }, 10_000);
+  });
 });
 
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
   send?: SendFn;
+  updateCard?: UpdateCardFn;
   /** One run's events, or one array per run. */
   events?: FakeAgentEvents;
   messageReply?: 'card' | 'markdown' | 'text';
   /** Codex holds its answer back for a dedicated final reply; Claude streams it. */
   agentKind?: 'claude' | 'codex';
+  /** A turn the first run emits on its own after its user turn. */
+  background?: FakeBackgroundTurn;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -692,6 +975,7 @@ async function createHarness(options: {
   const agent = new FakeAgentAdapter({
     id: 'codex',
     displayName: 'Codex',
+    ...(options.background ? { background: options.background } : {}),
     events: options.events ?? [
       [
         {
@@ -727,13 +1011,14 @@ async function startTestBridge(h: {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   controls: ReturnType<typeof createControls>;
-}): Promise<void> {
+}, appPaths?: Parameters<typeof startChannel>[0]['appPaths']): Promise<void> {
   const bridge = await startChannel({
     cfg: h.profileConfig,
     agent: h.agent,
     sessions: h.sessions,
     workspaces: h.workspaces,
     controls: h.controls,
+    ...(appPaths ? { appPaths } : {}),
   });
   cleanups.push(() => bridge.disconnect());
 }
@@ -742,12 +1027,15 @@ function createFakeLarkChannel(harnessOptions: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
   send?: SendFn;
+  updateCard?: UpdateCardFn;
 } = {}): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: FakeLarkChannel['sent'] = [];
+  const updated: FakeLarkChannel['updated'] = [];
   const channel: FakeLarkChannel = {
     handlers,
     sent,
+    updated,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     rawClient: {
       request: vi.fn(async () => ({ data: { items: [] } })),
@@ -788,10 +1076,13 @@ function createFakeLarkChannel(harnessOptions: {
       if (harnessOptions.send) return harnessOptions.send(chatId, content, options);
       return { messageId: `sent_${sent.length}` };
     },
+    updateCard: vi.fn(async (messageId: string, card: object) => {
+      updated.push({ messageId, card });
+      if (harnessOptions.updateCard) await harnessOptions.updateCard(messageId, card);
+    }),
     stream: harnessOptions.stream ?? (async () => {
       await new Promise<void>(() => {});
     }),
-    updateCard: vi.fn(async () => {}),
     async addReaction(messageId, emojiType) {
       const r = await channel.rawClient.im.v1.messageReaction.create({
         path: { message_id: messageId },
@@ -903,4 +1194,19 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error('timed out waiting for async work');
+}
+
+function testAppPaths(tmp: TmpProfile) {
+  return {
+    secretsFile: join(tmp.profile, 'secrets.enc'),
+    keystoreSaltFile: join(tmp.profile, 'keystore.salt'),
+    mediaDir: join(tmp.profile, 'media'),
+    runsFile: join(tmp.profile, 'runs.json'),
+    knowledgeDir: join(tmp.profile, 'knowledge'),
+    jobsFile: join(tmp.profile, 'jobs.json'),
+    pendingFile: join(tmp.profile, 'pending.json'),
+    usageFile: join(tmp.profile, 'usage.json'),
+    auditFile: join(tmp.profile, 'audit.jsonl'),
+    profileDir: tmp.profile,
+  };
 }

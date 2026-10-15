@@ -11,6 +11,7 @@ import {
   resetCodexModelCatalogCache,
   resolveEffortArg,
   resolveModelArg,
+  resolvedModelLabel,
   supportedEfforts,
   supportedModels,
 } from '../../../src/agent/models.js';
@@ -76,6 +77,19 @@ describe('agent model catalog', () => {
     expect(claudeModelIdLabel('claude-fable-5-1[1m]')).toBe('Fable 5.1 · 1M');
     expect(claudeModelIdLabel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5');
     expect(claudeModelIdLabel('something-else')).toBe('something-else');
+  });
+
+  it('labels the byline with the model the agent actually loaded', () => {
+    expect(resolvedModelLabel('claude', 'opus', 'claude-opus-5-5')).toBe(
+      'Opus 5.5 · 配置 Opus（始终最新）',
+    );
+    expect(resolvedModelLabel('claude', 'opus[1m]', 'claude-opus-5-5[1m]')).toBe(
+      'Opus 5.5 · 1M · 配置 Opus · 1M 上下文（始终最新）',
+    );
+    // Unrecognised ids fall through verbatim rather than being dropped.
+    expect(resolvedModelLabel('claude', 'sonnet', 'custom-model')).toBe(
+      'custom-model · 配置 Sonnet（始终最新）',
+    );
   });
 
   it('reads the account-specific extras Claude Code caches, ignoring junk', () => {

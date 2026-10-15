@@ -10,6 +10,7 @@ import {
   writeActiveProfile,
 } from '../config/profile-store';
 import type { AgentKind } from '../config/profile-schema';
+import { DEFAULT_AGENT_KIND, isAgentKind, listAgentDescriptors } from '../agent/registry';
 import { secretKeyForApp, type AppConfig, type TenantBrand } from '../config/schema';
 import { buildEncryptedAccountConfig } from '../config/store';
 import { createBootstrapProfileConfig } from '../cli/profile-bootstrap';
@@ -21,6 +22,8 @@ export interface OnboardState {
   activeProfile?: string;
   profiles: string[];
   detectedAgents: AgentKind[];
+  /** Every agent the bridge supports, in registry order — the wizard's picker. */
+  agents: { kind: AgentKind; displayName: string }[];
 }
 
 /** Snapshot for the wizard's first render: existing profiles + installed agents. */
@@ -33,6 +36,7 @@ export async function onboardState(rootDir?: string): Promise<OnboardState> {
     activeProfile: await readActiveProfile(rootDir),
     profiles: root ? Object.keys(root.profiles) : [],
     detectedAgents: detected.map((d) => d.kind),
+    agents: listAgentDescriptors().map((d) => ({ kind: d.kind, displayName: d.displayName })),
   };
 }
 
@@ -77,7 +81,7 @@ export interface CreateProfileInput {
  */
 export async function onboardCreate(body: unknown, rootDir?: string) {
   const fv = asRecord(body);
-  const agentKind: AgentKind = fv.agentKind === 'codex' ? 'codex' : 'claude';
+  const agentKind: AgentKind = isAgentKind(fv.agentKind) ? fv.agentKind : DEFAULT_AGENT_KIND;
   const input: CreateProfileInput = {
     profile: String(fv.profile ?? '').trim() || agentKind,
     agentKind,

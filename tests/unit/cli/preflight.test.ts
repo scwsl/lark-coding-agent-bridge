@@ -122,6 +122,7 @@ describe('lark-cli preflight', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
@@ -696,6 +697,9 @@ describe('lark-cli preflight', () => {
   });
 
   it('uses user-default on first bind when the local lark-cli has the same app and a user login', async () => {
+    // Simulate running from a bridge-spawned shell: the parent already exports a
+    // profile's private config dir, which must not leak into the local probe.
+    vi.stubEnv('LARKSUITE_CLI_CONFIG_DIR', '/inherited/from/parent/lark-cli');
     const root = await tempRoot();
     const appPaths = resolveAppPaths({ rootDir: root, profile: 'codex' });
     const profileConfig = await writeRootConfig(appPaths.configFile, 'codex');

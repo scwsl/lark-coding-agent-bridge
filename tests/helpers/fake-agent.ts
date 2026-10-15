@@ -12,11 +12,19 @@ export interface FakeAgentRun extends AgentRun {
   readonly waitForExitCalls: number;
 }
 
+/** Events the process emits on its own after its user turn (a background task reporting back). */
+export interface FakeBackgroundTurn {
+  afterMs: number;
+  events: readonly AgentEvent[];
+}
+
 class FakeRun implements FakeAgentRun {
   readonly runId: string;
   readonly opts: AgentRunOptions;
   readonly events: AsyncIterable<AgentEvent>;
   readonly waitForExitResult: boolean;
+  /** Present only for runs with a background turn, like a streamed-input CLI. */
+  send?: (prompt: string) => boolean;
   #stopped = false;
   #waitForExitCalls = 0;
 
@@ -24,11 +32,13 @@ class FakeRun implements FakeAgentRun {
     opts: AgentRunOptions,
     events: readonly AgentEvent[],
     waitForExitResult: boolean,
+    background?: FakeBackgroundTurn,
   ) {
     this.runId = opts.runId;
     this.opts = opts;
     this.waitForExitResult = waitForExitResult;
-    this.events = this.iterate(events);
+    this.events = this.iterate(events, background);
+    if (background) this.send = () => false;
   }
 
   get stopped(): boolean {
@@ -48,8 +58,17 @@ class FakeRun implements FakeAgentRun {
     return this.waitForExitResult;
   }
 
-  private async *iterate(events: readonly AgentEvent[]): AsyncIterable<AgentEvent> {
+  private async *iterate(
+    events: readonly AgentEvent[],
+    background: FakeBackgroundTurn | undefined,
+  ): AsyncIterable<AgentEvent> {
     for (const event of events) {
+      if (this.#stopped) return;
+      yield event;
+    }
+    if (!background) return;
+    await new Promise((resolve) => setTimeout(resolve, background.afterMs));
+    for (const event of background.events) {
       if (this.#stopped) return;
       yield event;
     }
@@ -69,6 +88,7 @@ export class FakeAgentAdapter implements AgentAdapter {
   #available: boolean;
   #eventRuns: AgentEvent[][];
   #waitForExitResults: boolean[];
+  #background: FakeBackgroundTurn | undefined;
 
   constructor(options: {
     id?: string;
@@ -76,12 +96,15 @@ export class FakeAgentAdapter implements AgentAdapter {
     available?: boolean;
     events?: FakeAgentEvents;
     waitForExit?: boolean | readonly boolean[];
+    /** Background turn emitted by the first run after its user turn. */
+    background?: FakeBackgroundTurn;
   } = {}) {
     this.id = options.id ?? 'fake-agent';
     this.displayName = options.displayName ?? 'Fake Agent';
     this.#available = options.available ?? true;
     this.#eventRuns = normalizeEventRuns(options.events ?? []);
     this.#waitForExitResults = normalizeWaitForExitResults(options.waitForExit);
+    this.#background = options.background;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -96,7 +119,9 @@ export class FakeAgentAdapter implements AgentAdapter {
     this.runOptions.push(opts);
     const events = this.#eventRuns.shift() ?? [];
     const waitForExitResult = this.#waitForExitResults.shift() ?? true;
-    const run = new FakeRun(opts, events, waitForExitResult);
+    const background = this.#background;
+    this.#background = undefined;
+    const run = new FakeRun(opts, events, waitForExitResult, background);
     this.runs.push(run);
     return run;
   }

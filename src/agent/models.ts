@@ -214,7 +214,10 @@ function codexModels(): ModelOption[] {
  * `claude-opus-5-5`) stays selectable instead of silently resetting.
  */
 export function supportedModels(agentKind: AgentKind, current?: string): ModelOption[] {
-  if (agentKind === 'codex') return codexModels();
+  return MODEL_CATALOGS[agentKind].models(current);
+}
+
+function claudeModelOptions(current?: string): ModelOption[] {
   const options = claudeModels();
   if (current && isPinnedClaudeModel(current) && !options.some((m) => m.value === current)) {
     options.push({ value: current, label: claudeModelIdLabel(current) });
@@ -229,7 +232,7 @@ function isPinnedClaudeModel(value: string): boolean {
 
 /** The effort picker options for a profile's agent kind, in the CLI's order. */
 export function supportedEfforts(agentKind: AgentKind): readonly EffortLevel[] {
-  return agentKind === 'codex' ? CODEX_EFFORT_LEVELS : EFFORT_LEVELS;
+  return MODEL_CATALOGS[agentKind].efforts;
 }
 
 /** True when the selection means "use the agent default" (no `--model`). */
@@ -307,3 +310,33 @@ export function modelLabel(agentKind: AgentKind, value: string | undefined): str
   const normalized = normalizeModelSelection(agentKind, value);
   return supportedModels(agentKind, normalized).find((m) => m.value === normalized)?.label ?? normalized;
 }
+
+/**
+ * Reply-card byline label once the agent has reported the model it actually
+ * loaded: the concrete version first, then the `/config` choice it was resolved
+ * from when that differs (an "always latest" alias or "follow default").
+ * `claude-opus-5-5` under `opus` → `Opus 5.5 · 配置 Opus（始终最新）`.
+ */
+export function resolvedModelLabel(
+  agentKind: AgentKind,
+  configValue: string | undefined,
+  actualId: string,
+): string {
+  const configured = modelLabel(agentKind, configValue);
+  const actual = MODEL_CATALOGS[agentKind].actualModelLabel(actualId);
+  return actual === configured ? actual : `${actual} · 配置 ${configured}`;
+}
+
+interface AgentModelCatalog {
+  /** `/config` model picker options; `current` keeps a stored pinned id selectable. */
+  models(current?: string): ModelOption[];
+  /** Effort levels the CLI accepts, in its own order. */
+  efforts: readonly EffortLevel[];
+  /** Byline label for the concrete model id the CLI reports it loaded. */
+  actualModelLabel(id: string): string;
+}
+
+const MODEL_CATALOGS: Record<AgentKind, AgentModelCatalog> = {
+  claude: { models: claudeModelOptions, efforts: EFFORT_LEVELS, actualModelLabel: claudeModelIdLabel },
+  codex: { models: () => codexModels(), efforts: CODEX_EFFORT_LEVELS, actualModelLabel: (id) => id },
+};

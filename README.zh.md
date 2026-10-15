@@ -149,6 +149,33 @@ lark-channel-bridge unregister [--profile <name>]
 
 daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
+### 终端实时面板
+
+在宿主机终端查看 bot 工作状态、当前任务、执行阶段和耗时，以及 CPU、内存、磁盘可用空间与运行时间。无需打开浏览器，支持 macOS 默认终端和 iTerm2。
+
+![终端实时面板实际运行截图](docs/images/terminal-monitor.png)
+
+```bash
+lark-channel-bridge monitor --interval 5
+lark-channel-bridge monitor --profile codex --interval 5
+lark-channel-bridge monitor --once
+lark-channel-bridge monitor --json
+```
+
+上面的示例每 5 秒刷新一次；省略 `--interval` 时默认每 2 秒刷新。
+
+macOS 额外展示物理磁盘读写速率和物理网卡下载/上传速率，按采样间隔差值计算，排除回环和隧道重复计数；首轮采样或采集失败显示 `—`，I/O 采样最多每 5 秒一次。
+
+macOS 上安装 `osx-cpu-temp`（`brew install osx-cpu-temp`）后，面板还会显示 CPU 温度 `TEMP`，最多每 5 秒采集一次；未安装、传感器不支持或采集失败时显示 `—`。无需 sudo。
+
+布局随窗口尺寸调整：宽屏双列展示 bot，普通窗口纵向排列，窄窗口拆分宿主机指标；缩放窗口会立即重新排版。
+
+每项任务右侧展示群名（或私聊）和发起人姓名，窄屏时另起一行。名称在任务启动时记录，刷新不调用飞书接口；旧任务或未解析到的名称显示待同步。升级后需重启 bridge 才开始记录新任务的来源。
+
+正在工作的 bot 优先显示，长任务摘要会折行，长链接缩为末段标识。按 `q` 退出、空格暂停、`r` 刷新。`--interval <秒>` 支持 0.5–60 秒，`--no-color` 禁用配色。非交互终端自动输出一次快照，`--json` 提供完整状态。
+
+面板只读取本机状态，无需重启 bot。CPU 根据相邻采样计算，首次显示等待；RAM 为非空闲内存，包含系统缓存。磁盘统计缓存 30 秒，未变化的日志复用解析结果，每次最多读取 256 KiB 日志尾部。任务阶段来自实际日志，不估算完成百分比；退出或过期的任务会标记为已中断。
+
 ### Web 控制台（`--web-ui`）
 
 `--web-ui` 是上面单 profile 后台服务的**替代方案**，不是可以叠加使用的附加项。给 `start` 加上它，会启动一个"全机唯一"的 supervisor 进程，统一托管所有 profile，并提供本地 web 控制台来启动/停止/配置它们：
@@ -210,6 +237,8 @@ lark-channel-bridge profile list
 
 Lark 国际版应用加 `--tenant lark`。日常管理和其他 profile 一样：`restart` / `stop --profile codex`，或用 `lark-channel-bridge ui` 打开网页控制台。
 
+Codex 默认通过 `codex app-server` 运行：同一会话的后续消息交给已经启动的 Codex 进程，不用每条消息重新启动；进程空闲 10 分钟后自动关闭，`/stop` 通过协议干净地中断当前这一轮。profile 开启了 `ignoreUserConfig`，或者要靠 `ignoreRules` 挡住的 execpolicy `.rules` 文件存在时，会自动改用每条消息一个 `codex exec` 进程；也可以在 profile 的 `codex` 配置里写 `"transport": "exec"` 强制使用。
+
 ### 重启 `npm link` 出来的本地开发副本
 
 如果 `PATH` 里的 `lark-channel-bridge` 是 `npm link` 到本仓库某个本地 checkout 的（`npm ls -g lark-channel-bridge` 显示的是软链到仓库目录，而不是一个带版本号的 npm 安装），那正在跑的 daemon 只反映它**启动那一刻** `dist/` 里的内容——Node 进程启动时把编译好的 JS 一次性加载进内存，不会热更新。之后改源码、甚至跑了 `pnpm build`，对这个已经在跑的 daemon 都不生效。
@@ -262,7 +291,7 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/ws use <name>` | 切换到命名工作空间 |
 | `/ws remove <name>` | 删除命名工作空间 |
 | `/resume` | 恢复同 agent、工作目录、权限模式兼容的历史会话 |
-| `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
+| `/status` | 查看 profile、agent、工作目录、会话（含当前上下文大小、上次对话时间，开了会话智能压缩时还会提示下一条是否自动开新会话）、lark-cli 身份和运行状态 |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
@@ -270,12 +299,13 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/invite group restricted @某人...` | 允许当前群使用 bot，但只对 @ 到的人生效 |
 | `/invite member @某人` | 把这个人加进当前群的专属名单 |
 | `/invite all group` | 允许 bot 所在的所有群使用 |
-| `/remove user @某人`, `/remove admin @某人`, `/remove group`, `/remove member @某人` | 移除访问控制条目 |
+| `/remove user @某人`, `/remove admin @某人`, `/remove group [群 ID]`, `/remove member @某人` | 移除访问控制条目；`/remove group <群 ID>` 按 ID（或末几位）移除指定的群，私聊里也能用 |
 | `/stop` | 停止当前 run，也可点卡片停止按钮 |
 | `/timeout [N\|off\|default]` | 设置或清除当前会话的 idle watchdog |
 | `/memory [add\|forget\|clear]` | 跨会话记忆，`--global` 写到全局 |
 | `/skills [show <名字>]` | agent 按需读取的 skill 索引 |
 | `/knowledge [bind\|sync\|unbind]` | 记忆与 skill 的 git 同步 |
+| `/dream [run\|cancel\|prs\|diff\|revert]` | 梦境整理：把已结束的会话整理成记忆 / skill 的 Draft PR（管理员私聊） |
 | `/diff [staged\|<ref>]` | 查看工作目录的改动，patch 过长时附带完整文件 |
 | `/worktree [add\|use\|remove]` | 管理任务级 worktree，会话自动跟着切 |
 | `/pr [编号\|链接]` | 当前分支的 PR、CI 与评审状态 |
@@ -285,9 +315,19 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/exit <id\|#>` | 停止指定 bridge 进程 |
 | `/reconnect` | 强制 WebSocket 重连 |
 | `/doctor [描述]` | 执行低敏诊断 |
+| `/usage [today\|week\|month]` | 用量统计（token 与估算费用）；每个人看自己的，管理员私聊可看所有人 |
+| `/audit [N]` | 最近谁让 bot 执行了什么命令、改了哪些文件、审批结果（管理员，私聊） |
 | `/help` | 帮助卡片 |
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
+
+**群聊上下文**：飞书只把 @ bot 的那条消息推给它，群里其他人的讨论它本来看不到。所以 bridge 在群聊 / 话题里每次开跑前，会把它没收到过的消息读回来，作为背景附在提问前面：
+
+- 第一次进某个话题：带上话题里已有的消息（最多 40 条）。
+- 第一次在普通群里被 @：带上最近 12 小时内的最近 20 条。
+- 之后每次：只补上它上次回复以后别人说的话（最多 30 条，不含它自己的回复）。
+
+单条超过 4000 字会截断，总量超出时先丢最早的。读到哪里按会话记在 profile 目录的 `chat-context-cursors.json`，重启不会重复注入。私聊不需要这一步。
 
 ## 记忆与 skills
 
@@ -323,16 +363,107 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 全是 `0600` 的纯 Markdown，随便哪个编辑器都能改——这正是设计目的：这个目录就是一个 git 仓库。
 
 ```text
-/knowledge                       # 条数、远端、同步状态
+/knowledge                       # 条数、远端、同步状态、自动同步情况
 /knowledge bind <git 地址>       # 绑定远端并拉取已有内容
-/knowledge sync                  # 提交本地改动、拉取、推送
+/knowledge sync                  # 立即同步：提交本地改动、拉取、推送
 /knowledge unbind                # 解绑但保留本地内容
 ```
 
-绑定是合并而不是覆盖，所以绑之前写的记忆不会丢。同一个仓库可以给多个 profile、多台机器共用——靠各自的 `/knowledge sync` 搬运内容，凭据用的还是那台机器上已有的 git 配置。`/status` 里有一行展示条数与同步状态。
+绑定是合并而不是覆盖，所以绑之前写的记忆不会丢。同一个仓库可以给多个 profile、多台机器共用，凭据用的还是那台机器上已有的 git 配置。`/status` 里有一行展示条数与同步状态。
 
-Claude 和 Codex 读的是同一份 skill 索引，一个文件同时服务两种 agent。定时自动同步还没接上——先手动 `/knowledge sync`，等调度层落地后可以排成定时任务。
+- **自动同步**：绑定远端后，bridge 启动后不久同步一次，之后每 30 分钟一次（提交 → `pull --rebase --autostash` → 推送），所以共用一个仓库的几个 bot 不用手动 `sync` 也能看到彼此的记忆。间隔在 profile 配置的 `knowledge` 段改，`0` 表示关闭、只在手动 `/knowledge sync` 时同步；改完 `/reconnect` 或重启生效（在 Web 控制台改见下文）：
 
+  ```json
+  "knowledge": { "syncIntervalMinutes": 30 }
+  ```
+
+- **不会互相打架**：自动同步和手动 `/knowledge sync`、`bind`、`unbind` 在同一个目录里排队执行，不会同时动 git。两个 bot 恰好同时推送时，后推的一方会再拉一次重推。
+- **记忆文件按行合并**：知识仓库里会自动加一个 `.gitattributes`（`MEMORY.md merge=union`、`chats/*.md merge=union`，已有内容保留、只补缺的行，单独提交），两个 bot 同时往同一个记忆文件末尾追加时两边的行都保留，不会冲突。代价是：一边删掉的记忆如果另一边同时在它附近追加了内容，可能会被合并回来。`MEMORY.md` 不带目录前缀，`notes/` 下同名的记忆索引也按这个规则合并。
+- **Web 控制台**：「配置」页的「知识库」卡片能看远端、分支、领先/落后、未提交改动和自动同步状态，也能绑定 / 改绑 / 解绑远端、立即同步、改同步间隔。git 操作当场执行；间隔由控制台托管的 profile 立即生效，由别的进程托管的（单 profile 后台服务）写进配置、下次重启生效。
+- **失败提醒**：每次失败都写日志；连续两轮自动同步失败时私聊 bot 主人一次（附 git 的第一行报错、知识目录路径，地址里的凭据会遮掉），恢复前不再提醒，恢复后补一句「已恢复」。有人手动 `/knowledge sync` 成功也算恢复。目录里留着没处理完的 merge / rebase 时不会自动同步，先处理完再说。
+
+Claude 和 Codex 读的是同一份 skill 索引，一个文件同时服务两种 agent。
+
+### 共享 skill 库
+
+知识目录是一个 profile 自己的；想让几个 bot（比如 Claude 的 CC 和 Codex 的 Poki）共用同一批 skill，就把它们放进一个 git 仓库，作为 **skill 库** 加载。bridge 为每个库维护一份只读镜像，把里面的 skill 并进同一份索引，索引里的条目带 `source` 标明出自哪个库。
+
+```text
+/skills lib                                   # 已配置的库、同步状态、各自载入的 skill
+/skills lib add <git 地址> [名字]              # 加一个库并立即拉取（拉不下来就不保存）
+    [--ref <分支/标签/提交>] [--path <子目录>]
+    [--only a,b] [--exclude a,b]
+/skills lib sync [名字]                        # 立即同步
+/skills lib rm <名字>                          # 移除，本地镜像一起删掉
+```
+
+- **布局**：skill 放在 `skills/<名字>/SKILL.md`；仓库里没有 `skills/` 就在根目录找，`--path` 可以指定别的目录；根目录直接就是一个 `SKILL.md` 的仓库算作一个 skill。frontmatter 支持带引号的值和 `>` / `|` 多行描述。
+- **只读镜像**：同步是 fetch + 切到远端提交 + 清掉本地改动，从不合并。要改 skill 就去改库的仓库本身。
+- **同名优先级**：本 profile 自己 `knowledge/skills/` 里的 skill 优先，其次是先加的库；被挡住的会在 `/skills lib` 里列出来。
+- **同步**：启动时同步一次，之后每 60 分钟一次（`skills.syncIntervalMinutes` 可改，`0` 表示只在启动和手动 `sync` 时拉）。
+- **权限**：`/skills lib` 只有管理员能用——库里的内容会直接成为 bot 的操作指令；`/skills` 查看对所有人开放。私有仓库用本机已配好的 SSH key 访问，不要把 token 写进地址（卡片和日志里的地址会遮掉凭据，但配置文件里是原样）。
+- **配置**：存在 profile 配置的 `skills` 段：
+
+```json
+"skills": {
+  "libraries": [
+    { "name": "team-skills", "url": "git@github.com:acme/team-skills.git", "ref": "main", "exclude": ["old-skill"] }
+  ],
+  "syncIntervalMinutes": 60
+}
+```
+
+镜像在 `~/.lark-channel/profiles/<profile>/skill-libraries/<名字>/`。每个 profile 各自配置、各自拉取，同一个库给几个 bot 用就在每个 bot 里各 `add` 一次。
+
+也可以在 Web 控制台「配置」页的「Skill 库」卡片里管理：列出各库的提交、同步时间和载入的 skill（被同名挡住的划掉显示），添加（同样先拉取成功才保存）、单个或全部同步、移除、改同步间隔。拉取和删镜像当场执行；配置改动由控制台托管的 profile 立即生效，由别的进程托管的写进配置、下次重启生效——在那之前它若又拉回了已移除的库，启动时会把配置里没有的镜像清掉。
+
+
+### 梦境整理（默认关闭）
+
+会话里定下的约定、验证过的结论、做成功的流程，过后常常没人记得 `/memory add`。打开梦境整理后，管理员可以让 bot 回头把已经结束的会话整理一遍，把值得长期保留的内容做成**待审核的 Draft PR**：记忆和笔记进知识库仓库，skill 进共享 skill 库。合并之前什么都不生效，bridge 从不自动合并。
+
+```text
+/dream                 # 开关、目标仓库、每轮上限、自动整理为什么没跑、最近几轮结果、待审核 PR 数
+/dream run             # 立即整理一轮，完成后在私聊里回复结果
+/dream cancel          # 取消正在进行的整理（游标不动，下次重读）
+/dream prs             # 整理开出的 PR 及其审核状态
+/dream diff [批次]     # 某一批的差异（默认最近一次）
+/dream revert <批次>   # 撤销某一批：已合并的开 revert Draft PR，未合并的告诉你去关 PR
+```
+
+- **开关**：`/config` 的「梦境整理」或 Web 控制台「配置 → 回复与运行」，默认关闭。关掉开关后正在跑的一轮在发布前会停下。`/dream` 只有管理员能用，而且只能私聊——一轮会读到所有会话的内容。
+- **自动整理**（`/config` / Web 的「自动整理」，默认关闭，梦境整理开着才生效）：不是每天定时跑，而是**攒够了才做梦**。bridge 每 30 分钟看一次，下面几条全满足才开一轮：在允许时段内（默认 01:00–07:00，每个时段最多一轮）；材料够（有新内容的会话范围达到 5 个，或新对话达到 6 万字）；距上次整理过了 3 天；上一批 PR 已经审完（每个目标仓库还开着的梦境 PR 少于 1 个）；profile 空闲（没有在跑、在排队的用户任务，最近 30 分钟没有新消息）；agent 账号额度没超过 80%。超过 14 天没整理时，有一点新内容也会跑。读不到额度时按一半的预算跑；从不消耗 Codex 的额度重置次数。自动跑的一轮在提交草稿前遇到用户发消息就让位（取消，下次重读），手动 `/dream run` 不让位。连续失败 2 次起按 2、4… 天退避，连续 3 次后暂停，手动跑通一次恢复。自动整理不发任何消息，结果和「为什么没跑」（比如「材料不足 3/5 个会话范围」「距上次整理 1/3 天」）在 `/dream` 和 Web 卡片里看。
+- **读什么**：只读 bridge 自己跑过的会话（Claude 的会话转录、Codex 的 rollout，按会话句柄精确定位，不扫本机别的历史），只取每轮的用户请求和最终回答，不含工具调用和中间过程；定时任务、会议、云文档评论的会话不读。每个会话有游标，下一轮只读新增的部分；转录被改写时从头重读，已经提过的内容不会重复提。仍在进行（空闲不足 30 分钟）或正在运行的会话留到下一轮。
+- **怎么整理**：每个会话范围（一个群 / 私聊 / 话题）单独开一个只读 agent 运行（Claude 用 plan 模式，Codex 用只读沙箱，开不成只读就不跑），只给它看这个范围自己的对话、全局记忆、本会话记忆和 skill 索引。Claude 和 Codex profile 都能用，用的是 profile 自己的 agent。
+- **校验**：agent 的输出只是建议，写入前逐条校验——每条都要引用本次输入里真实存在的轮次；提升为全局约定必须有管理员本人在单独发言里直接提出，否则降级为只写进原会话；合并 / 冲突 / 过时只做标记（写进 `notes/<范围>/dream-review.md`），不改原条目；疑似密钥、令牌、凭证的条目直接丢弃，给 agent 的对话摘录里也先遮掉；文件路径由 bridge 按范围推出来，agent 不能指定路径。
+- **怎么提交**：从远端最新状态新拉一份，在 `dream/<批次>` 分支上提交一次，推送这个新分支并开 Draft PR；不 force push、不碰默认分支、不跑仓库的 hooks。所有目标仓库都先在本地提交，全部成功后才记下检查点（游标前移、候选标为已提）；检查点之前任何一处失败或被取消，整批草稿作废、下次重读，不会出现半批 PR。检查点之后中断（重启、断网）的推送和开 PR 下一轮接着做，不会重复开 PR。PR 正文写明每条的理由、来源（会话、范围、轮次）、哪些被降级、哪些没采纳。不要的条目直接在 PR 里删，整批不要就关掉 PR，同样的候选不会再提；已经合并的用 `/dream revert <批次>` 开一个 revert Draft PR。
+- **多个 bot 共用仓库**：两个 profile（比如 CC 和 Poki）绑了同一个知识库或 skill 库时，一轮开始前按仓库远端地址拿本机的锁，另一个正在整理同一个仓库就这轮不跑并说明是谁占着。
+- **目标仓库**：沿用现有配置——知识库用 `/knowledge bind` 绑定的 `origin`；skill 新建到 `skills.libraries` 里唯一的那个库（有多个库时在 `preferences.dreamTuning.skillLibrary` 指定），更新则回到该 skill 所在的库。当前 `gh` 账号对某个库没有写权限、或库固定在 tag / 提交上时，跳过该库并在结果里说明。`gh` 不可用时草稿留在本地，下一轮先补推、补开 PR。
+- **上限**（profile 的 `preferences.dreamTuning`，可选）：
+
+```json
+"dreamTuning": {
+  "maxSessions": 20,
+  "maxInputChars": 120000,
+  "maxRunMinutes": 20,
+  "minIdleMinutes": 30,
+  "skillLibrary": "team-skills",
+  "scopes": ["oc_xxx"],
+  "window": "01:00-07:00",
+  "timezone": "Asia/Shanghai",
+  "minScopes": 5,
+  "minInputChars": 60000,
+  "minIntervalDays": 3,
+  "maxIntervalDays": 14,
+  "maxOpenPrs": 1,
+  "maxAutoFailures": 3,
+  "maxQuotaPercent": 80
+}
+```
+
+`scopes` 填了就只整理这些会话范围。`window` 起止可以跨午夜（如 `22:00-06:00`），`timezone` 默认本机时区；`maxIntervalDays` 设 0 关掉兜底。这些只在配置文件里改，`/config` 和 Web 只有开关。本地记录（读到哪、开了哪些 PR，不含对话内容）在 profile 目录的 `dream-state.json`，草稿的工作副本在 `dream/` 下，只保留最近几轮。
+
+Web 控制台「配置」页有「梦境整理」卡片：显示目标仓库、上限、自动整理的条件和上次检查结果、最近几轮结果（自动跑的带「自动」标记）和 PR 链接；控制台托管的 profile 可以直接「立即整理」/「取消整理」/「撤销」，别的进程托管的只显示状态，请在飞书里私聊发 `/dream run`、`/dream revert`。
 
 ## Git 能力
 
@@ -377,6 +508,16 @@ Claude 和 Codex 读的是同一份 skill 索引，一个文件同时服务两�
 - **COT 过程消息**：`关闭` 只发送最终回复；`简略` 先用 COT 消息展示 agent 的过程文本和工具摘要；`详细` 还会展示工具参数和截断后的输出。
 
 开启 COT 后，bridge 会把过程消息和最终答案拆成两条消息。过程消息用于追踪 agent 做了什么；最终答案仍由 agent 原始文本生成，bridge 不做启发式过滤。若 agent 把最终答案也作为普通流式文本输出，COT 过程消息中可能会出现对应片段。
+
+### 长任务完成提醒
+
+回复卡片在任务开始时就发出、之后原地更新，而飞书对消息更新不推送通知——跑了二十分钟的任务结束时，手机不会响。所以任务从提交到结束超过阈值（默认 5 分钟）时，bot 会在原消息下再回一条短消息：
+
+- 群聊 / 话题：@ 发起任务的人（合并处理的一批里有几个人就 @ 几个，不 @ 机器人），写明完成还是异常结束、用了多久。
+- 私聊：只有答案落在那张原地更新的卡片里时才补发；答案本来就单独发出（COT、纯文本模式，或 Codex）时已经有推送，不再重复。
+- 用户自己 `/stop` 的任务不提醒。
+
+阈值在 profile 的 `preferences.longRunNoticeMinutes`（分钟，`0` 关闭），只能改配置文件。
 
 ## lark-cli 身份策略
 
@@ -434,6 +575,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | `~/.lark-channel/profiles/<profile>/sessions.json` | 会话状态 |
 | `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | agent-aware 会话索引 |
 | `~/.lark-channel/profiles/<profile>/knowledge/` | 记忆与 skills（可作为 git 仓库同步） |
+| `~/.lark-channel/profiles/<profile>/skill-libraries/` | 共享 skill 库的只读镜像（`/skills lib`） |
 | `~/.lark-channel/profiles/<profile>/jobs.json` | 定时任务（`/cron`） |
 | `~/.lark-channel/profiles/<profile>/workspaces.json` | 当前和命名工作空间绑定 |
 | `~/.lark-channel/profiles/<profile>/secrets.enc` | profile 本地加密 secret |
@@ -454,7 +596,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | 名单 | 控制谁 | 加入 | 移除 |
 |------|--------|------|------|
 | **允许私聊的用户** | 谁可以私聊 bot | `/invite user @某人` | `/remove user @某人` |
-| **响应的群** | bot 在哪些群里响应（默认**群内所有人**，除非设了专属名单——见下文） | `/invite group`（当前群）/ `/invite all group`（bot 所在的全部群） | `/remove group`（当前群） |
+| **响应的群** | bot 在哪些群里响应（默认**群内所有人**，除非设了专属名单——见下文） | `/invite group`（当前群）/ `/invite all group`（bot 所在的全部群） | `/remove group`（当前群）/ `/remove group <群 ID>`（指定群，私聊可用，适合 bot 已被移出的群） |
 | **管理员** | 谁能改设置、并能在任意群用 bot | `/invite admin @某人` | `/remove admin @某人` |
 
 > `/invite`、`/remove` 这些命令只有**你（创建者）和管理员**能发。命令里 @ 的是**对方**（不是 @ bot），bot 会自动把 @ 解析成对应的人，你不用手动去找 ID。
@@ -491,6 +633,68 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 - **群里默认要先 @bot 才会回**（私聊不用 @）。这是另一个独立开关（`/config` →"群里需要 @ bot"），和上面的名单是两回事。
 - 陌生人发消息一律静默丢弃，不会有任何回复。唯一的例外：有人在一个还没开放的群里 @bot，bot 会回一句友好提示，告诉他可以让管理员发 `/invite group` 开放这个群。
 - 云文档评论按文档权限生效：能在支持的文档里评论并 @bot 的人可以触发回复。
+
+### 非管理员的操作审批（默认关闭）
+
+默认不审批：谁驱动的任务都按 profile 的权限直接运行。在 profile 配置里开启 `approvals.enabled` 后，除 bot 主人和管理员以外的人驱动的任务（私聊、群里 @bot、云文档评论；合并处理的一批消息里只要有非管理员的消息就算）：
+
+- agent 可以随意读文件、搜索、查网页；**运行命令、写文件、调用外部工具（MCP）**之前，会把审批卡片发到 bot 主人和每位管理员的私聊，带「允许 / 本轮都允许 / 拒绝」。发起人那边会看到「等待管理员审批」，可以自己取消。
+- 只有管理员能点「允许」；**5 分钟**无人处理按拒绝处理，agent 会被告知这一步没获批准。
+- 每次审批结果和执行过的命令 / 改动的文件都按人记入审计日志（不开审批时命令和文件改动也照记）（profile 目录下 `audit.jsonl`，保留 90 天），管理员私聊发 `/audit [N]` 查看最近的记录。
+- Claude Code 通过工具调用前的 hook 拦截；Codex 通过 app-server 自带的审批请求（沙箱只读、`approvalPolicy: untrusted`）。退回 `codex exec` 的 Codex profile 没有审批通道，非管理员的任务只读运行。
+
+开关也可以在飞书里发 `/config`，在「运行与权限」的「非管理员操作审批」里切换，提交后立即生效。免审批清单只能改配置文件，在 profile 的 `approvals` 段（改完重启该 profile 生效）：
+
+```json
+"approvals": {
+  "enabled": true,
+  "allowCommands": ["python3 ~/.claude/skills/remote-tcpdump/scripts/tcpdump_client.py"],
+  "allowTools": ["mcp__tdengine-*__query"]
+}
+```
+
+- `enabled`：`true` 开启审批；不写或 `false` 为关闭（默认），非管理员的任务和管理员一样的权限，不弹审批卡。
+- `allowCommands`：免审批的命令，按开头的几个词匹配（`~`、`$HOME` 会展开，词要整个对上），上例覆盖这个抓包脚本的所有子命令。`&&` / `|` 连起来的每一段都要么在清单里、要么本身只读；带 `;`、重定向、命令替换的照样要审批；经变量（`$C`）调用的脚本匹配不上。
+- `allowTools`：免审批的工具名，`*` 匹配任意字符。写 `Bash` 等于放开所有命令，慎用。
+- 免审批放行的操作同样记审计，`/audit` 里显示为「免审批清单」。
+
+### 会话智能压缩（默认关闭）
+
+bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以及每一次工具调用）都要把整段上下文重读一遍；空闲超过 1 小时缓存过期后，再说话还要按写缓存的价格把整段上下文重写一次。在飞书里发 `/config`，打开「运行与权限」里的「会话智能压缩」（提交后立即生效），也可在 Web 控制台的「配置 → 回复与运行」中打开同名开关并保存。bridge 会：
+
+- **空闲后自动开新会话**：新消息到来时，如果上次对话已经过去 1 小时以上且上下文超过 15 万 token，或者已经过去 8 小时以上，就不再续用旧会话，直接开新会话。
+- **agent 判断事情做完时收尾**：agent 在最终回复末尾写 `[[NEW_SESSION: 一句话摘要]]`，bridge 把这个标记从回复里去掉，下一条消息从新会话开始。这个收尾请求存在 profile 目录的 `pending-rotations.json`，中间重启 bridge 也不会丢；如果下一条消息前已经 `/new`、`/resume` 或 `/cd` 换了会话，请求作废。
+- **长会话提前压缩**（Claude Code / Codex）：默认设置 30 万 token；Claude Code 使用压缩窗口，Codex 的 app-server 和 exec 都使用原生自动压缩阈值。实际压缩时机仍受模型上下文上限约束。关闭开关会恢复 CLI 原生默认策略。
+
+旧会话不会丢：照常归档，`/resume` 可以找回。新会话的第一轮会带上一段交接说明（上一段会话的摘要或最后一个问题），回复卡底部也会提示「已自动开启新会话」。会话还有后台任务在跑、或者用户用引用回复指着之前的消息时，不会切换。
+
+阈值可以在配置文件里调（profile 的 `preferences`，改完重启该 profile 生效）：
+
+```json
+"smartSessionTuning": {
+  "idleMinutes": 60,
+  "minContextTokens": 150000,
+  "hardIdleMinutes": 480,
+  "compactWindowTokens": 300000
+}
+```
+
+### Worktree 自动清理（默认关闭）
+
+在 `/config` 的「运行与权限」或 Web 控制台「配置 → 回复与运行」打开「Worktree 自动清理」，保存后生效。bridge 每小时检查一次，通过 `/worktree add` 创建并登记的 worktree 默认闲置 7 天后才参与清理；已有的、或 agent 在终端自行创建的 worktree 不会自动纳入。
+
+只清理已合入仓库默认分支的 worktree（优先使用 `origin/HEAD` 指向的本地分支，否则使用 `main` / `master`）。主工作区、锁定或分离 HEAD 的 worktree、切换过分支的目录，以及有改动、未跟踪或忽略文件的目录都会保留。其他 profile 的当前/命名工作区、默认目录和定时任务目录也受保护；有任务或保留进程时延后检查。不会强制删除。
+
+清理 worktree 后，只删除 bridge 新建的分支；借用的已有分支保留。删除分支时校验提交号，期间有新提交则保留分支。清理记录写入 bridge 日志，不删除远端分支。可在 profile 的 `preferences` 设置闲置天数（1–365，默认 7）：
+
+```json
+{
+  "autoWorktreeCleanup": true,
+  "worktreeCleanupIdleDays": 7
+}
+```
+
+依赖目录、构建产物等即使被 `.gitignore` 忽略，也会阻止自动清理；需要先自行移除。关闭开关会停止后续清理，已删除的 worktree 不会自动恢复。
 
 ### 高级：直接改配置文件
 
@@ -544,6 +748,8 @@ pnpm build
 ```
 
 `pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 在 macOS、Ubuntu、Windows 上执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm typecheck` 和 `pnpm build`。
+
+改代码的完整约定（worktree 迭代流程、门禁 `pnpm ci:local`、架构地图、新增 agent 的步骤）见仓库根目录的 `AGENTS.md`（Claude Code 经 `CLAUDE.md` 导入，Codex 直接读取，两者共用一份），操作步骤在 `docs/dev/`。
 
 ## 可选：遥测（Telemetry）
 

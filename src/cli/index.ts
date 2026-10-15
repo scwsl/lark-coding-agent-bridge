@@ -1,3 +1,4 @@
+import { runMonitor } from './commands/monitor';
 import { Command } from 'commander';
 import pkg from '../../package.json';
 import { formatAgentPreflightDiagnostic, getAgentPreflightDiagnostic } from '../agent/preflight';
@@ -60,6 +61,16 @@ program
   }) => {
     await runStart(opts);
   });
+
+program
+  .command('monitor')
+  .description('Live terminal dashboard for bots, tasks and recent activity')
+  .option('--profile <name>', 'show one profile')
+  .option('--interval <seconds>', 'refresh interval (0.5–60)', '2')
+  .option('--once', 'print one snapshot')
+  .option('--json', 'print one JSON snapshot')
+  .option('--no-color', 'disable colors')
+  .action(runMonitor);
 
 program
   .command('migrate')

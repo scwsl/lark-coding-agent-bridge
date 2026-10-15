@@ -86,6 +86,75 @@ describe('profile schema', () => {
     ).toBe('bot-only');
   });
 
+  it('keeps approvals off by default and normalizes the allowlists', () => {
+    expect(createDefaultProfileConfig({ agentKind: 'claude', accounts: { app } }).approvals).toEqual({
+      enabled: false,
+      allowCommands: [],
+      allowTools: [],
+    });
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      approvals: {
+        enabled: true,
+        allowCommands: ['  python3 ~/tools/a.py ', '', 42],
+        allowTools: ['mcp__tdengine-*__query', null],
+      },
+    });
+    expect(cfg.approvals).toEqual({
+      enabled: true,
+      allowCommands: ['python3 ~/tools/a.py'],
+      allowTools: ['mcp__tdengine-*__query'],
+    });
+    // Only an explicit true turns approvals on.
+    expect(
+      normalizeProfileConfig({ schemaVersion: 2, agentKind: 'claude', accounts: { app }, approvals: { enabled: 'yes' } })
+        .approvals.enabled,
+    ).toBe(false);
+  });
+
+  it('keeps usable skill libraries and drops broken entries one by one', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      skills: {
+        libraries: [
+          { name: 'team', url: ' git@github.com:acme/team.git ', ref: 'main', include: [' a ', ''], path: 'pack' },
+          { name: 'team', url: 'git@github.com:acme/dup.git' },
+          { name: '../escape', url: 'git@github.com:acme/x.git' },
+          { name: 'no-url' },
+          { name: 'bad-path', url: '/srv/skills', path: '../../etc' },
+          'junk',
+        ],
+        syncIntervalMinutes: -5,
+      },
+    });
+    expect(cfg.skills).toEqual({
+      libraries: [
+        { name: 'team', url: 'git@github.com:acme/team.git', ref: 'main', path: 'pack', include: ['a'] },
+        { name: 'bad-path', url: '/srv/skills' },
+      ],
+      syncIntervalMinutes: 0,
+    });
+    expect(normalizeProfileConfig({ schemaVersion: 2, agentKind: 'claude', accounts: { app } }).skills).toBeUndefined();
+  });
+
+  it('keeps a usable knowledge sync interval and drops the section otherwise', () => {
+    const knowledge = (value: unknown) =>
+      normalizeProfileConfig({ schemaVersion: 2, agentKind: 'claude', accounts: { app }, knowledge: value }).knowledge;
+    expect(knowledge({ syncIntervalMinutes: 12.7 })).toEqual({ syncIntervalMinutes: 12 });
+    // 0 is meaningful (auto-sync off) and must survive; negative means 0.
+    expect(knowledge({ syncIntervalMinutes: 0 })).toEqual({ syncIntervalMinutes: 0 });
+    expect(knowledge({ syncIntervalMinutes: -5 })).toEqual({ syncIntervalMinutes: 0 });
+    expect(knowledge({ syncIntervalMinutes: '15' })).toBeUndefined();
+    expect(knowledge({ syncIntervalMinutes: Number.NaN })).toBeUndefined();
+    expect(knowledge({})).toBeUndefined();
+    expect(knowledge([30])).toBeUndefined();
+    expect(knowledge(undefined)).toBeUndefined();
+  });
+
   it('requires codex configuration when agentKind is codex', () => {
     expect(() =>
       normalizeProfileConfig({

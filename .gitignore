@@ -1,4 +1,5 @@
-node_modules/
+# `node_modules` without a slash also matches the symlink a worktree points at the main checkout
+node_modules
 dist/
 coverage/
 
@@ -18,7 +19,6 @@ web/dist/
 .idea/
 .vscode/
 
-# Local maintenance scripts and unreleased changelog are not part of the package
-scripts/
-CHANGELOG.md
+# Local maintenance scripts are not part of the package (root only: .github/scripts/ is tracked)
+/scripts/
 tests-smoke/

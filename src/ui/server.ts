@@ -23,6 +23,8 @@ import {
   userLoginStart,
 } from './api';
 import { activateProfile, listBots, listProfiles } from './fleet';
+import { dreamView, mutateDream } from './dream';
+import { knowledgeView, mutateKnowledge, mutateSkills, skillsView } from './knowledge';
 import { listRuns, stopRun } from './runs';
 import { onboardCreate, onboardState, onboardValidate } from './onboard';
 import { finishQrRegistration, qrStatus, startQrRegistration } from './qr-register';
@@ -235,6 +237,37 @@ async function route(
   if (path === '/api/chats' && g) {
     const profile = url.searchParams.get('profile') ?? (await readActiveProfile(deps.rootDir));
     sendJson(res, 200, await listChats(profile ? sup.channelFor(profile) : undefined));
+    return;
+  }
+
+  // --- shared skill libraries (/skills lib) and knowledge repo (/knowledge) ---
+  if (path === '/api/skills' && g) {
+    sendJson(res, 200, await skillsView(await resolveTargetState(deps, url)));
+    return;
+  }
+  if (path === '/api/skills' && p) {
+    const target = await resolveTargetState(deps, url);
+    sendJson(res, 200, await mutateSkills(target, await readJsonBody(req)));
+    return;
+  }
+  if (path === '/api/knowledge' && g) {
+    sendJson(res, 200, await knowledgeView(await resolveTargetState(deps, url)));
+    return;
+  }
+  if (path === '/api/knowledge' && p) {
+    const target = await resolveTargetState(deps, url);
+    sendJson(res, 200, await mutateKnowledge(target, await readJsonBody(req)));
+    return;
+  }
+
+  // --- 梦境整理 (/dream) ---
+  if (path === '/api/dream' && g) {
+    sendJson(res, 200, await dreamView(await resolveTargetState(deps, url)));
+    return;
+  }
+  if (path === '/api/dream' && p) {
+    const target = await resolveTargetState(deps, url);
+    sendJson(res, 200, await mutateDream(target, await readJsonBody(req)));
     return;
   }
 

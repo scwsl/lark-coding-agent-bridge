@@ -111,6 +111,14 @@ export function canStopRun(
   return deny('denied-stop');
 }
 
+/**
+ * Whether what this sender asks for needs an admin's approval step by step:
+ * the profile has approvals on (off by default), and they are not an admin.
+ */
+export function runNeedsApproval(profile: ProfileConfig, controls: RuntimeControls, senderId: string): boolean {
+  return profile.approvals.enabled && !canRunAdminCommand(profile, controls, senderId).ok;
+}
+
 function allow(reason: AccessDecision['reason']): AccessDecision {
   return { ok: true, reason };
 }

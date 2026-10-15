@@ -163,6 +163,15 @@ export interface AppPreferences {
    */
   runIdleTimeoutMinutes?: number;
   /**
+   * 长任务完成提醒. A streamed reply card is updated in place, so finishing a
+   * long run makes no sound on the requester's phone. When a group / topic run
+   * — or a DM run whose answer landed in that in-place card — ends after at
+   * least this many minutes, the bot posts a short reply that pushes (in
+   * groups it @-mentions the requesters). Default 5; 0 turns it off.
+   * Config-file only.
+   */
+  longRunNoticeMinutes?: number;
+  /**
    * Whether the bot only responds to messages that @-mention it in groups
    * (regular and topic groups). p2p is always unrestricted. Default true:
    * groups are quiet unless the user @bot. Set false to let any group
@@ -183,7 +192,140 @@ export interface AppPreferences {
    * Range 100-30000; out-of-range values fall back to default.
    */
   agentStopGraceMs?: number;
+  /**
+   * 会话智能压缩. When on, a conversation that has gone idle with a large
+   * context — or that the agent itself marked finished — is archived and the
+   * next message starts a fresh session (still listed in `/resume`), and the
+   * agent CLI is asked to auto-compact long sessions earlier. Default off.
+   */
+  smartSession?: boolean;
+  /** Clean idle, merged bridge-managed worktrees; default off. */
+  autoWorktreeCleanup?: boolean;
+  /** Minimum idle days before cleanup, 1–365, default 7. */
+  worktreeCleanupIdleDays?: number;
+  /** Thresholds behind {@link smartSession}; config-file only. See {@link getSmartSession}. */
+  smartSessionTuning?: SmartSessionTuning;
+  /**
+   * 梦境整理. When on, an admin's `/dream run` turns ended conversations into
+   * reviewable Draft PRs against the knowledge repo and the profile's own skill
+   * library. Never merges. Independent of {@link smartSession}. Default off.
+   */
+  dream?: boolean;
+  /**
+   * 自动整理, on top of {@link dream}: the bridge starts a run by itself — not on
+   * a daily clock, but once enough new conversation has piled up, long enough
+   * after the last run, with the previous batch reviewed, inside the allowed
+   * hours and while the profile is idle. Default off.
+   */
+  dreamAuto?: boolean;
+  /** Limits behind {@link dream}; config-file only. See {@link getDream}. */
+  dreamTuning?: DreamTuning;
 }
+
+export interface DreamTuning {
+  /** Conversations read per run, newest first. Default 20. */
+  maxSessions?: number;
+  /** Transcript characters handed to the agent per run, all scopes together. Default 120000. */
+  maxInputChars?: number;
+  /** Wall-clock limit for one run's agent turns, in minutes. Default 20. */
+  maxRunMinutes?: number;
+  /** A conversation still active is read only after this many idle minutes. Default 30. */
+  minIdleMinutes?: number;
+  /**
+   * `skills.libraries[].name` new skills go to. Needed only when more than one
+   * library is configured; absent with exactly one, that one.
+   */
+  skillLibrary?: string;
+  /** Only these chat / topic scopes. Absent: every chat scope. */
+  scopes?: string[];
+  /** 自动整理: hours a run may start in, `HH:MM-HH:MM` (may wrap midnight). Default `01:00-07:00`. */
+  window?: string;
+  /** IANA time zone of {@link window}. Default: the host's. */
+  timezone?: string;
+  /** 材料够: conversation scopes with new exchanges that make a run worth it. Default 5. */
+  minScopes?: number;
+  /** 材料够 (either is enough): new transcript characters. Default 60000. */
+  minInputChars?: number;
+  /** 间隔够: days since the last completed run. Default 3. */
+  minIntervalDays?: number;
+  /** Past this many days, any new input is enough; 0 turns the fallback off. Default 14. */
+  maxIntervalDays?: number;
+  /** 审得过来: open dream Draft PRs per target repository that pause automatic runs. Default 1. */
+  maxOpenPrs?: number;
+  /** Consecutive failed automatic runs after which they pause until a manual run succeeds. Default 3. */
+  maxAutoFailures?: number;
+  /** Skip automatic runs once any quota window of the agent account is this full (percent). Default 80. */
+  maxQuotaPercent?: number;
+}
+
+export interface DreamAutoSettings {
+  /** Minutes after local midnight; `end` may be smaller than `start` (wraps midnight). */
+  window: { start: number; end: number; text: string };
+  timezone: string;
+  minScopes: number;
+  minInputChars: number;
+  minIntervalDays: number;
+  /** 0: no fallback. */
+  maxIntervalDays: number;
+  maxOpenPrs: number;
+  maxAutoFailures: number;
+  maxQuotaPercent: number;
+}
+
+export interface DreamSettings {
+  maxSessions: number;
+  maxInputChars: number;
+  maxRunMinutes: number;
+  minIdleMinutes: number;
+  skillLibrary?: string;
+  scopes?: string[];
+  auto: DreamAutoSettings;
+}
+
+export const DREAM_AUTO_DEFAULTS: DreamAutoSettings = {
+  window: { start: 60, end: 420, text: '01:00-07:00' },
+  timezone: hostTimeZone(),
+  minScopes: 5,
+  minInputChars: 60_000,
+  minIntervalDays: 3,
+  maxIntervalDays: 14,
+  maxOpenPrs: 1,
+  maxAutoFailures: 3,
+  maxQuotaPercent: 80,
+};
+
+export const DREAM_DEFAULTS: DreamSettings = {
+  maxSessions: 20,
+  maxInputChars: 120_000,
+  maxRunMinutes: 20,
+  minIdleMinutes: 30,
+  auto: DREAM_AUTO_DEFAULTS,
+};
+
+export interface SmartSessionTuning {
+  /** Idle this long with a large context starts a fresh session. Default 60. */
+  idleMinutes?: number;
+  /** What counts as a large context, in tokens. Default 150000. */
+  minContextTokens?: number;
+  /** Idle this long starts a fresh session whatever the context size. Default 480. */
+  hardIdleMinutes?: number;
+  /** Context window the agent CLI auto-compacts against, in tokens. Default 300000. */
+  compactWindowTokens?: number;
+}
+
+export interface SmartSessionSettings {
+  idleMinutes: number;
+  minContextTokens: number;
+  hardIdleMinutes: number;
+  compactWindowTokens: number;
+}
+
+export const SMART_SESSION_DEFAULTS: SmartSessionSettings = {
+  idleMinutes: 60,
+  minContextTokens: 150_000,
+  hardIdleMinutes: 480,
+  compactWindowTokens: 300_000,
+};
 
 /**
  * Top-level config shape on disk.
@@ -315,4 +457,117 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 60_000;
+}
+
+const DEFAULT_LONG_RUN_NOTICE_MINUTES = 5;
+
+/** 长任务完成提醒 threshold in ms, or `undefined` when off. See `longRunNoticeMinutes`. */
+export function getLongRunNoticeMs(cfg: AppConfig): number | undefined {
+  const raw = cfg.preferences?.longRunNoticeMinutes;
+  if (raw === undefined) return DEFAULT_LONG_RUN_NOTICE_MINUTES * 60_000;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.min(Math.max(Math.floor(raw), 1), 24 * 60) * 60_000;
+}
+
+/**
+ * Resolved 会话智能压缩 settings, or `undefined` when the switch is off.
+ * Out-of-range tuning values fall back to the defaults.
+ */
+export function getSmartSession(cfg: AppConfig): SmartSessionSettings | undefined {
+  if (cfg.preferences?.smartSession !== true) return undefined;
+  const tuning = cfg.preferences.smartSessionTuning ?? {};
+  const pick = (value: unknown, min: number, max: number, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? Math.floor(value) : fallback;
+  return {
+    idleMinutes: pick(tuning.idleMinutes, 5, 24 * 60, SMART_SESSION_DEFAULTS.idleMinutes),
+    minContextTokens: pick(tuning.minContextTokens, 10_000, 2_000_000, SMART_SESSION_DEFAULTS.minContextTokens),
+    hardIdleMinutes: pick(tuning.hardIdleMinutes, 30, 30 * 24 * 60, SMART_SESSION_DEFAULTS.hardIdleMinutes),
+    compactWindowTokens: pick(tuning.compactWindowTokens, 100_000, 2_000_000, SMART_SESSION_DEFAULTS.compactWindowTokens),
+  };
+}
+
+/**
+ * Resolved 梦境整理 limits, or `undefined` when the switch is off.
+ * Out-of-range values fall back to the defaults.
+ */
+export function getDream(cfg: AppConfig): DreamSettings | undefined {
+  if (cfg.preferences?.dream !== true) return undefined;
+  return resolveDreamSettings(cfg.preferences.dreamTuning);
+}
+
+/**
+ * 自动整理 settings, or `undefined` when either {@link AppPreferences.dream}
+ * or {@link AppPreferences.dreamAuto} is off.
+ */
+export function getDreamAuto(cfg: AppConfig): DreamSettings | undefined {
+  if (cfg.preferences?.dreamAuto !== true) return undefined;
+  return getDream(cfg);
+}
+
+/** {@link getDream}'s limits whether or not the switch is on — for status displays. */
+export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSettings {
+  const raw = tuning ?? {};
+  const pick = (value: unknown, min: number, max: number, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? Math.floor(value) : fallback;
+  const library = typeof raw.skillLibrary === 'string' ? raw.skillLibrary.trim() : '';
+  const scopes = Array.isArray(raw.scopes)
+    ? raw.scopes.filter((scope): scope is string => typeof scope === 'string' && scope.trim() !== '').map((scope) => scope.trim())
+    : [];
+  return {
+    maxSessions: pick(raw.maxSessions, 1, 200, DREAM_DEFAULTS.maxSessions),
+    maxInputChars: pick(raw.maxInputChars, 10_000, 1_000_000, DREAM_DEFAULTS.maxInputChars),
+    maxRunMinutes: pick(raw.maxRunMinutes, 2, 120, DREAM_DEFAULTS.maxRunMinutes),
+    minIdleMinutes: pick(raw.minIdleMinutes, 0, 7 * 24 * 60, DREAM_DEFAULTS.minIdleMinutes),
+    ...(library ? { skillLibrary: library } : {}),
+    ...(scopes.length > 0 ? { scopes } : {}),
+    auto: {
+      window: (typeof raw.window === 'string' ? parseDreamWindow(raw.window) : undefined) ?? DREAM_AUTO_DEFAULTS.window,
+      timezone: typeof raw.timezone === 'string' && isTimeZone(raw.timezone.trim()) ? raw.timezone.trim() : DREAM_AUTO_DEFAULTS.timezone,
+      minScopes: pick(raw.minScopes, 1, 200, DREAM_AUTO_DEFAULTS.minScopes),
+      minInputChars: pick(raw.minInputChars, 1_000, 1_000_000, DREAM_AUTO_DEFAULTS.minInputChars),
+      minIntervalDays: pick(raw.minIntervalDays, 1, 90, DREAM_AUTO_DEFAULTS.minIntervalDays),
+      maxIntervalDays: pick(raw.maxIntervalDays, 0, 365, DREAM_AUTO_DEFAULTS.maxIntervalDays),
+      maxOpenPrs: pick(raw.maxOpenPrs, 1, 20, DREAM_AUTO_DEFAULTS.maxOpenPrs),
+      maxAutoFailures: pick(raw.maxAutoFailures, 1, 20, DREAM_AUTO_DEFAULTS.maxAutoFailures),
+      maxQuotaPercent: pick(raw.maxQuotaPercent, 10, 100, DREAM_AUTO_DEFAULTS.maxQuotaPercent),
+    },
+  };
+}
+
+/** `HH:MM-HH:MM` → minutes after midnight; a window that ends where it starts is refused. */
+export function parseDreamWindow(text: string): DreamAutoSettings['window'] | undefined {
+  const match = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(text);
+  if (!match) return undefined;
+  const [h1, m1, h2, m2] = match.slice(1).map(Number) as [number, number, number, number];
+  if (h1 > 24 || h2 > 24 || m1 > 59 || m2 > 59) return undefined;
+  const start = (h1 * 60 + m1) % 1440;
+  const end = (h2 * 60 + m2) % 1440;
+  if (start === end) return undefined;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return { start, end, text: `${pad(Math.floor(start / 60))}:${pad(start % 60)}-${pad(Math.floor(end / 60))}:${pad(end % 60)}` };
+}
+
+function isTimeZone(zone: string): boolean {
+  if (!zone) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hostTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+/** Undefined when automatic worktree cleanup is off. */
+export function getWorktreeCleanupIdleDays(cfg: AppConfig): number | undefined {
+  if (cfg.preferences?.autoWorktreeCleanup !== true) return undefined;
+  const days = cfg.preferences.worktreeCleanupIdleDays;
+  return typeof days === 'number' && Number.isFinite(days) && days >= 1 && days <= 365 ? Math.floor(days) : 7;
 }

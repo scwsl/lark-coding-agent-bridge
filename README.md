@@ -149,6 +149,33 @@ Platform mapping:
 
 Daemon logs are under `~/.lark-channel/profiles/<profile>/logs/daemon/`.
 
+### Live terminal dashboard
+
+See bot availability, current tasks, execution stages and elapsed time alongside CPU, memory, free disk space and host uptime. Runs in a terminal, including macOS Terminal and iTerm2, without opening a browser.
+
+![Live terminal dashboard screenshot](docs/images/terminal-monitor.png)
+
+```bash
+lark-channel-bridge monitor --interval 5
+lark-channel-bridge monitor --profile codex --interval 5
+lark-channel-bridge monitor --once
+lark-channel-bridge monitor --json
+```
+
+The examples above refresh every five seconds; omitting `--interval` uses the two-second default.
+
+On macOS, physical disk read/write rates and physical network download/upload rates use counter deltas, excluding loopback and tunnel duplicates. Initial or unavailable samples show `—`; I/O sampling runs at most once every five seconds.
+
+On macOS, install `osx-cpu-temp` (`brew install osx-cpu-temp`) to display CPU temperature as `TEMP`, sampled at most once every five seconds. Missing, unsupported or failed sensors show `—`. No sudo is required.
+
+The layout adapts to the viewport: wide windows show bots in two columns, ordinary windows stack them, and narrow windows split host metrics across rows. Resizing immediately reflows the dashboard.
+
+Each task shows its chat name (or DM) and requester on the right, moving to a separate row in narrow windows. Names are captured when the task starts; refreshing makes no Feishu API calls. Older tasks or unresolved names display a pending label. Restart the bridge after upgrading to record origins for new tasks.
+
+Working bots appear first, task summaries wrap and long URLs collapse to their final path segment. Press `q` to quit, space to pause or `r` to refresh. `--interval <seconds>` supports 0.5–60 seconds and `--no-color` disables colors. Non-interactive terminals print one snapshot; `--json` returns the full state.
+
+The dashboard reads local state without requiring a bot restart. CPU utilization uses successive samples and is unavailable on the first frame. RAM shows non-free memory, including OS cache. Disk statistics are cached for 30 seconds; unchanged logs reuse parsed events, with each tail read capped at 256 KiB. Task stages come from real telemetry rather than estimated completion percentages, and exited or expired tasks are marked as interrupted.
+
 ### Web console (`--web-ui`)
 
 `--web-ui` is an alternative background service, not an add-on to the per-profile daemons above. Add it to `start` to run one machine-wide supervisor process that hosts every profile and serves a local web console to start/stop/configure them:
@@ -210,6 +237,8 @@ Before step 2, make sure the app is ready on the Open Platform:
 
 Add `--tenant lark` for a Lark global app. Day-to-day management is the same as any profile: `restart` / `stop --profile codex`, or `lark-channel-bridge ui` for the web console.
 
+Codex runs through `codex app-server` by default: later messages in a conversation go to the Codex process that is already up instead of starting a new one, an idle process closes after 10 minutes, and `/stop` interrupts the turn cleanly over the protocol. Profiles with `ignoreUserConfig`, or with execpolicy `.rules` files that `ignoreRules` must keep out, fall back to one `codex exec` per message; set `"transport": "exec"` in the profile's `codex` config to force that.
+
 ### Restarting a `npm link`'d local dev checkout
 
 If `lark-channel-bridge` on your `PATH` is `npm link`'d to a local clone of this repo (`npm ls -g lark-channel-bridge` shows a symlink into the repo instead of a versioned npm install), the running daemon only reflects whatever was in `dist/` the moment it started — Node loads the built JS into memory once at process start and does not hot-reload. Editing source or even running `pnpm build` afterwards changes nothing for an already-running daemon.
@@ -262,7 +291,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/ws use <name>` | Switch to a named workspace |
 | `/ws remove <name>` | Delete a named workspace |
 | `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
-| `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
+| `/status` | Show profile, agent, working directory, session (current context size, time since the last exchange, and — with smart session compaction on — whether the next message starts a new conversation), lark-cli identity, and run state |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
@@ -270,12 +299,13 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite group restricted @name...` | Allow the current group, limited to the named people only |
 | `/invite member @name` | Add a person to the current group's member allowlist |
 | `/invite all group` | Allow all groups the bot has joined |
-| `/remove user @name`, `/remove admin @name`, `/remove group`, `/remove member @name` | Remove access entries |
+| `/remove user @name`, `/remove admin @name`, `/remove group [chat id]`, `/remove member @name` | Remove access entries; `/remove group <chat id>` drops the named group by full id or trailing characters, also from a DM |
 | `/stop` | Stop the current run, including the card stop button |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/memory [add\|forget\|clear]` | Cross-session memory; `--global` writes profile-wide |
 | `/skills [show <name>]` | The skill index the agent reads on demand |
 | `/knowledge [bind\|sync\|unbind]` | Git sync for memory and skills |
+| `/dream [run\|cancel\|prs\|diff\|revert]` | Dream consolidation: turn finished conversations into memory / skill Draft PRs (admins, DM only) |
 | `/diff [staged\|<ref>]` | Show the working tree's changes, with the full patch attached when long |
 | `/worktree [add\|use\|remove]` | Manage task worktrees; the session follows the new one |
 | `/pr [number\|url]` | Pull request, CI and review status for the current branch |
@@ -285,9 +315,19 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/exit <id\|#>` | Stop a bridge process |
 | `/reconnect` | Force a WebSocket reconnect |
 | `/doctor [description]` | Run low-sensitive diagnostics |
+| `/usage [today\|week\|month]` | Token and estimated-cost usage; everyone sees their own, admins see everyone in a private chat |
+| `/audit [N]` | Who had the bot run which commands / change which files, and approval outcomes (admins, private chat) |
 | `/help` | Help card |
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
+
+**Group context**: Feishu only delivers the messages that @ the bot, so the rest of a group discussion is invisible to it. Before each run in a group or topic, the bridge reads back the messages the bot never received and attaches them to the prompt as background:
+
+- First time in a topic: the topic's existing messages (up to 40).
+- First mention in a regular group: the latest 20 messages from the past 12 hours.
+- After that: only what others said since the bot's previous reply (up to 30, excluding its own replies).
+
+Messages over 4000 characters are cut, and the oldest are dropped when the total runs long. How far each conversation has been read is kept in the profile's `chat-context-cursors.json`, so a restart doesn't inject anything twice. DMs skip this step.
 
 ## Memory and skills
 
@@ -323,16 +363,107 @@ Anyone allowed to use the bot in a chat can write that chat's notes; profile-wid
 It is plain Markdown at `0600`, editable in any editor — and that is the point: the directory is meant to be a git repository.
 
 ```text
-/knowledge                       # counts, remote, sync state
+/knowledge                       # counts, remote, sync state, auto-sync state
 /knowledge bind <git-url>        # bind a remote and pull what is already there
-/knowledge sync                  # commit local edits, pull, push
+/knowledge sync                  # sync now: commit local edits, pull, push
 /knowledge unbind                # keep the content, drop the remote
 ```
 
-Binding merges instead of overwriting, so notes written before you had a remote survive. The same repository can back several profiles and several machines — `/knowledge sync` on each is what moves content between them, and `gh`/`git` credentials stay the ones already on that machine. `/status` shows the counts and the sync state in one line.
+Binding merges instead of overwriting, so notes written before you had a remote survive. The same repository can back several profiles and several machines, and `gh`/`git` credentials stay the ones already on that machine. `/status` shows the counts and the sync state in one line.
 
-Skills are read by both Claude and Codex through the same index, so one file serves whichever agent a profile runs. Automatic periodic syncing is not wired yet — run `/knowledge sync`, or schedule it once the scheduler lands.
+- **Auto-sync**: once a remote is bound, the bridge syncs shortly after start-up and then every 30 minutes (commit → `pull --rebase --autostash` → push), so bots sharing one repository see each other's memories without anyone running `sync`. Set the interval in the profile's `knowledge` section; `0` turns it off (manual `/knowledge sync` only). Changes apply on `/reconnect` or restart (or edit it in the Web console, see below):
 
+  ```json
+  "knowledge": { "syncIntervalMinutes": 30 }
+  ```
+
+- **No overlapping git runs**: auto-sync and the manual `/knowledge sync` / `bind` / `unbind` queue up per directory. When two bots push at the same moment, the loser pulls once more and pushes again.
+- **Line-wise merge for memory files**: the knowledge repository gets a `.gitattributes` with `MEMORY.md merge=union` and `chats/*.md merge=union` (missing lines are appended, existing content is kept, committed on its own), so two bots appending to the same memory file at once keep both lines instead of conflicting. The trade-off: a memory deleted on one side can come back if the other side appended next to it at the same time. `MEMORY.md` has no directory prefix, so memory indexes of that name under `notes/` merge the same way.
+- **Web console**: the Knowledge card on the Configuration page shows the remote, branch, ahead/behind counts, uncommitted changes and auto-sync state, and can bind / rebind / unbind the remote, sync now and change the interval. Git work runs on the spot; the interval applies at once for profiles the console hosts, and is written to the config for profiles hosted by another process (per-profile daemons), taking effect on their next restart.
+- **Failure alerts**: every failure is logged; after two failed auto-sync rounds in a row the bot owner gets one DM (git's first error line, the knowledge directory, credentials in URLs masked), nothing more until it recovers, then a one-line "recovered" note. A successful manual `/knowledge sync` also ends the streak. A directory left mid-merge / mid-rebase is not auto-synced until someone finishes that.
+
+Skills are read by both Claude and Codex through the same index, so one file serves whichever agent a profile runs.
+
+### Shared skill libraries
+
+The knowledge directory belongs to one profile. To let several bots (say CC on Claude and Poki on Codex) use the same skills, keep them in a git repository and load it as a **skill library**. The bridge keeps a read-only mirror of each library and merges its skills into the same index; entries carry a `source` naming the library they came from.
+
+```text
+/skills lib                                   # configured libraries, sync state, skills each one loaded
+/skills lib add <git-url> [name]              # add a library and pull it now (not saved if the pull fails)
+    [--ref <branch/tag/commit>] [--path <dir>]
+    [--only a,b] [--exclude a,b]
+/skills lib sync [name]                       # pull now
+/skills lib rm <name>                         # remove it, mirror included
+```
+
+- **Layout**: skills live at `skills/<name>/SKILL.md`; without a `skills/` directory the repository root is scanned, and `--path` picks another directory. A repository whose root is a single `SKILL.md` counts as one skill. Frontmatter may use quoted values and `>` / `|` multi-line descriptions.
+- **Read-only mirror**: a sync is fetch + check out the remote commit + drop local changes, never a merge. Change a skill in the library's own repository.
+- **Name clashes**: the profile's own `knowledge/skills/` win, then libraries in the order they were added; the losers are listed in `/skills lib`.
+- **Syncing**: once at start-up, then every 60 minutes (`skills.syncIntervalMinutes`; `0` pulls only at start-up and on `sync`).
+- **Permissions**: `/skills lib` is admin-only — a library's content becomes instructions the bot follows; `/skills` stays readable for everyone. Reach private repositories through the SSH key already on the host rather than a token in the URL (cards and logs mask credentials, the config file does not).
+- **Config**: stored in the profile's `skills` section:
+
+```json
+"skills": {
+  "libraries": [
+    { "name": "team-skills", "url": "git@github.com:acme/team-skills.git", "ref": "main", "exclude": ["old-skill"] }
+  ],
+  "syncIntervalMinutes": 60
+}
+```
+
+Mirrors live in `~/.lark-channel/profiles/<profile>/skill-libraries/<name>/`. Each profile configures and pulls its own; to share a library between bots, `add` it in each of them.
+
+The Skill libraries card on the Web console's Configuration page does the same: it lists each library's commit, last sync and loaded skills (shadowed ones struck through), and can add a library (saved only after the pull succeeds), sync one or all, remove one and change the interval. Pulls and mirror removal run on the spot; config changes apply at once for profiles the console hosts, and on the next restart for profiles hosted by another process — if such a process re-pulls a removed library before then, the mirror is swept at its start-up because the config no longer lists it.
+
+
+### Dream consolidation (梦境整理, off by default)
+
+Rules agreed in a chat, verified conclusions and procedures that worked are easy to forget to `/memory add`. With dream consolidation on, an admin can have the bot go back over finished conversations and turn what is worth keeping into **Draft PRs for review**: memory and notes against the knowledge repository, skills against a shared skill library. Nothing takes effect before a human merges; the bridge never merges.
+
+```text
+/dream                 # switch, target repositories, limits, why automatic rounds did not run, recent runs, PRs awaiting review
+/dream run             # run one round now; the outcome is posted back in the DM
+/dream cancel          # stop the running round (cursors do not move, it is re-read next time)
+/dream prs             # PRs it opened and their review state
+/dream diff [batch]    # the diff of a batch (default: the latest)
+/dream revert <batch>  # undo a batch: a revert Draft PR if merged, otherwise a pointer to close the PR
+```
+
+- **Switch**: 「梦境整理」 in `/config` or under Configuration → Replies & runs in the Web console; off by default. Switching it off stops a running round before it publishes. `/dream` is admin-only and works only in a DM, since a round reads every chat.
+- **Automatic rounds** (「自动整理」 in `/config` / the Web console, off by default, effective only with dream consolidation on): not a daily job — a round starts **once enough has piled up**. Every 30 minutes the bridge checks, and starts a round only when all of these hold: inside the allowed hours (default 01:00–07:00, at most one round per window); enough material (5 scopes with new exchanges, or 60,000 characters of new conversation); 3 days since the last round; the previous batch reviewed (fewer than 1 open dream PR per target repository); the profile idle (no user run running or queued, no new message in the last 30 minutes); and the agent account's quota under 80%. After 14 days without a round any new input is enough. With the quota unreadable it runs on half the budget; it never spends a Codex rate-limit reset credit. An automatic round yields to a user message (cancelled, re-read next time) until its drafts are committed; a manual `/dream run` does not yield. From the second failure in a row it backs off 2, 4… days, and after 3 it pauses until a manual round succeeds. Automatic rounds send no messages — results and why nothing ran (e.g. "材料不足 3/5 个会话范围", "距上次整理 1/3 天") show in `/dream` and the Web card.
+- **Input**: only conversations the bridge itself ran (Claude's session transcript, Codex's rollout, located by the session handle — nothing else on the host is scanned), and only each request and the final answer, no tool calls or progress. Scheduled jobs, meetings and doc-comment sessions are skipped. Each conversation has a cursor so the next round reads only what is new; a rewritten transcript is re-read from the start, and anything proposed before is not proposed again. Conversations still in progress (idle under 30 minutes) or running right now wait for a later round.
+- **Consolidation**: each scope (a group, DM or topic) gets its own read-only agent run (plan mode for Claude, the read-only sandbox for Codex; if read-only cannot be guaranteed it does not run), seeing only that scope's conversations, the profile-wide memory, that chat's memory and the skill index. Works for Claude and Codex profiles alike, with the profile's own agent.
+- **Validation**: the agent only suggests; each item is checked before anything is written — it must cite turns that exist in this round's input; promoting to profile-wide memory needs an admin saying it directly in their own message, otherwise it is kept for the originating chat only; merge / conflict / stale are flags written to `notes/<scope>/dream-review.md`, the original entries are not touched; anything that looks like a key, token or credential is dropped (and masked out of the excerpts the agent sees); file paths are derived by the bridge from the scope, never taken from the agent.
+- **Publishing**: a fresh clone of the remote's latest state, one commit on a `dream/<batch>` branch, a push of that new branch and a Draft PR — no force push, never the default branch, repository hooks off. Every target repository is committed locally first; only when all succeed is a checkpoint recorded (cursors move, candidates are marked proposed). A failure or cancel before the checkpoint drops the whole batch to be re-read next time — never half a batch of PRs. Pushes and PRs interrupted after the checkpoint (restart, network) are resumed by the next round, never opened twice. The PR body lists each item's reason and source (conversation, scope, turns), what was downgraded and what was left out. Delete what you do not want in the PR, or close it to drop the batch (the same candidates are not proposed again); for one already merged, `/dream revert <batch>` opens a revert Draft PR.
+- **Bots sharing a repository**: when two profiles (say CC and Poki) are bound to the same knowledge repository or skill library, a round takes a host-wide lock per repository remote before it starts; if another one is consolidating the same repository, this round does not run and says who holds it.
+- **Targets**: existing configuration — the knowledge repository's `origin` from `/knowledge bind`; new skills go to the only library in `skills.libraries` (with several, name one in `preferences.dreamTuning.skillLibrary`), updates go back to the library the skill comes from. A library the current `gh` account cannot write to, or one pinned to a tag / commit, is skipped and reported. When `gh` is unavailable the draft stays local and the next round pushes it and opens the PR first.
+- **Limits** (optional, profile `preferences.dreamTuning`):
+
+```json
+"dreamTuning": {
+  "maxSessions": 20,
+  "maxInputChars": 120000,
+  "maxRunMinutes": 20,
+  "minIdleMinutes": 30,
+  "skillLibrary": "team-skills",
+  "scopes": ["oc_xxx"],
+  "window": "01:00-07:00",
+  "timezone": "Asia/Shanghai",
+  "minScopes": 5,
+  "minInputChars": 60000,
+  "minIntervalDays": 3,
+  "maxIntervalDays": 14,
+  "maxOpenPrs": 1,
+  "maxAutoFailures": 3,
+  "maxQuotaPercent": 80
+}
+```
+
+With `scopes` set only those scopes are read. `window` may wrap midnight (`22:00-06:00`); `timezone` defaults to the host's; `maxIntervalDays: 0` turns the fallback off. These live in the config file only — `/config` and the Web console have just the switches. Local bookkeeping (cursors, PRs opened — no conversation text) is in the profile's `dream-state.json`; draft checkouts live under `dream/`, only the last few rounds are kept.
+
+The Web console's Configuration page has a 「梦境整理」 card with the targets, limits, the automatic-round conditions and the last check, recent rounds (automatic ones marked 「自动」) and PR links; for a profile the console hosts it can start, cancel or revert a round, for one run by another process it shows status only — use `/dream run` / `/dream revert` in a Feishu DM.
 
 ## Git awareness
 
@@ -377,6 +508,16 @@ Jobs are stored per profile in `jobs.json` (see Data directories).
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
 When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+
+### Long-run completion notice
+
+The reply card is posted when a run starts and then updated in place, and Feishu doesn't push edits — a run that finishes twenty minutes later does so silently. So when a run takes longer than a threshold (default 5 minutes) from submission to finish, the bot posts one short follow-up reply to the original message:
+
+- Groups / topics: it @-mentions the people who started the run (everyone in a merged batch; never bots) and says whether it finished or failed, and how long it took.
+- DMs: only when the answer landed in that in-place card; when the answer was already sent as its own message (COT, plain-text mode, or Codex) that message pushed, so nothing is added.
+- Runs the user stopped with `/stop` get no notice.
+
+The threshold is the profile's `preferences.longRunNoticeMinutes` (minutes, `0` turns it off), config-file only.
 
 ## lark-cli identity policy
 
@@ -434,6 +575,7 @@ The legacy `sandbox` field is still readable for old configs. After the bridge s
 | `~/.lark-channel/profiles/<profile>/sessions.json` | Session state |
 | `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | Agent-aware session catalog |
 | `~/.lark-channel/profiles/<profile>/knowledge/` | Memory and skills (optionally a git repo) |
+| `~/.lark-channel/profiles/<profile>/skill-libraries/` | Read-only mirrors of shared skill libraries (`/skills lib`) |
 | `~/.lark-channel/profiles/<profile>/jobs.json` | Scheduled jobs (`/cron`) |
 | `~/.lark-channel/profiles/<profile>/workspaces.json` | Current and named workspace bindings |
 | `~/.lark-channel/profiles/<profile>/secrets.enc` | Profile-local encrypted secrets |
@@ -454,7 +596,7 @@ To let other people or groups in, add them to one of three lists:
 | List | Controls | Add | Remove |
 |------|----------|-----|--------|
 | **Allowed users** | who can DM the bot | `/invite user @them` | `/remove user @them` |
-| **Allowed chats** | which groups the bot answers in (for **everyone** in them, unless restricted — see below) | `/invite group` (current group) / `/invite all group` (every group the bot is in) | `/remove group` (current group) |
+| **Allowed chats** | which groups the bot answers in (for **everyone** in them, unless restricted — see below) | `/invite group` (current group) / `/invite all group` (every group the bot is in) | `/remove group` (current group) / `/remove group <chat id>` (any group, works in a DM — handy once the bot has left it) |
 | **Admins** | who can change settings, and use the bot in any group | `/invite admin @them` | `/remove admin @them` |
 
 > `/invite` and `/remove` can only be run by **you (the creator) and admins**. The `@` in the command points at the *target person* (not the bot) — the bot resolves the mention to their identity, so you never deal with raw IDs.
@@ -491,6 +633,68 @@ To let other people or groups in, add them to one of three lists:
 - **In groups you must `@` the bot first** (DMs don't need it). That's a separate toggle (`/config` → "require @ in groups"), independent of the lists above.
 - Strangers get pure silence — no reply at all. The one exception: if someone `@`-mentions the bot in a group that hasn't been opened up, the bot posts a friendly one-liner telling them an admin can run `/invite group` to enable it.
 - Cloud-doc comments are document-scoped: anyone who can comment in a supported document and mention the bot can trigger a reply.
+
+### Approvals for non-admins (off by default)
+
+Off by default: every run gets the profile's permissions, whoever drives it. With `approvals.enabled` on in the profile config, runs driven by anyone other than the bot owner and the admins (DMs, @bot in groups, doc comments — a merged batch counts if any message in it is from a non-admin):
+
+- The agent may read, search and browse freely; before it **runs a command, writes a file or calls an external (MCP) tool**, an approval card with Allow / Allow this turn / Deny goes to the owner's and every admin's private chat. The requester sees a "waiting for an admin" card and can cancel.
+- Only an admin can allow; anything unanswered for **5 minutes** is denied, and the agent is told so.
+- Every approval and every command / file change is recorded per person in an audit log (`audit.jsonl` in the profile dir, kept 90 days; commands and file changes are recorded with approvals off too); admins see the latest with `/audit [N]` in a private chat.
+- Claude Code is gated with a PreToolUse hook; Codex through the app-server's own approval requests (read-only sandbox, `approvalPolicy: untrusted`). Codex profiles that fall back to `codex exec` have no approval channel, so non-admin runs there are read-only.
+
+It lives in the profile config's `approvals` section (restart the profile to apply):
+
+```json
+"approvals": {
+  "enabled": true,
+  "allowCommands": ["python3 ~/.claude/skills/remote-tcpdump/scripts/tcpdump_client.py"],
+  "allowTools": ["mcp__tdengine-*__query"]
+}
+```
+
+- `enabled`: `true` turns approvals on; absent or `false` (the default) keeps them off — non-admins' runs get the same permissions as an admin's, no approval cards.
+- `allowCommands`: commands that run without asking, matched by their leading words (`~` and `$HOME` expanded, whole words only) — the example covers every subcommand of that script. Each stage of a `&&` / `|` line must be listed or plainly read-only; `;`, redirection and substitution still ask; a script reached through a variable (`$C`) doesn't match.
+- `allowTools`: tool names that run without asking; `*` matches anything. Listing `Bash` waives every command.
+- Steps waived this way are still audited (shown as "allowlisted" in `/audit`).
+
+### Smart session compaction (off by default)
+
+By default the bridge keeps resuming the same conversation. The longer it gets, the more every turn (and every tool call) re-reads; and once it has sat idle past the prompt cache's lifetime (1 hour), the next message first re-writes the whole context at cache-write price. Send `/config` in Feishu and switch on 「会话智能压缩」 under 运行与权限 (applies on submit) or enable the same switch under Configuration → Replies & runs in the Web console and save. The bridge will:
+
+- **Start fresh after idling**: when a message arrives more than 1 hour after the last exchange with a context over 150k tokens, or more than 8 hours after it, the conversation is not resumed; a new one starts.
+- **Close when the agent says the task is done**: the agent may end its final answer with `[[NEW_SESSION: one-line summary]]`; the bridge strips the marker from the reply and the next message starts a new conversation. The request is kept in the profile's `pending-rotations.json`, so a bridge restart in between doesn't lose it; if `/new`, `/resume` or `/cd` switched conversations before that next message, the request is dropped.
+- **Compact long conversations earlier** (Claude Code / Codex): defaults to 300k tokens, using Claude Code's compaction window or Codex's native auto-compaction threshold on both app-server and exec. The model context limit still constrains when compaction occurs. Turning the switch off restores native CLI defaults.
+
+Nothing is lost: the old conversation is archived as usual and `/resume` brings it back. The first turn of the new conversation carries a short hand-off (the old conversation's summary or last request), and the reply card notes that a new conversation was started. No switch happens while the conversation still has background work running, or when the user quotes an earlier message.
+
+Thresholds are tunable in the config file (the profile's `preferences`; restart the profile to apply):
+
+```json
+"smartSessionTuning": {
+  "idleMinutes": 60,
+  "minContextTokens": 150000,
+  "hardIdleMinutes": 480,
+  "compactWindowTokens": 300000
+}
+```
+
+### Automatic worktree cleanup (off by default)
+
+Enable 「Worktree 自动清理」 under `/config` → 运行与权限 or Web console → Configuration → Replies & runs, then save. Once an hour, the bridge checks worktrees registered by `/worktree add` that have been idle for at least 7 days. Existing worktrees and those created directly by an agent in a terminal are not enrolled automatically.
+
+A tree must be merged into the repository's default local branch (`origin/HEAD`, falling back to `main` / `master`). Main checkouts, locked/detached trees, changed branches, dirty trees and trees containing untracked **or ignored** files are preserved. Current/named/default workspaces and scheduled job directories across profiles are protected. Active runs or kept processes defer cleanup. Removal never uses force.
+
+Only branches newly created by the bridge are deleted after their tree is removed; pre-existing branches remain. Branch deletion checks the verified commit ID, preserving a concurrently changed tip. Remote branches are untouched. Results go to bridge logs. Set the idle period (1–365 days, default 7) in the profile's `preferences`:
+
+```json
+{
+  "autoWorktreeCleanup": true,
+  "worktreeCleanupIdleDays": 7
+}
+```
+
+Ignored dependencies and build artifacts also block removal and must first be removed manually. Disabling the switch stops future cleanup; removed worktrees are not automatically restored.
 
 ### Advanced: editing the config file directly
 
@@ -544,6 +748,8 @@ pnpm build
 ```
 
 `pnpm test` includes unit, integration, and process-level adapter tests. CI runs on macOS, Ubuntu, and Windows with `pnpm install --frozen-lockfile`, `pnpm test`, `pnpm typecheck`, and `pnpm build`.
+
+Contributor conventions — worktree iteration loop, the `pnpm ci:local` gate, architecture map, and how to add an agent — live in `AGENTS.md` at the repository root, shared by Claude Code (imported via `CLAUDE.md`) and Codex; step-by-step runbooks are under `docs/dev/`.
 
 ## Optional telemetry
 

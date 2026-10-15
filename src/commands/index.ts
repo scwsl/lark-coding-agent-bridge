@@ -3,11 +3,34 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { agentCapability } from '../agent/capability';
+import { agentDescriptor, type AgentKind } from '../agent/registry';
+import {
+  emptyTotals,
+  formatTokens,
+  type UsageLedger,
+  type UsageReportRow,
+  type UsageTotals,
+} from '../runtime/usage-ledger';
+import type { ApprovalBroker } from '../runtime/approvals';
+import { toolLabel } from '../card/approval-cards';
+import type { AuditLog } from '../runtime/audit-log';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedEfforts, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { RunsMonitor } from '../bot/runs-monitor';
+import {
+  DEFAULT_KNOWLEDGE_SYNC_INTERVAL_MINUTES,
+  getKnowledgeSyncIntervalMinutes,
+  type KnowledgeAutoSync,
+} from '../knowledge/auto-sync';
+import {
+  buildLibraryConfig,
+  getSkillSyncIntervalMinutes,
+  maskUrlCredentials,
+  shadowedSkills,
+  type SkillLibraries,
+} from '../knowledge/libraries';
 import type { KnowledgeStore, MemoryScope } from '../knowledge/store';
 import {
   bindKnowledgeRemote,
@@ -39,13 +62,16 @@ import {
   diffCard,
   helpCard,
   knowledgeCard,
+  type KnowledgeStatusView,
   memoryCard,
   pullRequestCard,
   resumeCard,
+  skillLibrariesCard,
   skillsCard,
   statusCard,
   taskStatusCard,
   usageCard,
+  type StatusInfo,
   worktreeCard,
   workspacesCard,
 } from '../card/templates';
@@ -80,6 +106,9 @@ import {
   getMessageReplyMode,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
+  getDream,
+  getSmartSession,
+  getWorktreeCleanupIdleDays,
   getShowToolCalls,
 } from '../config/schema';
 import type {
@@ -87,6 +116,7 @@ import type {
   ProfileAccess,
   ProfileConfig,
   ProfileMode,
+  SkillLibraryConfig,
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
 import { resolveAppPaths } from '../config/app-paths';
@@ -131,12 +161,17 @@ import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
+import type { PendingRotationStore } from '../session/rotation-store';
+import { decideRotation } from '../session/smart-session';
+import { probeAgentSession } from '../agent/session-probe';
 import { describeMeetingError, type MeetingManager } from '../meeting/manager';
 import { isMeetingNo } from '../meeting/api';
 import { answerInMeeting, meetingScopeId } from '../meeting/orchestrator';
 import type { MeetingSession } from '../meeting/session';
 import { hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 import { isPlainCoffeeRequest } from './coffee-intent';
+import { formatDreamPrs, formatDreamRevert, formatDreamRun, formatDreamStatus } from '../dream/format';
+import type { DreamService } from '../dream/service';
 
 export interface Controls {
   profile: string;
@@ -170,11 +205,26 @@ export interface Controls {
   /** Cross-session memory + skills for this profile, backing `/memory`,
    * `/skills` and `/knowledge`. Late-bound by startChannel. */
   knowledge?: KnowledgeStore;
+  /** Shared skill libraries backing `/skills lib`. Late-bound by startChannel. */
+  skillLibraries?: SkillLibraries;
+  /** Periodic sync of the knowledge repo, shown by `/knowledge`. Late-bound by startChannel. */
+  knowledgeAutoSync?: KnowledgeAutoSync;
   /** Scheduled-job engine backing `/cron`; present only while the channel is
    * connected and a profile data dir exists. Late-bound by startChannel. */
   scheduler?: Scheduler;
   /** Late-bound like `scheduler`: quota-paused tasks waiting to resume. */
   autoResumer?: AutoResumer;
+  /** Per-person consumption backing `/usage`; present only while the channel
+   * is connected and a profile data dir exists. Late-bound by startChannel. */
+  usage?: UsageLedger;
+  /** Pending approvals for runs non-admins drive (`approval.*` card buttons). Late-bound by startChannel. */
+  approvals?: ApprovalBroker;
+  /** Who had the bot do what, backing `/audit`. Late-bound by startChannel. */
+  audit?: AuditLog;
+  /** 会话智能压缩 closes the agent asked for, read by `/status`. Late-bound by startChannel. */
+  pendingRotations?: Pick<PendingRotationStore, 'get'>;
+  /** 梦境整理 backing `/dream` and the console's dream panel. Late-bound by startChannel. */
+  dream?: DreamService;
 }
 
 export interface CommandContext {
@@ -218,7 +268,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: AgentKind;
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -260,6 +310,10 @@ const handlers: Record<string, Handler> = {
   '/cron': handleCron,
   '/coffee': handleCoffee,
   '/usage': handleUsage,
+  '/audit': handleAudit,
+  '/dream': handleDream,
+  // Card buttons of approval prompts (not typed by people; see ApprovalBroker).
+  '/approval': handleApproval,
 };
 
 /**
@@ -269,8 +323,6 @@ const handlers: Record<string, Handler> = {
  */
 const ADMIN_COMMANDS = new Set([
   '/account',
-  // The plan quota of whoever runs the bridge, not something to show a group.
-  '/usage',
   '/config',
   '/ps',
   '/exit',
@@ -294,6 +346,10 @@ const ADMIN_COMMANDS = new Set([
   // Joining a meeting makes the bot visible to every participant and exposes
   // meeting content to the agent — owner/admin only.
   '/meeting',
+  // Shows who had the bot do what across every chat of the profile.
+  '/audit',
+  // Reads every chat's conversations and opens PRs against shared repositories.
+  '/dream',
 ]);
 
 function isAdminCommand(cmd: string): boolean {
@@ -650,41 +706,53 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
-    const identity = ctx.sessionCatalogIdentity;
-    const entry =
-      ctx.sessionCatalog && identity
-        ? ctx.sessionCatalog.activeFor(identity)
-        : undefined;
-    const history = identity ? await listCodexResumeHistory(ctx, cwd, limit) : [];
-    if (history.length > 0 && identity) {
-      const entries = history.map((thread) => {
-        const nonce = issueResumeCandidate(identity, { threadId: thread.threadId });
-        return {
-          sessionId: nonce,
-          preview: thread.name || thread.preview,
-          relTime: formatRelTime(thread.updatedAtMs),
-          detail: `Codex · ${thread.source}`,
-          current: thread.threadId === entry?.threadId,
-        };
-      });
-      const card = resumeCard(cwd, entries);
-      await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-      return;
-    }
-    if (entry?.threadId && identity) {
-      const nonce = issueResumeCandidate(identity, { threadId: entry.threadId });
-      await reply(
-        ctx,
-        `当前 Codex thread 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
-      );
-      return;
-    }
-    const card = resumeCard(cwd, []);
+  await RESUME_LISTS[ctx.controls.profileConfig.agentKind](ctx, cwd, limit, sub);
+}
+
+/**
+ * `/resume` listing per agent: each reads its own CLI's history and issues
+ * resume candidates keyed by that agent's session handle.
+ */
+const RESUME_LISTS: Record<AgentKind, (ctx: CommandContext, cwd: string, limit: number, sub: string) => Promise<void>> = {
+  claude: sendClaudeResumeList,
+  codex: sendCodexResumeList,
+};
+
+async function sendCodexResumeList(ctx: CommandContext, cwd: string, limit: number): Promise<void> {
+  const identity = ctx.sessionCatalogIdentity;
+  const entry =
+    ctx.sessionCatalog && identity
+      ? ctx.sessionCatalog.activeFor(identity)
+      : undefined;
+  const history = identity ? await listCodexResumeHistory(ctx, cwd, limit) : [];
+  if (history.length > 0 && identity) {
+    const entries = history.map((thread) => {
+      const nonce = issueResumeCandidate(identity, { threadId: thread.threadId });
+      return {
+        sessionId: nonce,
+        preview: thread.name || thread.preview,
+        relTime: formatRelTime(thread.updatedAtMs),
+        detail: `Codex · ${thread.source}`,
+        current: thread.threadId === entry?.threadId,
+      };
+    });
+    const card = resumeCard(cwd, entries);
     await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
     return;
   }
+  if (entry?.threadId && identity) {
+    const nonce = issueResumeCandidate(identity, { threadId: entry.threadId });
+    await reply(
+      ctx,
+      `当前 Codex thread 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
+    );
+    return;
+  }
+  const card = resumeCard(cwd, []);
+  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
 
+async function sendClaudeResumeList(ctx: CommandContext, cwd: string, limit: number, sub = ''): Promise<void> {
   // Only this chat's own conversations: every chat shares the workspace, so
   // the unfiltered list would let anyone resume (and read back) someone
   // else's session. The owner can still see everything with `/resume all`.
@@ -713,51 +781,44 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
+  const descriptor = agentDescriptor(ctx.controls.profileConfig.agentKind);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
-    const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
-    const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
-    if (resolved) {
+    const identity = ctx.sessionCatalogIdentity;
+    const entry = ctx.sessionCatalog.activeFor(identity);
+    const resolved = consumeResumeCandidate(sessionId, identity);
+    const handleField = agentDescriptor(identity.agentId).sessionHandle;
+    const handle = resolved?.[handleField];
+    if (handle) {
       ctx.activeRuns.interrupt(ctx.scope);
-      if (ctx.sessionCatalogIdentity.agentId === 'codex') {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'codex',
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          threadId: resolved.threadId!,
-        });
-      } else {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'claude',
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          sessionId: resolved.sessionId!,
-        });
-        ctx.sessions.set(ctx.scope, resolved.sessionId!, ctx.sessionCatalogIdentity.cwdRealpath);
-      }
+      ctx.sessionCatalog.upsertActive({
+        scopeId: identity.scopeId,
+        agentId: identity.agentId,
+        cwdRealpath: identity.cwdRealpath,
+        policyFingerprint: identity.policyFingerprint,
+        [handleField]: handle,
+      });
+      if (descriptor.scopeSessionStore) ctx.sessions.set(ctx.scope, handle, identity.cwdRealpath);
       await reply(ctx, RESUME_APPLIED_REPLY);
       return;
     }
-    if (ctx.sessionCatalogIdentity.agentId === 'codex') {
+    // Without a scope store there is no raw-id path: only a fresh candidate resumes.
+    if (!descriptor.scopeSessionStore) {
       await reply(ctx, '当前上下文不可恢复这个会话，请先用 `/resume` 重新生成恢复候选。');
       return;
     }
-    const expected = entry?.sessionId;
+    const expected = entry?.[handleField];
     if (expected !== sessionId) {
       await reply(ctx, '当前上下文不可恢复这个会话，请重新选择当前工作区和权限策略下的会话。');
       return;
     }
     ctx.activeRuns.interrupt(ctx.scope);
-    if (ctx.sessionCatalogIdentity.agentId === 'claude') {
-      ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
-    }
+    ctx.sessions.set(ctx.scope, sessionId, identity.cwdRealpath);
     await reply(ctx, RESUME_APPLIED_REPLY);
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
-    await reply(ctx, '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。');
+  if (!descriptor.scopeSessionStore) {
+    await reply(ctx, `当前上下文没有可恢复的 ${descriptor.displayName} 会话，请先在当前工作区完成一次运行。`);
     return;
   }
 
@@ -802,8 +863,7 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    (identity.agentId === 'claude' && !candidate.sessionId) ||
-    (identity.agentId === 'codex' && !candidate.threadId)
+    !candidate[agentDescriptor(identity.agentId).sessionHandle]
   ) {
     return undefined;
   }
@@ -825,7 +885,7 @@ function scopeSessionIds(ctx: CommandContext): Set<string> {
   const current = ctx.sessions.getRaw(ctx.scope)?.sessionId;
   if (current) ids.add(current);
   for (const entry of ctx.sessionCatalog?.entries() ?? []) {
-    if (entry.scopeId === ctx.scope && entry.agentId === 'claude' && entry.sessionId) {
+    if (entry.scopeId === ctx.scope && entry.agentId === ctx.controls.profileConfig.agentKind && entry.sessionId) {
       ids.add(entry.sessionId);
     }
   }
@@ -881,7 +941,7 @@ function selectedResumeCwd(ctx: CommandContext): string | undefined {
 function runtimeAccessStatus(
   profileConfig: ProfileConfig,
 ): { label: string; value: string } {
-  if (profileConfig.agentKind === 'claude') {
+  if (agentDescriptor(profileConfig.agentKind).accessControl === 'permission-mode') {
     return {
       label: 'permission',
       value: accessToClaudePermissionMode(
@@ -947,17 +1007,24 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const sess = ctx.sessions.getRaw(ctx.scope);
-  const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
+  // Scope-store agents report the scope's session (and whether its cwd went
+  // stale); the rest report the catalog entry for the current context.
+  const descriptor = agentDescriptor(ctx.controls.profileConfig.agentKind);
   const catalogEntry =
-    isCodex && ctx.sessionCatalog && ctx.sessionCatalogIdentity
+    !descriptor.scopeSessionStore && ctx.sessionCatalog && ctx.sessionCatalogIdentity
       ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity)
       : undefined;
+  const sessionId = descriptor.scopeSessionStore ? sess?.sessionId : catalogEntry?.[descriptor.sessionHandle];
+  const sessionStale = descriptor.scopeSessionStore && Boolean(cwd && sess && sess.cwd !== cwd);
   const card = statusCard({
     profileName: ctx.controls.profile,
     cwd,
-    sessionId: isCodex ? catalogEntry?.threadId : sess?.sessionId,
-    emptySessionText: isCodex ? '(未建立)' : undefined,
-    sessionStale: !isCodex && Boolean(cwd && sess && sess.cwd !== cwd),
+    sessionId,
+    emptySessionText: descriptor.scopeSessionStore ? undefined : '(未建立)',
+    sessionStale,
+    ...(sessionId && !sessionStale
+      ? await sessionContextStatus(ctx, sessionId, (descriptor.scopeSessionStore ? sess?.cwd : undefined) ?? cwd)
+      : {}),
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
     larkCliStatus: await larkCliStatus(ctx),
@@ -970,6 +1037,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
           autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
         }
       : {}),
+    backgroundRun: ctx.activeRuns.isLingering(ctx.scope),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
     queue: ctx.processPool?.snapshot(),
@@ -978,6 +1046,37 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
+
+/**
+ * How big the conversation the next message would resume has grown, and —
+ * with 会话智能压缩 on — whether that message will start a fresh one instead.
+ * Read from the agent's own transcript; absent when it can't be read.
+ */
+async function sessionContextStatus(
+  ctx: CommandContext,
+  handle: string,
+  cwd: string | undefined,
+): Promise<Pick<StatusInfo, 'context'>> {
+  if (!cwd) return {};
+  const probe = await probeAgentSession(ctx.controls.profileConfig, handle, cwd);
+  if (!probe || (probe.contextTokens === undefined && probe.lastActivityAt === undefined)) return {};
+  const now = Date.now();
+  const smartSession = getSmartSession(ctx.controls.cfg);
+  const pending = ctx.controls.pendingRotations?.get(ctx.scope);
+  const verdict =
+    smartSession && !ctx.runExecutor?.hasLiveProcess(ctx.scope)
+      ? decideRotation({ settings: smartSession, probe, ...(pending ? { pending } : {}), resumeHandle: handle, now })
+      : undefined;
+  return {
+    context: {
+      ...(probe.contextTokens !== undefined ? { tokens: probe.contextTokens } : {}),
+      ...(probe.lastActivityAt !== undefined
+        ? { idleMinutes: Math.max(0, Math.floor((now - probe.lastActivityAt) / 60_000)) }
+        : {}),
+      ...(verdict ? { rotateReason: verdict.reason } : {}),
+    },
+  };
 }
 
 function formatOwnerState(ctx: CommandContext): string {
@@ -1016,7 +1115,8 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
       return;
     }
   }
-  const ok = ctx.activeRuns.interrupt(scope);
+  const stopped = ctx.activeRuns.interruptDetailed(scope);
+  const ok = stopped.active || stopped.background;
   if (!targetScope && !ok) {
     // Nothing running, but a quota-paused task may be waiting to resume.
     const waiting = ctx.autoResumer?.get(scope);
@@ -1040,6 +1140,7 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
     scope,
     targeted: Boolean(targetScope),
     interrupted: ok,
+    background: stopped.background,
   });
   if (targetScope) {
     await reply(
@@ -1049,8 +1150,11 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
         : `未找到正在运行的任务：\`${scope}\`。`,
     );
   }
-  // No reply for the current IM scope: if there was a run, its in-flight
-  // render loop will mark the card as interrupted and re-render.
+  // No reply for the current IM scope when a run was in flight: its render
+  // loop marks the card as interrupted. Background work has no card to mark.
+  else if (stopped.background && !stopped.active) {
+    await reply(ctx, '已停止后台任务。');
+  }
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
@@ -1309,10 +1413,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   }
   doctorLastByOperator.set(rateKey, now);
 
-  const capability =
-    ctx.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+  const capability = agentCapability(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',
@@ -1367,6 +1468,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
       policy,
       nowait: true,
       stopGraceMs: getAgentStopGraceMs(ctx.controls.cfg),
+      actor: { id: ctx.msg.senderId, ...(ctx.msg.senderName ? { name: ctx.msg.senderName } : {}) },
       observability: {
         profile: ctx.controls.profile,
         agent: capability.agentId,
@@ -1525,8 +1627,22 @@ async function handleHelp(_args: string, ctx: CommandContext): Promise<void> {
  * agent run, so it costs no quota and still answers while a run is busy or
  * stuck.
  */
-async function handleUsage(_args: string, ctx: CommandContext): Promise<void> {
-  if (ctx.controls.profileConfig.agentKind !== 'claude') {
+async function handleUsage(args: string, ctx: CommandContext): Promise<void> {
+  const key = args.trim().toLowerCase();
+  // `/usage` keeps answering the plan quota; a period asks for the
+  // per-person consumption ledger instead.
+  if (key && key !== 'quota') return handleUsageLedger(key, ctx);
+  return handlePlanQuota(ctx);
+}
+
+async function handlePlanQuota(ctx: CommandContext): Promise<void> {
+  // The plan quota of whoever runs the bridge, not something to show anyone
+  // else; their own consumption is open to all (`/usage today`).
+  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
+    await reply(ctx, '订阅额度仅管理员可看。看自己的用量请发 `/usage today`（或 week / month）。');
+    return;
+  }
+  if (!agentDescriptor(ctx.controls.profileConfig.agentKind).planQuota) {
     await reply(ctx, '`/usage` 目前只支持 Claude profile。');
     return;
   }
@@ -1543,6 +1659,230 @@ async function handleUsage(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 // ─── /coffee ──────────────────────────────────────────────────────────────
+
+const USAGE_PERIODS: Record<string, { days: number; label: string }> = {
+  today: { days: 1, label: '今天' },
+  week: { days: 7, label: '近 7 天' },
+  month: { days: 30, label: '近 30 天' },
+};
+
+/**
+ * `/usage today|week|month`: whose runs consumed how much of the owner's
+ * agent quota. Everyone sees their own numbers; only an admin in a private
+ * chat sees everyone's, so one chat never learns another person's usage.
+ */
+async function handleUsageLedger(args: string, ctx: CommandContext): Promise<void> {
+  const ledger = ctx.controls.usage;
+  if (!ledger) {
+    await reply(ctx, '当前 profile 没有开启用量统计。');
+    return;
+  }
+  const key = args.trim().toLowerCase();
+  if (key && !USAGE_PERIODS[key]) {
+    await reply(ctx, '用法：`/usage` 看订阅额度；`/usage today|week|month` 看各人用量。');
+    return;
+  }
+  const periods = key ? [USAGE_PERIODS[key]!] : [USAGE_PERIODS.today!, USAGE_PERIODS.week!];
+  const everyone =
+    ctx.chatMode === 'p2p' &&
+    canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
+  const sections = periods.map((period) => {
+    const rows = ledger.report({ days: period.days, ...(everyone ? {} : { actorId: ctx.msg.senderId }) });
+    return formatUsageSection(period.label, rows, { everyone, selfId: ctx.msg.senderId });
+  });
+  const notes = [
+    '_费用是按 API 价格估算的；订阅账号不实际扣费，只用来比较各人占用额度的多少。Codex 不报费用，只看 token。_',
+    ...(ctx.chatMode !== 'p2p' && !everyone ? ['_只显示你自己的用量；管理员私聊发 `/usage` 可看所有人。_'] : []),
+  ];
+  await reply(ctx, [...sections, ...notes].join('\n\n'));
+}
+
+function formatUsageSection(
+  label: string,
+  rows: UsageReportRow[],
+  opts: { everyone: boolean; selfId: string },
+): string {
+  if (rows.length === 0) return `**${label}**\n暂无用量记录。`;
+  const total = rows.reduce((acc, row) => {
+    acc.turns += row.total.turns;
+    acc.inputTokens += row.total.inputTokens;
+    acc.cachedInputTokens += row.total.cachedInputTokens;
+    acc.outputTokens += row.total.outputTokens;
+    acc.costUsd += row.total.costUsd;
+    return acc;
+  }, emptyTotals());
+  if (!opts.everyone) return `**${label}**\n你：${formatUsageTotals(total)}`;
+  const shown = rows.slice(0, 10).map((row, i) => {
+    const who = row.actorId === opts.selfId ? '你' : (row.actorName ?? `…${row.actorId.slice(-6)}`);
+    return `${i + 1}. ${who}：${formatUsageTotals(row.total)}`;
+  });
+  const more = rows.length > 10 ? [`…另有 ${rows.length - 10} 人`] : [];
+  return [`**${label}**（${rows.length} 人）`, `合计：${formatUsageTotals(total)}`, ...shown, ...more].join('\n');
+}
+
+function formatUsageTotals(t: UsageTotals): string {
+  const cached = t.cachedInputTokens > 0 ? `（缓存 ${formatTokens(t.cachedInputTokens)}）` : '';
+  const cost = t.costUsd > 0 ? ` · 估算 $${t.costUsd.toFixed(2)}` : '';
+  return `${t.turns} 轮 · 输入 ${formatTokens(t.inputTokens)}${cached} · 输出 ${formatTokens(t.outputTokens)}${cost}`;
+}
+
+/**
+ * `approval.allow|allowturn|deny <id>` from an approval card. Allowing needs
+ * an admin; the requester may cancel (deny) their own pending step. A click
+ * that changes something gets no reply — the cards themselves update.
+ */
+async function handleApproval(args: string, ctx: CommandContext): Promise<void> {
+  const [verb, id] = args.trim().split(/\s+/);
+  const action = verb === 'allow' ? 'allow' : verb === 'allowturn' ? 'allow-turn' : verb === 'deny' ? 'deny' : undefined;
+  const broker = ctx.controls.approvals;
+  if (!broker || !action || !id) return;
+  const isAdmin = canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
+  const result = broker.decide(id, ctx.msg.senderId, action, isAdmin);
+  log.info('command', 'approval', { action, result, operator: ctx.msg.senderId.slice(-6) });
+  if (result === 'forbidden') {
+    await reply(ctx, action === 'deny' ? '只有发起人或管理员可以取消这一步。' : '只有管理员可以允许这一步。');
+  } else if (result === 'not-found') {
+    await reply(ctx, '这条审批已经处理过或已过期。');
+  }
+}
+
+const AUDIT_EVENT_LABELS: Record<string, string> = {
+  allowed: '已允许',
+  'auto-allowed': '本轮已允许',
+  'config-allowed': '免审批清单',
+  denied: '已拒绝',
+  timeout: '超时拒绝',
+  cancelled: '已取消',
+};
+
+/**
+ * `/dream` — 梦境整理. Admin-only and DM-only: a run reads every chat's
+ * conversations, and its drafts and diffs can carry any of them. The chat only
+ * ever sees counts and PR links; `diff` is the one view of draft content.
+ */
+async function handleDream(args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.chatMode !== 'p2p') {
+    await reply(ctx, '梦境整理涉及所有会话的内容，请私聊 bot 发送 `/dream`。');
+    return;
+  }
+  const dream = ctx.controls.dream;
+  if (!dream) {
+    await reply(ctx, '当前 bridge 没有启用梦境整理（缺少 profile 数据目录或知识库）。');
+    return;
+  }
+  const [sub = '', ...rest] = args.trim().split(/\s+/);
+  switch (sub) {
+    case '':
+    case 'status':
+      await reply(ctx, formatDreamStatus(await dream.status()));
+      return;
+    case 'run': {
+      const actor = { id: ctx.msg.senderId, ...(ctx.msg.senderName ? { name: ctx.msg.senderName } : {}) };
+      const started = await dream.start(actor, (run) => {
+        void reply(ctx, formatDreamRun(run));
+      });
+      await reply(
+        ctx,
+        'error' in started
+          ? `❌ ${started.error}`
+          : `🌙 已开始整理，批次 \`${started.run.id}\`。读取已结束的会话、生成草稿并开 Draft PR，完成后在这里回复结果；\`/dream cancel\` 可以取消。`,
+      );
+      return;
+    }
+    case 'cancel':
+      await reply(ctx, dream.cancel() ? '⏹ 已请求取消，当前步骤结束后停止；游标不会移动。' : '现在没有在进行的整理。');
+      return;
+    case 'prs':
+      await reply(ctx, formatDreamPrs(await dream.pullRequests()));
+      return;
+    case 'revert': {
+      if (!rest[0]) {
+        await reply(ctx, '用法：`/dream revert <批次>`，批次号见 `/dream prs`。');
+        return;
+      }
+      const result = await dream.revert(rest[0]);
+      await reply(ctx, 'error' in result ? `❌ ${result.error}` : formatDreamRevert(result));
+      return;
+    }
+    case 'diff': {
+      const result = await dream.diff(rest[0]);
+      if ('error' in result) {
+        await reply(ctx, result.error);
+        return;
+      }
+      const fence = '```';
+      const body = result.parts
+        .map((part) => `**${part.label}**\n${fence}diff\n${clipDiff(part.diff, 6000).replaceAll(fence, "'''")}\n${fence}`)
+        .join('\n\n');
+      await reply(ctx, `**🌙 批次 \`${result.id}\` 的差异**\n\n${body}`);
+      return;
+    }
+    default:
+      await reply(
+        ctx,
+        [
+          '**🌙 梦境整理**',
+          '',
+          '`/dream` — 状态：开关、目标仓库、上次结果、待审核 PR 数',
+          '`/dream run` — 立即整理：读取已结束的会话，生成记忆 / 笔记 / skill 草稿并开 Draft PR',
+          '`/dream cancel` — 取消正在进行的整理',
+          '`/dream prs` — 整理开出的 PR 及审核状态',
+          '`/dream diff [批次]` — 查看某个批次的差异（默认最近一次）',
+          '`/dream revert <批次>` — 撤销一个已合并的批次（开一个撤销用的 Draft PR）',
+          '',
+          '整理结果只以 Draft PR 的形式出现，审核合并后才生效；「梦境整理」「自动整理」两个开关在 `/config` 里。',
+          '自动整理不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且没有别的任务时才跑，用户消息一来就让路。',
+        ].join('\n'),
+      );
+  }
+}
+
+function clipDiff(diff: string, max: number): string {
+  return diff.length > max ? `${diff.slice(0, max)}\n… (已截断，完整内容见 PR)` : diff;
+}
+
+/**
+ * `/audit [N]`: the latest side-effecting steps (commands, file writes,
+ * external tools) and approval decisions, newest first. Private chat only —
+ * it spans every chat of the profile.
+ */
+async function handleAudit(args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.chatMode !== 'p2p') {
+    await reply(ctx, '审计记录涉及所有会话，请私聊 bot 发送 `/audit` 查看。');
+    return;
+  }
+  const audit = ctx.controls.audit;
+  if (!audit) {
+    await reply(ctx, '当前 profile 没有开启审计记录。');
+    return;
+  }
+  const n = Number.parseInt(args.trim(), 10);
+  const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20;
+  const entries = (await audit.query({ limit: limit * 3 }))
+    .filter((e) => e.kind === 'tool' || (e.event && e.event in AUDIT_EVENT_LABELS))
+    .slice(0, limit);
+  if (entries.length === 0) {
+    await reply(ctx, '还没有审计记录。');
+    return;
+  }
+  const chats = new Map((ctx.controls.knownChats ?? []).map((c) => [c.id, c.name]));
+  const lines = entries.map((e) => {
+    const d = new Date(e.at);
+    const pad = (x: number): string => String(x).padStart(2, '0');
+    const when = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const who = e.actorId === ctx.msg.senderId ? '你' : (e.actorName ?? `…${e.actorId.slice(-6)}`);
+    const where = e.chatId ? (chats.get(e.chatId) ?? '会话') : e.source;
+    const what = `${toolLabel(e.tool)} \`${e.summary.replace(/`/g, "'").slice(0, 80)}\``;
+    const outcome =
+      e.kind === 'approval'
+        ? ` · ${AUDIT_EVENT_LABELS[e.event!]}`
+        : e.gated
+          ? ' · 非管理员会话'
+          : '';
+    return `- ${when} ${who}（${where}）${what}${outcome}`;
+  });
+  await reply(ctx, [`**最近 ${entries.length} 条操作记录**`, ...lines].join('\n'));
+}
 
 async function handleCoffee(_args: string, ctx: CommandContext): Promise<void> {
   await ctx.channel.send(ctx.msg.chatId, { card: coffeeCard() }, commandReplyOptions(ctx));
@@ -1704,6 +2044,13 @@ async function worktreeAdd(branch: string, base: string | undefined, ctx: Comman
     return;
   }
 
+  ctx.workspaces.trackWorktree({
+    repoRoot: repo.status.root,
+    path: created.path,
+    branch: created.branch,
+    ownedBranch: !created.existingBranch,
+  });
+
   // Creating a worktree for a task and then working in the old directory is
   // never what anyone means, so the session moves with it — same as `/cd`.
   const resolved = await resolveWorkingDirectory(created.path);
@@ -1787,6 +2134,7 @@ async function worktreeRemove(needle: string, force: boolean, ctx: CommandContex
     await reply(ctx, `❌ 删除失败：${removed.error}${force ? '' : '\n有未提交改动时可以加 `--force`。'}`);
     return;
   }
+  ctx.workspaces.forgetWorktree(match.path);
   log.info('git', 'worktree-removed', { scope: ctx.scope, path: match.path });
   await reply(ctx, `🗑 已删除 worktree \`${match.path}\`。`);
 }
@@ -1962,6 +2310,10 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
   const [sub = '', ...rest] = trimmed.split(/\s+/);
 
+  if (sub === 'lib' || sub === 'libs') {
+    return handleSkillLibraries(trimmed.slice(sub.length).trim(), ctx, store);
+  }
+
   if (sub === 'show' || sub === 'cat') {
     const name = rest.join(' ').trim();
     const skill = name ? await store.readSkill(name) : undefined;
@@ -1977,9 +2329,231 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
   const skills = await store.listSkills();
   await ctx.channel.send(
     ctx.msg.chatId,
-    { card: skillsCard(skills.map(({ name, description }) => ({ name, description })), store.skillsDir) },
+    {
+      card: skillsCard(
+        skills.map(({ name, description, source }) => ({ name, description, ...(source ? { source } : {}) })),
+        store.skillsDir,
+      ),
+    },
     commandReplyOptions(ctx),
   );
+}
+
+// ─── /skills lib: shared skill libraries ──────────────────────────────────
+
+const SKILL_LIB_HELP = [
+  '**Skill 库**（管理员）',
+  '',
+  '`/skills lib` — 已配置的库、同步状态、各自载入的 skill',
+  '`/skills lib add <git 地址> [名字] [--ref 分支/标签/提交] [--path 子目录] [--only a,b] [--exclude a,b]` — 加一个库并立即拉取',
+  '`/skills lib sync [名字]` — 立即同步（不写名字就是全部）',
+  '`/skills lib rm <名字>` — 移除，本地镜像一起删掉',
+  '',
+  '库是 git 仓库的只读镜像：skill 放在 `skills/<名字>/SKILL.md`（没有 `skills/` 就在仓库根目录找），同名时本 profile 自己的 skill 优先、先加的库优先。私有仓库用本机已配好的 SSH key 访问，不要把 token 写进地址。',
+].join('\n');
+
+async function handleSkillLibraries(args: string, ctx: CommandContext, store: KnowledgeStore): Promise<void> {
+  // A library feeds instructions straight into every run of this profile and
+  // makes the host fetch from an arbitrary URL — same level as /knowledge.
+  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
+    await reply(ctx, '❌ skill 库仅管理员可管理；`/skills` 可以查看已载入的 skill。');
+    return;
+  }
+  const libraries = ctx.controls.skillLibraries;
+  if (!libraries) {
+    await reply(ctx, '当前 bridge 没有启用 skill 库（缺少 profile 数据目录）。');
+    return;
+  }
+  const [sub = '', ...rest] = args.split(/\s+/).filter(Boolean);
+  switch (sub) {
+    case '':
+    case 'list':
+    case 'status':
+      return skillLibraryList(ctx, store, libraries);
+    case 'add':
+      return skillLibraryAdd(rest, ctx, store, libraries);
+    case 'sync':
+    case 'pull':
+      return skillLibrarySync(rest[0], ctx, libraries);
+    case 'rm':
+    case 'remove':
+      return skillLibraryRemove(rest[0] ?? '', ctx, libraries);
+    default:
+      await reply(ctx, SKILL_LIB_HELP);
+  }
+}
+
+function configuredLibraries(ctx: CommandContext): SkillLibraryConfig[] {
+  return ctx.controls.profileConfig.skills?.libraries ?? [];
+}
+
+async function skillLibraryList(
+  ctx: CommandContext,
+  store: KnowledgeStore,
+  libraries: SkillLibraries,
+): Promise<void> {
+  const [statuses, merged] = await Promise.all([libraries.status(), store.listSkills()]);
+  const now = Date.now();
+  await ctx.channel.send(
+    ctx.msg.chatId,
+    {
+      card: skillLibrariesCard(
+        statuses.map((status) => ({
+          name: status.config.name,
+          url: maskUrlCredentials(status.config.url),
+          ...(status.config.ref ? { ref: status.config.ref } : {}),
+          ...(status.config.path ? { path: status.config.path } : {}),
+          ...(status.config.include ? { include: status.config.include } : {}),
+          ...(status.config.exclude ? { exclude: status.config.exclude } : {}),
+          present: status.present,
+          ...(status.commit ? { commit: status.commit } : {}),
+          ...(status.commitAt ? { commitAgo: formatAgo(now - status.commitAt) } : {}),
+          ...(status.lastSyncAt ? { lastSyncAgo: formatAgo(now - status.lastSyncAt) } : {}),
+          ...(status.lastError ? { lastError: status.lastError } : {}),
+          skills: status.skills.map((skill) => skill.name),
+          shadowed: shadowedSkills(status, merged),
+        })),
+        getSkillSyncIntervalMinutes(ctx.controls.profileConfig.skills),
+      ),
+    },
+    commandReplyOptions(ctx),
+  );
+}
+
+type ParsedLibraryAdd = { library: SkillLibraryConfig } | { error: string };
+
+/** `<url> [name] [--ref x] [--path x] [--only a,b] [--exclude a,b] [--name x]`. */
+function parseLibraryAdd(tokens: string[], taken: Set<string>): ParsedLibraryAdd {
+  const positional: string[] = [];
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    const flag = /^--(ref|path|only|include|exclude|name)(?:=(.*))?$/.exec(token);
+    if (flag) {
+      const value = flag[2] ?? tokens[i + 1];
+      if (flag[2] === undefined) i += 1;
+      if (!value) return { error: `\`--${flag[1]}\` 后面缺少值。` };
+      flags[flag[1] === 'include' ? 'only' : flag[1]!] = value;
+      continue;
+    }
+    if (token.startsWith('--')) return { error: `不认识的参数 \`${token}\`。` };
+    positional.push(token);
+  }
+  const url = positional[0] ?? '';
+  if (!url) return { error: '用法：`/skills lib add <git 地址> [名字]`' };
+  const list = (value: string | undefined) => value?.split(',');
+  return buildLibraryConfig(
+    {
+      url,
+      name: flags.name ?? positional[1],
+      ref: flags.ref,
+      path: flags.path,
+      include: list(flags.only),
+      exclude: list(flags.exclude),
+    },
+    taken,
+  );
+}
+
+async function skillLibraryAdd(
+  tokens: string[],
+  ctx: CommandContext,
+  store: KnowledgeStore,
+  libraries: SkillLibraries,
+): Promise<void> {
+  const parsed = parseLibraryAdd(tokens, new Set(configuredLibraries(ctx).map((library) => library.name)));
+  if (!('library' in parsed)) {
+    await reply(ctx, `❌ ${parsed.error}\n\n${SKILL_LIB_HELP}`);
+    return;
+  }
+  const library = parsed.library;
+
+  // Fetch first and only then save: a library that cannot be pulled never
+  // lands in the configuration.
+  const result = await libraries.syncLibrary(library);
+  if (!result.ok) {
+    await reply(ctx, `❌ 拉取 \`${library.name}\` 失败：${result.error ?? '未知错误'}`);
+    return;
+  }
+  try {
+    await configOps.saveSkillsConfig(ctx.controls, (skills) => ({
+      ...skills,
+      libraries: [...skills.libraries.filter((item) => item.name !== library.name), library],
+    }));
+  } catch (err) {
+    await libraries.remove(library.name).catch(() => undefined);
+    await reply(ctx, `❌ 保存配置失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  log.info('skills', 'library-added', { library: library.name, by: ctx.msg.senderId });
+
+  const [statuses, merged] = await Promise.all([libraries.status(), store.listSkills()]);
+  const status = statuses.find((item) => item.config.name === library.name);
+  const found = status?.skills.length ?? 0;
+  const shadowed = status ? shadowedSkills(status, merged) : [];
+  const interval = getSkillSyncIntervalMinutes(ctx.controls.profileConfig.skills);
+  const lines = [
+    `📚 已添加 skill 库 \`${library.name}\`（\`${result.commit ?? '?'}\`），载入 ${found - shadowed.length} 个 skill。`,
+  ];
+  if (found === 0) {
+    lines.push('⚠️ 没找到 `SKILL.md`：skill 要放在 `<目录>/<名字>/SKILL.md`，不在 `skills/` 下就用 `--path` 指定目录。');
+  }
+  if (shadowed.length > 0) {
+    lines.push(`同名已存在、未载入：${shadowed.map((name) => `\`${name}\``).join('、')}`);
+  }
+  lines.push(
+    '',
+    `下一条消息起生效。${interval > 0 ? `每 ${interval} 分钟自动同步，` : ''}\`/skills lib sync ${library.name}\` 立即同步。`,
+  );
+  await reply(ctx, lines.join('\n'));
+}
+
+async function skillLibrarySync(name: string | undefined, ctx: CommandContext, libraries: SkillLibraries): Promise<void> {
+  const configured = configuredLibraries(ctx);
+  if (configured.length === 0) {
+    await reply(ctx, '还没有配置 skill 库，用 `/skills lib add <git 地址>` 添加。');
+    return;
+  }
+  if (name && !configured.some((library) => library.name === name)) {
+    await reply(ctx, `没有叫 \`${name}\` 的库。现有：${configured.map((library) => `\`${library.name}\``).join('、')}`);
+    return;
+  }
+  const results = await libraries.sync(name);
+  const lines = results.map((result) =>
+    result.ok
+      ? `✓ \`${result.name}\`：${result.changed ? '已更新到' : '已是最新'} \`${result.commit ?? '?'}\``
+      : `❌ \`${result.name}\`：${result.error ?? '同步失败'}`,
+  );
+  await reply(ctx, `🔄 skill 库同步完成\n${lines.join('\n')}`);
+}
+
+async function skillLibraryRemove(name: string, ctx: CommandContext, libraries: SkillLibraries): Promise<void> {
+  const configured = configuredLibraries(ctx);
+  if (!name) {
+    await reply(ctx, '用法：`/skills lib rm <名字>`');
+    return;
+  }
+  if (!configured.some((library) => library.name === name)) {
+    await reply(
+      ctx,
+      configured.length === 0
+        ? '还没有配置 skill 库。'
+        : `没有叫 \`${name}\` 的库。现有：${configured.map((library) => `\`${library.name}\``).join('、')}`,
+    );
+    return;
+  }
+  try {
+    await configOps.saveSkillsConfig(ctx.controls, (skills) => ({
+      ...skills,
+      libraries: skills.libraries.filter((library) => library.name !== name),
+    }));
+  } catch (err) {
+    await reply(ctx, `❌ 保存配置失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  await libraries.remove(name);
+  log.info('skills', 'library-removed', { library: name, by: ctx.msg.senderId });
+  await reply(ctx, `🗑 已移除 skill 库 \`${name}\`，本地镜像一起删掉了。`);
 }
 
 async function handleKnowledge(args: string, ctx: CommandContext): Promise<void> {
@@ -2012,8 +2586,10 @@ async function handleKnowledge(args: string, ctx: CommandContext): Promise<void>
           '',
           '`/knowledge` — 当前状态（记忆条数、skill 数、同步状态）',
           '`/knowledge bind <git 仓库地址>` — 绑定远端并拉取已有内容',
-          '`/knowledge sync` — 提交本地改动、拉取远端、推上去',
+          '`/knowledge sync` — 立即同步：提交本地改动、拉取远端、推上去',
           '`/knowledge unbind` — 解除绑定（本地内容保留）',
+          '',
+          knowledgeAutoSyncHelp(getKnowledgeSyncIntervalMinutes(ctx.controls.profileConfig.knowledge)),
         ].join('\n'),
       );
   }
@@ -2039,10 +2615,39 @@ async function knowledgeStatus(ctx: CommandContext, store: KnowledgeStore): Prom
         ...(repo?.branch ? { branch: repo.branch } : {}),
         ...(repo?.upstream ? { ahead: repo.upstream.ahead, behind: repo.upstream.behind } : {}),
         ...(repo ? { dirty: isDirty(repo) } : {}),
+        ...knowledgeAutoSyncView(ctx),
       }),
     },
     commandReplyOptions(ctx),
   );
+}
+
+function knowledgeAutoSyncHelp(interval: number): string {
+  const now = interval > 0 ? `绑定远端后每 ${interval} 分钟自动同步一次` : '自动同步已关闭';
+  return `${now}（profile 配置 \`knowledge.syncIntervalMinutes\`，默认 ${DEFAULT_KNOWLEDGE_SYNC_INTERVAL_MINUTES}，\`0\` 关闭）；连续两次失败会私聊提醒 bot 主人。`;
+}
+
+/** Auto-sync part of the `/knowledge` card; the interval is shown even before the loop exists. */
+function knowledgeAutoSyncView(
+  ctx: CommandContext,
+): Pick<KnowledgeStatusView, 'autoSyncMinutes' | 'autoSyncing' | 'lastSync'> {
+  const status = ctx.controls.knowledgeAutoSync?.status();
+  const view = {
+    autoSyncMinutes: status?.intervalMinutes ?? getKnowledgeSyncIntervalMinutes(ctx.controls.profileConfig.knowledge),
+    ...(status?.syncing ? { autoSyncing: true } : {}),
+  };
+  const last = status?.last;
+  if (!status || !last) return view;
+  return {
+    ...view,
+    lastSync: {
+      ago: formatAgo(Date.now() - last.at),
+      auto: last.trigger === 'auto',
+      ok: last.ok,
+      ...(last.error ? { error: last.error } : {}),
+      ...(status.failures > 1 ? { failures: status.failures } : {}),
+    },
+  };
 }
 
 async function knowledgeBind(url: string, ctx: CommandContext, store: KnowledgeStore): Promise<void> {
@@ -2056,11 +2661,16 @@ async function knowledgeBind(url: string, ctx: CommandContext, store: KnowledgeS
     return;
   }
   log.info('knowledge', 'remote-bound', { scope: ctx.scope });
-  await reply(ctx, `🔗 已绑定远端。${result.note ?? '远端已有的记忆和 skill 都拉下来了。'}\n\n之后用 \`/knowledge sync\` 同步。`);
+  const interval = getKnowledgeSyncIntervalMinutes(ctx.controls.profileConfig.knowledge);
+  const after = interval > 0 ? `之后每 ${interval} 分钟自动同步，也可以随时 \`/knowledge sync\`。` : '之后用 `/knowledge sync` 同步。';
+  await reply(ctx, `🔗 已绑定远端。${result.note ?? '远端已有的记忆和 skill 都拉下来了。'}\n\n${after}`);
 }
 
 async function knowledgeSync(ctx: CommandContext, store: KnowledgeStore): Promise<void> {
+  // Queued behind an automatic sync that is already running, then a full
+  // round of its own (`syncKnowledge` serializes per directory).
   const result = await syncKnowledge(store);
+  ctx.controls.knowledgeAutoSync?.noteManual(result);
   if (isGitError(result)) {
     await reply(ctx, `❌ ${result.error}`);
     return;
@@ -2644,32 +3254,30 @@ async function handleRemove(args: string, ctx: CommandContext): Promise<void> {
         '• `/remove user @某人` — 移出用户白名单\n' +
         '• `/remove admin @某人` — 移出管理员\n' +
         '• `/remove group` — 把当前群移出响应群名单\n' +
+        '• `/remove group <群 ID>` — 按 ID 移除指定的群，私聊里也能用（写 `/config` 群管理面板里显示的末 6 位即可）\n' +
         '• `/remove member @某人` — 把这个人移出当前群的专属名单',
     );
     return;
   }
 
   if (kind === 'group') {
+    const idArg = args.trim().split(/\s+/).find((token) => token.toLowerCase() !== 'group');
+    if (idArg) {
+      await removeGroupById(ctx, idArg);
+      return;
+    }
     if (ctx.chatMode === 'p2p') {
-      await reply(ctx, '`/remove group` 请在要移除的群里发，私聊里没有可移除的群。');
+      await reply(
+        ctx,
+        '私聊里请带上群 ID：`/remove group <群 ID>`。ID 写全或只写 `/config` 群管理面板里显示的末 6 位都可以。',
+      );
       return;
     }
     const chatId = ctx.msg.chatId;
     let missing = false;
     await saveAccessConfig(ctx, (current) => {
-      const list = new Set(current.allowedChats);
-      missing = !list.has(chatId);
-      list.delete(chatId);
-      // Drop the now-orphaned per-chat allowlist too, so removing then
-      // re-adding a group later doesn't silently resurrect an old member
-      // list the operator no longer remembers configuring.
-      const memberMap = { ...(current.chatAllowedUsers ?? {}) };
-      delete memberMap[chatId];
-      return {
-        ...current,
-        allowedChats: [...list],
-        chatAllowedUsers: memberMap,
-      };
+      missing = !current.allowedChats.includes(chatId);
+      return withoutChat(current, chatId);
     });
     if (missing) {
       await reply(ctx, '✅ 当前群本来就不在响应名单里，无需移除。');
@@ -2772,6 +3380,69 @@ async function saveAccessConfig(
   return configOps.saveAccessConfig(ctx.controls, mutate);
 }
 
+/**
+ * Drop a chat from the allowlist together with its per-chat member list and
+ * @ override, so removing then re-adding a group later doesn't silently
+ * resurrect settings the operator no longer remembers configuring.
+ */
+function withoutChat(access: ProfileAccess, chatId: string): ProfileAccess {
+  const memberMap = { ...(access.chatAllowedUsers ?? {}) };
+  delete memberMap[chatId];
+  const mentionMap = { ...(access.chatRequireMention ?? {}) };
+  delete mentionMap[chatId];
+  return {
+    ...access,
+    allowedChats: access.allowedChats.filter((id) => id !== chatId),
+    chatAllowedUsers: memberMap,
+    chatRequireMention: mentionMap,
+  };
+}
+
+/** Shortest suffix accepted by `/remove group <id>`; the /config panel shows 6. */
+const MIN_CHAT_ID_SUFFIX = 4;
+
+/**
+ * `/remove group <id>` — removes an allowlisted chat named by its full
+ * chat_id or a suffix of it (the /config group panel shows the last 6
+ * characters). Works from p2p, which is the only way to drop a chat the bot
+ * has already left: plain `/remove group` has to be sent inside the chat.
+ */
+async function removeGroupById(ctx: CommandContext, rawId: string): Promise<void> {
+  const needle = rawId.replace(/^[.…（(]+|[)）]+$/g, '').toLowerCase();
+  const names = new Map((ctx.controls.knownChats ?? []).map((chat) => [chat.id, chat.name]));
+  const label = (id: string) => `${names.get(id) ? `**${names.get(id)}**` : '(未知群)'}（\`${id}\`）`;
+  const findMatches = (allowed: string[]) => {
+    const exact = allowed.filter((id) => id.toLowerCase() === needle);
+    if (exact.length > 0 || needle.length < MIN_CHAT_ID_SUFFIX) return exact;
+    return allowed.filter((id) => id.toLowerCase().endsWith(needle));
+  };
+
+  let matches: string[] = [];
+  await saveAccessConfig(ctx, (current) => {
+    matches = findMatches(current.allowedChats);
+    return matches.length === 1 ? withoutChat(current, matches[0]!) : current;
+  });
+
+  if (matches.length === 1) {
+    await reply(ctx, `✅ 已把 ${label(matches[0]!)} 移出响应群名单。`);
+    return;
+  }
+  if (matches.length > 1) {
+    await reply(
+      ctx,
+      `❌ 有 ${matches.length} 个群的 ID 以 \`${needle}\` 结尾，请多写几位或写全 ID：\n` +
+        matches.map((id) => `- ${label(id)}`).join('\n'),
+    );
+    return;
+  }
+  await reply(
+    ctx,
+    needle.length < MIN_CHAT_ID_SUFFIX
+      ? `❌ 群 ID 至少写末 ${MIN_CHAT_ID_SUFFIX} 位，或者写全 ID。`
+      : `❌ 响应群名单里没有 ID 为 \`${needle}\` 或以它结尾的群。发 \`/config\` 在群管理面板里核对。`,
+  );
+}
+
 // ────────────── /config — preferences form ──────────────
 
 async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
@@ -2820,10 +3491,17 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
     runIdleTimeoutMinutes: ms ? Math.round(ms / 60_000) : 0,
     requireMentionInGroup: getRequireMentionInGroup(ctx.controls.cfg),
     larkCliIdentity: ctx.controls.profileConfig.larkCli.identityPreset,
+    approvalsEnabled: ctx.controls.profileConfig.approvals.enabled,
+    smartSession: getSmartSession(ctx.controls.cfg) !== undefined,
+    autoWorktreeCleanup: getWorktreeCleanupIdleDays(ctx.controls.cfg) !== undefined,
+    dream: getDream(ctx.controls.cfg) !== undefined,
+    dreamAuto: ctx.controls.cfg.preferences?.dreamAuto === true,
     allowedUsers: access.allowedUsers,
     allowedChats: access.allowedChats,
     admins: access.admins,
     knownChats: ctx.controls.knownChats ?? [],
+    chatRequireMention: access.chatRequireMention ?? {},
+    chatAllowedUsers: access.chatAllowedUsers ?? {},
     ...(consoleUrl ? { consoleUrl } : {}),
   });
   if (ctx.fromCardAction) await recallMessage(ctx, ctx.msg.messageId);
@@ -2936,6 +3614,22 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     rawMode === 'team' || rawMode === 'personal'
       ? rawMode
       : ctx.controls.profileConfig.mode;
+  // Non-admin approvals switch. Empty / unexpected keeps current.
+  const rawApprovals = String(fv.approvals_enabled ?? '').trim();
+  const approvalsEnabled =
+    rawApprovals === 'on' ? true : rawApprovals === 'off' ? false : ctx.controls.profileConfig.approvals.enabled;
+  // 会话智能压缩 switch. Empty / unexpected keeps current.
+  const rawSmartSession = String(fv.smart_session ?? '').trim();
+  const smartSession =
+    rawSmartSession === 'on' ? true : rawSmartSession === 'off' ? false : getSmartSession(ctx.controls.cfg) !== undefined;
+  const rawCleanup = String(fv.auto_worktree_cleanup ?? '').trim();
+  const autoWorktreeCleanup = rawCleanup === 'on' ? true : rawCleanup === 'off' ? false : getWorktreeCleanupIdleDays(ctx.controls.cfg) !== undefined;
+  // 梦境整理 switch. Empty / unexpected keeps current.
+  const rawDream = String(fv.dream ?? '').trim();
+  const dream = rawDream === 'on' ? true : rawDream === 'off' ? false : getDream(ctx.controls.cfg) !== undefined;
+  const rawDreamAuto = String(fv.dream_auto ?? '').trim();
+  const dreamAuto =
+    rawDreamAuto === 'on' ? true : rawDreamAuto === 'off' ? false : ctx.controls.cfg.preferences?.dreamAuto === true;
   const rawLarkCliIdentity = String(fv.lark_cli_identity ?? '').trim();
   const larkCliIdentity =
     rawLarkCliIdentity === 'user-default' || rawLarkCliIdentity === 'bot-only'
@@ -2981,6 +3675,10 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       maxConcurrentRuns,
       runIdleTimeoutMinutes,
       requireMentionInGroup,
+      smartSession,
+      autoWorktreeCleanup,
+      dream,
+      dreamAuto,
     };
 
     let failureStep = 'config.save';
@@ -2995,7 +3693,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         larkCliPolicyApplied = true;
         failureStep = 'config.save';
       }
-      await savePreferencesConfig(ctx, nextPreferences, requireMentionInGroup, larkCliIdentity, mode);
+      await savePreferencesConfig(ctx, nextPreferences, requireMentionInGroup, larkCliIdentity, mode, approvalsEnabled);
     } catch (err) {
       let rollbackFailed = false;
       if (larkCliIdentityChanged) {
@@ -3029,6 +3727,11 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       runIdleTimeoutMinutes,
       requireMentionInGroup,
       larkCliIdentity,
+      approvalsEnabled,
+      smartSession,
+      autoWorktreeCleanup,
+      dream,
+      dreamAuto,
       allowedUsersCount: access.allowedUsers.length,
       allowedChatsCount: access.allowedChats.length,
       adminsCount: access.admins.length,
@@ -3049,6 +3752,11 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         runIdleTimeoutMinutes,
         requireMentionInGroup,
         larkCliIdentity,
+        approvalsEnabled,
+        smartSession,
+        autoWorktreeCleanup,
+        dream,
+        dreamAuto,
         allowedUsers: access.allowedUsers,
         allowedChats: access.allowedChats,
         admins: access.admins,
@@ -3158,6 +3866,7 @@ async function savePreferencesConfig(
   requireMentionInGroup: boolean,
   larkCliIdentity: ProfileConfig['larkCli']['identityPreset'],
   mode: ProfileMode,
+  approvalsEnabled: boolean,
 ): Promise<void> {
   return configOps.savePreferencesConfig(
     ctx.controls,
@@ -3165,6 +3874,7 @@ async function savePreferencesConfig(
     requireMentionInGroup,
     larkCliIdentity,
     mode,
+    { approvalsEnabled },
   );
 }
 

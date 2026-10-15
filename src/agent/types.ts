@@ -46,6 +46,11 @@ export type AgentEvent =
       at: number;
     }
   | {
+      /**
+       * One turn's consumption. `inputTokens` is the whole prompt, the cached
+       * part (`cachedInputTokens`) included; `costUsd` is this turn's share
+       * (an estimate on subscription logins).
+       */
       type: 'usage';
       inputTokens?: number;
       outputTokens?: number;
@@ -59,9 +64,35 @@ export type AgentEvent =
       threadId?: string;
       terminationReason: 'normal' | 'interrupted' | 'timeout';
     }
-  | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout' };
+  | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout' }
+  /**
+   * How many background tasks (backgrounded shell commands, background
+   * sub-agents, monitors) the agent process currently has running. While it
+   * is above zero after a `done`, the process is still working and will run
+   * further turns on its own as those tasks report back.
+   */
+  | { type: 'background'; count: number };
 
 export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermissions';
+
+/**
+ * Present on runs driven by someone who is not an admin: every
+ * side-effecting step must be approved first. Each adapter wires it the way
+ * its CLI allows — a PreToolUse hook command (Claude) or answering the CLI's
+ * own approval requests (Codex app-server).
+ */
+export interface RunApprovals {
+  hookCommand?: string;
+  /** How long a hook may block waiting for a decision. */
+  hookTimeoutSec?: number;
+  decide(request: {
+    tool: string;
+    summary: string;
+    readOnly?: boolean;
+    /** The shell command, when the step runs one (checked against the profile's allowlist). */
+    command?: string;
+  }): Promise<{ decision: 'allow' | 'deny'; reason: string }>;
+}
 
 export interface AgentRunOptions {
   runId: string;
@@ -90,6 +121,13 @@ export interface AgentRunOptions {
   /** Set when someone other than the bot owner started the run: what it may
    * not touch. Adapters that can't enforce it ignore it. */
   guard?: RunGuard;
+  approvals?: RunApprovals;
+  /**
+   * 会话智能压缩: auto-compact the conversation against a context window of
+   * this many tokens instead of the model's full window, so long sessions get
+   * summarised well before they reach it. Adapters without the knob ignore it.
+   */
+  compactWindowTokens?: number;
 }
 
 export interface AgentRun {
@@ -120,6 +158,19 @@ export interface AgentRun {
    * input omit it.
    */
   inject?(prompt: string, preview: string): boolean;
+  /**
+   * Hand the still-running process another user message, as the next turn.
+   * Only offered by adapters whose CLI accepts streamed input; returns false
+   * once the process no longer takes input (it closed stdin after a turn with
+   * no background tasks left, or exited), in which case the caller spawns a
+   * fresh run instead.
+   */
+  send?(prompt: string): boolean;
+  /**
+   * No more turns are coming: close the process's input so it exits on its
+   * own. Offered by adapters whose processes otherwise stay up between turns.
+   */
+  endInput?(): void;
 }
 
 /**

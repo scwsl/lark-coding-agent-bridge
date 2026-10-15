@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -13,6 +13,16 @@ interface FakeBinary {
 }
 
 describe('CodexAdapter process contract', () => {
+  it.each([undefined, 'thread-old'])('forwards compaction to exec fallback (%s)', async (threadId) => {
+    const fake = await createFakeCodex({ lines: [{ type: 'turn.completed' }] });
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+    const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, transport: 'exec' }).run({
+      runId: 'compact-exec', prompt: 'hello', cwd, threadId, compactWindowTokens: 300000,
+    });
+    await collect(run.events);
+    expect((await readRecord(fake.recordPath)).argv).toContain('model_auto_compact_token_limit=300000');
+  });
   const cleanup: string[] = [];
   const oldCodexHome = process.env.CODEX_HOME;
   const oldAppSecret = process.env.APP_SECRET;
@@ -434,6 +444,63 @@ describe('CodexAdapter process contract', () => {
       value: { type: 'done', threadId: 'thread-stop', terminationReason: 'interrupted' },
     });
     await iterator.return?.();
+  });
+
+  it("reports a resumed run's own token usage, not the thread's running total", async () => {
+    const fake = await createFakeCodex({
+      lines: [
+        { type: 'thread.started', thread_id: 'thread-u' },
+        {
+          type: 'turn.completed',
+          usage: { input_tokens: 50_880, cached_input_tokens: 43_264, output_tokens: 17, reasoning_output_tokens: 3 },
+        },
+      ],
+    });
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+    const codexHome = join(fake.dir, 'codex-home');
+    // The rollout as Codex leaves it after two earlier turns.
+    const day = join(codexHome, 'sessions', '2026', '10', '01');
+    await mkdir(day, { recursive: true });
+    const tokenCount = (input: number, cached: number, output: number) =>
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output, reasoning_output_tokens: 1 } },
+        },
+      });
+    await writeFile(
+      join(day, 'rollout-2026-10-01T11-16-58-thread-u.jsonl'),
+      [tokenCount(16_942, 11_008, 5), tokenCount(33_902, 27_136, 12), ''].join('\n'),
+    );
+
+    // The exec transport is the one that reports thread-cumulative usage.
+    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome, transport: 'exec' });
+    const opts = { runId: 'run-usage', prompt: 'three', cwd, threadId: 'thread-u' };
+    await adapter.prepareRun(opts);
+    const usage = (await collect(adapter.run(opts).events)).find((e) => e.type === 'usage');
+
+    expect(usage).toEqual({
+      type: 'usage',
+      inputTokens: 16_978,
+      cachedInputTokens: 16_128,
+      outputTokens: 5,
+      reasoningOutputTokens: 2,
+    });
+  });
+
+  it('keeps a fresh thread\'s usage as reported', async () => {
+    const fake = await createFakeCodex({
+      lines: [{ type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 10, output_tokens: 7 } }],
+    });
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: join(fake.dir, 'none'), transport: 'exec' });
+    const opts = { runId: 'run-fresh-usage', prompt: 'one', cwd };
+    await adapter.prepareRun(opts);
+    const usage = (await collect(adapter.run(opts).events)).find((e) => e.type === 'usage');
+    expect(usage).toMatchObject({ inputTokens: 100, cachedInputTokens: 10, outputTokens: 7 });
   });
 
   it('requires cwd to be resolved by policy before spawning', () => {

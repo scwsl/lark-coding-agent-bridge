@@ -14,10 +14,19 @@ export interface BuildCodexArgsInput {
    * config default. Callers fit it to the model first (`clampCodexEffort`).
    */
   effort?: string;
+  /** Native token threshold for smart-session auto-compaction. */
+  compactWindowTokens?: number;
 }
 
 /** Levels `model_reasoning_effort` may carry; anything else is dropped, never quoted into argv. */
 const CODEX_REASONING_EFFORT = /^[a-z]+$/;
+
+/** CLI override shared by exec and app-server; omission preserves native defaults. */
+export function codexCompactionArgs(tokens: number | undefined): string[] {
+  return tokens !== undefined && Number.isSafeInteger(tokens) && tokens > 0
+    ? ['-c', `model_auto_compact_token_limit=${tokens}`]
+    : [];
+}
 
 export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
   if (
@@ -37,6 +46,7 @@ export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
       : []),
     '-c',
     'approval_policy="never"',
+    ...codexCompactionArgs(input.compactWindowTokens),
     '-c',
     'shell_environment_policy.inherit="all"',
     ...(input.ignoreUserConfig === true ? ['--ignore-user-config'] : []),

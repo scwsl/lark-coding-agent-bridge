@@ -8,6 +8,9 @@ import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/con
 import { createRootConfig, loadRootConfig, saveRootConfig } from '../../../src/config/profile-store.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
+import { UsageLedger } from '../../../src/runtime/usage-ledger.js';
+import { ApprovalBroker } from '../../../src/runtime/approvals.js';
+import { AuditLog } from '../../../src/runtime/audit-log.js';
 import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
@@ -121,6 +124,17 @@ describe('Bridge command contracts', () => {
 
     await expect(h.run('/ws save mine', { senderId: 'ou-not-admin' })).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+  });
+
+  it('lets anyone start a new session with /new or /reset', async () => {
+    const h = await createHarness();
+
+    for (const cmd of ['/new', '/reset']) {
+      h.sessions.set('chat-1', 'shared-session', h.tmp.workspace);
+      await expect(h.run(cmd, { senderId: 'ou-not-admin' })).resolves.toBe(true);
+      expect(lastMarkdown(h.channel)).toBe('已开始新会话。');
+      expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+    }
   });
 
   it('does not expose authorization root management commands', async () => {
@@ -246,6 +260,89 @@ describe('Bridge command contracts', () => {
     const status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain(jsonStringFragment(await realpath(h.tmp.workspace)));
     expect(status).toContain('chat-1');
+  });
+
+  it('/usage shows each person only their own numbers unless an admin asks in private', async () => {
+    const h = await createHarness();
+    const ledger = new UsageLedger(join(h.tmp.profile, 'usage.json'));
+    ledger.record({
+      actorId: 'ou-admin',
+      actorName: 'Boss',
+      source: 'im',
+      scopeId: 'chat-1',
+      usage: { type: 'usage', inputTokens: 2000, cachedInputTokens: 1500, outputTokens: 100, costUsd: 1.5 },
+    });
+    ledger.record({
+      actorId: 'ou-other',
+      actorName: 'Colleague',
+      source: 'im',
+      scopeId: 'chat-2',
+      usage: { type: 'usage', inputTokens: 500, outputTokens: 20, costUsd: 0.4 },
+    });
+    (h.controls as Controls).usage = ledger;
+    cleanups.push(() => ledger.flush());
+
+    // Bare `/usage` is the plan quota; a period asks for the consumption ledger.
+    await expect(h.run('/usage today')).resolves.toBe(true);
+    const adminView = lastMarkdown(h.channel);
+    expect(adminView).toContain('2 人');
+    expect(adminView).toContain('Colleague');
+    expect(adminView).toContain('估算 $1.90');
+
+    await h.run('/usage today', { senderId: 'ou-other' });
+    const ownView = lastMarkdown(h.channel);
+    expect(ownView).toContain('你：1 轮');
+    expect(ownView).not.toContain('Boss');
+
+    await h.run('/usage week', { chatMode: 'group' });
+    const groupView = lastMarkdown(h.channel);
+    expect(groupView).not.toContain('Colleague');
+    expect(groupView).toContain('私聊');
+
+    await h.run('/usage yesterday');
+    expect(lastMarkdown(h.channel)).toContain('用法');
+  });
+
+  it('approval buttons: only an admin can allow; the requester can cancel', async () => {
+    const h = await createHarness();
+    const pending: string[] = [];
+    const broker = new ApprovalBroker({
+      notifier: { announce: async (p) => void pending.push(p.id), settled: async () => {} },
+    });
+    (h.controls as Controls).approvals = broker;
+    const gate = broker.openGate({ actor: { id: 'ou-other' }, source: 'im', scopeId: 'chat-2', agent: 'claude' });
+    const answer = gate.decide({ tool: 'Bash', summary: 'make deploy' });
+    for (let i = 0; i < 50 && pending.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+
+    await h.run(`/approval allow ${pending[0]}`, { senderId: 'ou-other' });
+    expect(lastMarkdown(h.channel)).toContain('只有管理员可以允许');
+    await h.run(`/approval allow ${pending[0]}`);
+    await expect(answer).resolves.toMatchObject({ decision: 'allow' });
+    await h.run(`/approval deny ${pending[0]}`);
+    expect(lastMarkdown(h.channel)).toContain('已经处理过或已过期');
+  });
+
+  it('/audit lists who had the bot do what, for admins in private only', async () => {
+    const h = await createHarness();
+    const audit = new AuditLog(join(h.tmp.profile, 'audit.jsonl'));
+    audit.append({ kind: 'tool', actorId: 'ou-other', actorName: 'Colleague', source: 'im', scopeId: 'chat-2', tool: 'Bash', summary: 'npm test', gated: true });
+    audit.append({ kind: 'approval', event: 'requested', actorId: 'ou-other', source: 'im', scopeId: 'chat-2', tool: 'Bash', summary: 'rm -rf dist' });
+    audit.append({ kind: 'approval', event: 'denied', actorId: 'ou-other', actorName: 'Colleague', source: 'im', scopeId: 'chat-2', tool: 'Bash', summary: 'rm -rf dist', decidedBy: 'ou-admin' });
+    await audit.flush();
+    (h.controls as Controls).audit = audit;
+
+    await h.run('/audit');
+    const listing = lastMarkdown(h.channel);
+    expect(listing).toContain('最近 2 条操作记录');
+    expect(listing).toContain('Colleague');
+    expect(listing).toContain('rm -rf dist');
+    expect(listing).toContain('已拒绝');
+    expect(listing).not.toContain('requested');
+
+    await h.run('/audit', { chatMode: 'group' });
+    expect(lastMarkdown(h.channel)).toContain('私聊');
+    await h.run('/audit', { senderId: 'ou-other' });
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
   });
 
   it('rejects admin-only commands for non owner/admin users', async () => {
@@ -383,6 +480,58 @@ describe('Bridge command contracts', () => {
     expect(root?.profiles.claude?.access.chatAllowedUsers?.['oc-group-cleanup']).toBeUndefined();
   });
 
+  it('removes an allowlisted chat by id or id suffix from p2p', async () => {
+    const h = await createHarness();
+    await saveAccess(h, {
+      allowedChats: ['oc_aaaa1111bbbb', 'oc_cccc2222dddd'],
+      chatAllowedUsers: { oc_aaaa1111bbbb: ['ou-alice'] },
+      chatRequireMention: { oc_aaaa1111bbbb: false },
+    });
+
+    await expect(h.run('/remove group')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('/remove group <群 ID>');
+
+    await expect(h.run('/remove group 11bbbb')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已把');
+    let access = (await loadRootConfig(h.controls.configPath))?.profiles.claude?.access;
+    expect(access?.allowedChats).toEqual(['oc_cccc2222dddd']);
+    expect(access?.chatAllowedUsers?.['oc_aaaa1111bbbb']).toBeUndefined();
+    expect(access?.chatRequireMention?.['oc_aaaa1111bbbb']).toBeUndefined();
+
+    await expect(h.run('/remove group oc_cccc2222dddd')).resolves.toBe(true);
+    access = (await loadRootConfig(h.controls.configPath))?.profiles.claude?.access;
+    expect(access?.allowedChats).toEqual([]);
+  });
+
+  it('refuses ambiguous, too-short, or unknown chat id suffixes', async () => {
+    const h = await createHarness();
+    await saveAccess(h, { allowedChats: ['oc_one0000beef', 'oc_two1111beef'] });
+
+    await expect(h.run('/remove group beef')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('有 2 个群');
+
+    await expect(h.run('/remove group eef')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('至少写末 4 位');
+
+    await expect(h.run('/remove group 9999')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('没有');
+
+    const access = (await loadRootConfig(h.controls.configPath))?.profiles.claude?.access;
+    expect(access?.allowedChats).toEqual(['oc_one0000beef', 'oc_two1111beef']);
+  });
+
+  it('removes another chat by id from inside a group without touching the current one', async () => {
+    const h = await createHarness();
+    await saveAccess(h, { allowedChats: ['oc_here000000', 'oc_gone123456'] });
+
+    await expect(
+      h.run('/remove group 123456', { chatId: 'oc_here000000', scope: 'oc_here000000', chatMode: 'group' }),
+    ).resolves.toBe(true);
+
+    const access = (await loadRootConfig(h.controls.configPath))?.profiles.claude?.access;
+    expect(access?.allowedChats).toEqual(['oc_here000000']);
+  });
+
   it('adds every known bot group through /invite all group', async () => {
     const h = await createHarness();
     h.controls.knownChats = [
@@ -450,6 +599,13 @@ async function createHarness(): Promise<Harness> {
   });
 
   return { tmp, channel, sessions, workspaces, activeRuns, agent, controls, run };
+}
+
+async function saveAccess(h: Harness, patch: Partial<ProfileConfig['access']>): Promise<void> {
+  const root = await loadRootConfig(h.controls.configPath);
+  const profile = root!.profiles.claude!;
+  root!.profiles.claude = { ...profile, access: { ...profile.access, ...patch } };
+  await saveRootConfig(root!, h.controls.configPath);
 }
 
 function appConfig(defaultWorkspace: string): ProfileConfig {

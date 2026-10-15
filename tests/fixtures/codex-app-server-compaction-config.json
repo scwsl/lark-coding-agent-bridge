@@ -1,0 +1,27 @@
+{
+  "capturedAt": "2026-10-12",
+  "version": "codex-cli 0.161.0",
+  "argv": [
+    "app-server",
+    "--listen",
+    "stdio://",
+    "-c",
+    "model_auto_compact_token_limit=300000"
+  ],
+  "request": {
+    "id": 2,
+    "method": "config/read",
+    "params": {
+      "includeLayers": false
+    }
+  },
+  "response": {
+    "id": 2,
+    "result": {
+      "config": {
+        "model_auto_compact_token_limit": 300000
+      }
+    }
+  },
+  "note": "Real local app-server capture after initialize/initialized. Only the relevant config field retained; account/path/other settings removed."
+}

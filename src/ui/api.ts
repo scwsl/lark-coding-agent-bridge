@@ -26,12 +26,15 @@ import {
 import {
   EFFORT_LEVEL_LABELS,
   getCotMessages,
+  getDream,
   getEffort,
   getMaxConcurrentRuns,
   getMessageReplyMode,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  getSmartSession,
+  getWorktreeCleanupIdleDays,
   type AppPreferences,
   type CotMessagesMode,
   type EffortLevel,
@@ -45,6 +48,7 @@ import {
   type ProfileMode,
 } from '../config/profile-schema';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedEfforts, supportedModels } from '../agent/models';
+import { agentDescriptor } from '../agent/registry';
 import { log } from '../core/logger';
 import { HttpError } from './http';
 import type { UiRuntime } from './types';
@@ -63,8 +67,16 @@ export interface ConfigView {
   effort: string;
   /** The profile agent's own levels (Codex adds `ultra`). */
   effortOptions: { value: string; label: string }[];
+  /** What "跟随默认" means for this agent's CLI, shown under the effort picker. */
+  effortHint: string;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
+  smartSession: boolean;
+  autoWorktreeCleanup: boolean;
+  /** 梦境整理 switch (manual runs; see the dream panel). */
+  dream: boolean;
+  /** 自动整理 on top of {@link dream}. */
+  dreamAuto: boolean;
   cotMessages: CotMessagesMode;
   maxConcurrentRuns: number;
   runIdleTimeoutMinutes: number;
@@ -97,8 +109,13 @@ export function buildConfigView(state: MutableProfileState, live = false): Confi
       value: level,
       label: EFFORT_LEVEL_LABELS[level],
     })),
+    effortHint: agentDescriptor(agentKind).effortDefaultHint,
     messageReply: getMessageReplyMode(state.cfg),
     showToolCalls: getShowToolCalls(state.cfg),
+    smartSession: Boolean(getSmartSession(state.cfg)),
+    autoWorktreeCleanup: getWorktreeCleanupIdleDays(state.cfg) !== undefined,
+    dream: getDream(state.cfg) !== undefined,
+    dreamAuto: state.cfg.preferences?.dreamAuto === true,
     cotMessages: getCotMessages(state.cfg),
     maxConcurrentRuns: getMaxConcurrentRuns(state.cfg),
     runIdleTimeoutMinutes: ms ? Math.round(ms / 60_000) : 0,
@@ -251,6 +268,11 @@ function parseConfigBody(state: MutableProfileState, body: unknown): ParsedConfi
       : getMessageReplyMode(state.cfg);
   const showToolCalls =
     typeof fv.showToolCalls === 'boolean' ? fv.showToolCalls : getShowToolCalls(state.cfg);
+  const smartSession =
+    typeof fv.smartSession === 'boolean' ? fv.smartSession : Boolean(getSmartSession(state.cfg));
+  const autoWorktreeCleanup = typeof fv.autoWorktreeCleanup === 'boolean' ? fv.autoWorktreeCleanup : getWorktreeCleanupIdleDays(state.cfg) !== undefined;
+  const dream = typeof fv.dream === 'boolean' ? fv.dream : getDream(state.cfg) !== undefined;
+  const dreamAuto = typeof fv.dreamAuto === 'boolean' ? fv.dreamAuto : state.cfg.preferences?.dreamAuto === true;
   const cotMessages: CotMessagesMode =
     fv.cotMessages === 'brief' || fv.cotMessages === 'detailed' || fv.cotMessages === 'off'
       ? fv.cotMessages
@@ -296,6 +318,10 @@ function parseConfigBody(state: MutableProfileState, body: unknown): ParsedConfi
       messageReply,
       messageReplyMigrated: true,
       showToolCalls,
+      smartSession,
+      autoWorktreeCleanup,
+      dream,
+      dreamAuto,
       cotMessages,
       maxConcurrentRuns,
       runIdleTimeoutMinutes,
@@ -323,7 +349,7 @@ export async function applyConfig(rt: UiRuntime, body: unknown): Promise<ConfigV
       p.requireMentionInGroup,
       p.larkCliIdentity,
       p.mode,
-      p.meeting,
+      { meeting: p.meeting },
     );
   } catch (err) {
     if (identityApplied) {
@@ -357,7 +383,7 @@ export async function applyConfigToDisk(
       p.requireMentionInGroup,
       p.larkCliIdentity,
       p.mode,
-      p.meeting,
+      { meeting: p.meeting },
     );
   } catch (err) {
     throw new ApiError(500, `保存失败：${err instanceof Error ? err.message : String(err)}`);

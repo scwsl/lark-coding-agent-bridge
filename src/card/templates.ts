@@ -1,3 +1,5 @@
+import { humanIdle, humanTokens, type RotationReason } from '../session/smart-session';
+
 interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
@@ -81,6 +83,13 @@ export interface StatusInfo {
   sessionId?: string;
   emptySessionText?: string;
   sessionStale: boolean;
+  /** Size and age of the conversation the next message would resume. */
+  context?: {
+    tokens?: number;
+    idleMinutes?: number;
+    /** Set when 会话智能压缩 will start the next message in a fresh conversation. */
+    rotateReason?: RotationReason;
+  };
   agentName: string;
   runtimeAccess: {
     label: string;
@@ -96,6 +105,8 @@ export interface StatusInfo {
   activeRunDetail?: string;
   /** A quota-paused task waiting to resume in this scope. */
   autoResume?: string;
+  /** The scope's process is still running background tasks after its last turn. */
+  backgroundRun?: boolean;
   activeScopes?: string[];
   activeCommentScopes?: string[];
   queue?: { active: number; waiting: number; cap: number };
@@ -104,6 +115,20 @@ export interface StatusInfo {
   scope: string;
   /** Chat mode — used to label scope. */
   chatMode: 'p2p' | 'group' | 'topic';
+}
+
+const ROTATE_REASON_TEXT: Record<RotationReason, string> = {
+  'agent-done': '上一件事已完成',
+  'idle-long': '空闲太久',
+  'idle-large': '缓存已过期且上下文偏大',
+};
+
+function contextLine(context: NonNullable<StatusInfo['context']>): string {
+  const parts: string[] = [];
+  if (context.tokens !== undefined) parts.push(`约 ${humanTokens(context.tokens)} token`);
+  if (context.idleMinutes !== undefined) parts.push(`上次对话 ${humanIdle(context.idleMinutes)}前`);
+  if (context.rotateReason) parts.push(`下一条消息会自动开新会话（${ROTATE_REASON_TEXT[context.rotateReason]}）`);
+  return parts.join(' · ');
 }
 
 export function statusCard(info: StatusInfo): object {
@@ -127,11 +152,13 @@ export function statusCard(info: StatusInfo): object {
     ...(info.git ? [`🌿 **git**: ${info.git}`] : []),
     ...(info.knowledge ? [`📚 **knowledge**: ${info.knowledge}`] : []),
     `🔗 **session**: ${sessionLine}`,
+    ...(info.context ? [`🧠 **context**: ${contextLine(info.context)}`] : []),
     `🤖 **agent**: ${escapeMd(info.agentName)}`,
     `🛡 **${escapeMd(info.runtimeAccess.label)}**: ${escapeMd(info.runtimeAccess.value)}`,
     ...(info.larkCliStatus ? [`🔐 **lark-cli**: ${info.larkCliStatus}`] : []),
     `🏃 **active run**: ${info.activeRun ? (info.activeRunDetail ? escapeMd(info.activeRunDetail) : 'yes') : 'no'}`,
     ...(info.autoResume ? [`⏸ **auto resume**: ${escapeMd(info.autoResume)}`] : []),
+    ...(info.backgroundRun ? ['🧵 **background tasks**: running（`/stop` 可停止）'] : []),
     ...(info.activeScopes && info.activeScopes.length > 0
       ? [
           `🏃 **active scopes**: ${info.activeScopes.map((scope) => `\`${escapeCode(scope)}\``).join(', ')}`,
@@ -288,7 +315,9 @@ export function helpCard(agentName = 'Agent'): object {
         helpSection('violet-50', '🧠 记忆与 skills', [
           '`/memory [add|forget|clear]` — 跨会话记忆，`--global` 写到全局',
           '`/skills [show <名字>]` — skill 索引，agent 按需读取正文',
-          '`/knowledge [bind|sync]` — 记忆与 skill 的 git 同步',
+          '`/skills lib [add|sync|rm]` — 共享 skill 库（git 仓库，管理员）',
+          '`/knowledge [bind|sync]` — 记忆与 skill 的 git 同步，绑定后定时自动同步',
+          '`/dream [run|cancel|prs|diff|revert]` — 梦境整理：把已结束的会话整理成待审核的 Draft PR，可撤销已合并的批次（管理员私聊）',
         ]),
         helpSection('green-50', '🧪 联调', [
           '`/joint-debug <单号>` — 把 JIRA 单合入 devops、触发 Jenkins 部署到联调环境（8.221）并走 web 冒烟，如 `/joint-debug ANTELOPE-6747`',
@@ -305,6 +334,8 @@ export function helpCard(agentName = 'Agent'): object {
           '`/ps` · `/exit <id|#>` — 列出 / 关掉本机的 bot',
           '`/reconnect` — 强制重连（网络抖动后没反应时用）',
           `\`/doctor [描述]\` — 把日志交给 ${escapedAgentName} 自助诊断`,
+          '`/usage [today|week|month]` — 用量统计；管理员私聊可看所有人',
+          '`/audit [N]` — 最近谁让 bot 执行了什么、审批结果（管理员私聊）',
         ]),
         { tag: 'hr' },
         helpButtonRow([
@@ -579,28 +610,116 @@ export function memoryCard(view: MemoryCardView): object {
 export interface SkillView {
   name: string;
   description: string;
+  /** Shared library the skill comes from; absent for the profile's own. */
+  source?: string;
 }
+
+/** Card descriptions are a glance, not the full trigger text the agent gets. */
+const SKILL_CARD_DESCRIPTION_CHARS = 120;
 
 export function skillsCard(skills: SkillView[], dir: string): object {
   const elements: object[] = [];
   if (skills.length === 0) {
     elements.push(divMd('还没有 skill。'));
     elements.push(
-      divMd(`在 \`${escapeCode(dir)}\` 下新建 \`<名字>/SKILL.md\` 就行，或者用 \`/knowledge bind <仓库地址>\` 从现成的仓库同步一份。`),
+      divMd(
+        `在 \`${escapeCode(dir)}\` 下新建 \`<名字>/SKILL.md\` 就行，或者用 \`/knowledge bind <仓库地址>\` 从现成的仓库同步一份；` +
+          '共享的 skill 库用 `/skills lib add <git 地址>` 加载。',
+      ),
     );
     return shell('\u{1f9f0} Skills', elements);
   }
 
   elements.push(divMd(`共 **${skills.length}** 个，agent 会按需读取正文。`));
-  elements.push(HR);
+  // The profile's own skills first, then one group per library in index order.
+  const groups = new Map<string, SkillView[]>();
   for (const skill of skills) {
+    const key = skill.source ?? '';
+    groups.set(key, [...(groups.get(key) ?? []), skill]);
+  }
+  for (const [source, members] of groups) {
+    elements.push(HR);
     elements.push(
-      divMd(
-        `**${escapeMd(skill.name)}**${skill.description ? `\n<font color='grey'>${escapeMd(skill.description)}</font>` : ''}`,
-      ),
+      divMd(source ? `📚 **skill 库 \`${escapeCode(source)}\`**（${members.length}）` : `📁 **本 profile**（${members.length}）`),
     );
+    for (const skill of members) {
+      const description =
+        skill.description.length > SKILL_CARD_DESCRIPTION_CHARS
+          ? `${skill.description.slice(0, SKILL_CARD_DESCRIPTION_CHARS - 1)}…`
+          : skill.description;
+      elements.push(
+        divMd(`**${escapeMd(skill.name)}**${description ? `\n<font color='grey'>${escapeMd(description)}</font>` : ''}`),
+      );
+    }
   }
   return shell('\u{1f9f0} Skills', elements);
+}
+
+export interface SkillLibraryView {
+  name: string;
+  /** Display-safe: credentials already masked. */
+  url: string;
+  ref?: string;
+  path?: string;
+  include?: string[];
+  exclude?: string[];
+  present: boolean;
+  commit?: string;
+  /** e.g. "3h 前" — preformatted by the caller. */
+  commitAgo?: string;
+  lastSyncAgo?: string;
+  lastError?: string;
+  skills: string[];
+  /** Skills of this library hidden by an earlier one with the same name. */
+  shadowed: string[];
+}
+
+export function skillLibrariesCard(libraries: SkillLibraryView[], syncIntervalMinutes: number): object {
+  const elements: object[] = [];
+  if (libraries.length === 0) {
+    elements.push(divMd('还没有配置 skill 库。'));
+  }
+  for (const library of libraries) {
+    if (elements.length > 0) elements.push(HR);
+    const lines = [`📚 **${escapeMd(library.name)}**`, `🔗 \`${escapeCode(library.url)}\``];
+    const scope = [
+      library.ref ? `ref \`${escapeCode(library.ref)}\`` : '默认分支',
+      ...(library.path ? [`目录 \`${escapeCode(library.path)}\``] : []),
+      ...(library.include ? [`只用 ${library.include.map((n) => `\`${escapeCode(n)}\``).join('、')}`] : []),
+      ...(library.exclude ? [`排除 ${library.exclude.map((n) => `\`${escapeCode(n)}\``).join('、')}`] : []),
+    ];
+    lines.push(`🌿 ${scope.join(' · ')}`);
+    if (library.present) {
+      lines.push(
+        `📌 \`${escapeCode(library.commit ?? '?')}\`${library.commitAgo ? `（提交于 ${library.commitAgo}）` : ''}` +
+          (library.lastSyncAgo ? ` · 上次同步 ${library.lastSyncAgo}` : ''),
+      );
+    } else {
+      lines.push("📌 <font color='grey'>还没有拉取成功</font>");
+    }
+    if (library.lastError) lines.push(`<font color='red'>❌ 上次同步失败：${escapeMd(library.lastError)}</font>`);
+    const listed = library.skills.slice(0, 20).map((n) => `\`${escapeCode(n)}\``).join('、');
+    lines.push(
+      `🧰 skill ${library.skills.length} 个${library.skills.length > 0 ? `：${listed}${library.skills.length > 20 ? ' …' : ''}` : ''}`,
+    );
+    if (library.shadowed.length > 0) {
+      lines.push(
+        `<font color='grey'>同名已存在、未载入：${library.shadowed.map((n) => `\`${escapeCode(n)}\``).join('、')}</font>`,
+      );
+    }
+    elements.push(divMd(lines.join('\n')));
+  }
+  elements.push(HR);
+  elements.push(
+    divMd(
+      [
+        `<font color='grey'>${syncIntervalMinutes > 0 ? `每 ${syncIntervalMinutes} 分钟自动同步` : '已关闭定时同步'}，启动时也会同步一次。</font>`,
+        '`/skills lib add <git 地址> [名字] [--ref 分支] [--path 子目录] [--only a,b] [--exclude a,b]`',
+        '`/skills lib sync [名字]` · `/skills lib rm <名字>`',
+      ].join('\n'),
+    ),
+  );
+  return shell('\u{1f4da} Skill 库', elements);
 }
 
 export interface KnowledgeStatusView {
@@ -613,6 +732,21 @@ export interface KnowledgeStatusView {
   ahead?: number;
   behind?: number;
   dirty?: boolean;
+  /** Configured auto-sync interval; `0` = off. */
+  autoSyncMinutes?: number;
+  /** An automatic round is running right now. */
+  autoSyncing?: boolean;
+  /** Most recent sync this process ran or saw, automatic or `/knowledge sync`. */
+  lastSync?: {
+    /** e.g. "3m 前" — preformatted by the caller. */
+    ago: string;
+    auto: boolean;
+    ok: boolean;
+    /** Display-safe: credentials already masked. */
+    error?: string;
+    /** Failed automatic rounds in a row, when more than one. */
+    failures?: number;
+  };
 }
 
 export function knowledgeCard(view: KnowledgeStatusView): object {
@@ -626,6 +760,22 @@ export function knowledgeCard(view: KnowledgeStatusView): object {
       view.ahead !== undefined && view.behind !== undefined ? ` ↑${view.ahead} ↓${view.behind}` : '';
     lines.push(`🔗 **远端**：\`${escapeCode(view.remote)}\``);
     lines.push(`🌿 **分支**：\`${escapeCode(view.branch ?? '?')}\`${divergence}${view.dirty ? ' · 有未同步改动' : ''}`);
+    if (view.autoSyncMinutes !== undefined) {
+      lines.push(
+        view.autoSyncMinutes > 0
+          ? `🔄 **自动同步**：每 ${view.autoSyncMinutes} 分钟${view.autoSyncing ? ' · 正在同步' : ''}`
+          : "🔄 **自动同步**：<font color='grey'>已关闭，只在 `/knowledge sync` 时同步</font>",
+      );
+    }
+    const last = view.lastSync;
+    if (last) {
+      const how = last.auto ? '自动' : '手动';
+      lines.push(
+        last.ok
+          ? `🕒 **上次同步**：${last.ago}（${how}）✓`
+          : `<font color='red'>❌ 上次同步失败（${last.ago}，${how}${last.failures ? `，自动同步已连续失败 ${last.failures} 次` : ''}）：${escapeMd(last.error ?? '未知错误')}</font>`,
+      );
+    }
   } else {
     lines.push("🔗 **远端**：<font color='grey'>未绑定，用 `/knowledge bind <仓库地址>` 开启同步</font>");
   }

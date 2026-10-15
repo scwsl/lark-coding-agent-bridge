@@ -21,6 +21,11 @@ export interface RunRecord {
   threadId?: string;
   /** First line of the prompt, for a recognisable notice. */
   promptPreview: string;
+  /** Display metadata captured at intake; observers never need API credentials. */
+  chatType?: 'p2p' | 'group';
+  chatName?: string;
+  actorId?: string;
+  actorName?: string;
   startedAt: number;
   /** pid of the bridge daemon that owns this run. */
   ownerPid: number;
@@ -52,7 +57,9 @@ function isRunRecord(x: unknown): x is RunRecord {
     typeof r.originMessageId === 'string' &&
     typeof r.promptPreview === 'string' &&
     typeof r.startedAt === 'number' &&
-    typeof r.ownerPid === 'number'
+    typeof r.ownerPid === 'number' &&
+    (r.chatType === undefined || r.chatType === 'p2p' || r.chatType === 'group') &&
+    [r.chatName, r.actorId, r.actorName].every(value => value === undefined || typeof value === 'string')
   );
 }
 

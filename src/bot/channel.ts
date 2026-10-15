@@ -1,25 +1,28 @@
+import { protectedWorkspacePaths, startWorktreeCleanup } from '../git/worktree-cleanup';
 import type {
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
 } from '@larksuite/channel';
-import { createLarkChannel } from '@larksuite/channel';
+import { createLarkChannel, LarkChannelError } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { agentAccountName } from '../agent/account';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { agentCapability } from '../agent/capability';
 import {
   modelLabel,
   normalizeModelSelection,
   resolveEffortArg,
   resolveModelArg,
+  resolvedModelLabel,
 } from '../agent/models';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
   type BridgePromptKnowledge,
   type BridgePromptMention,
+  type BridgePromptChatContext,
+  type BridgePromptContextMessage,
   type BridgePromptQuotedMessage,
-  type BridgePromptTopicMessage,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
@@ -31,8 +34,10 @@ import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
 import {
+  finalizeIfRunning,
   initialState,
-  stripNoReply,
+  reduce,
+  stripControlMarkers,
   type RunLimit,
   type RunState,
   type Terminal,
@@ -45,8 +50,11 @@ import {
   getCotMessages,
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getLongRunNoticeMs,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  getSmartSession,
+  getWorktreeCleanupIdleDays,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
@@ -55,7 +63,7 @@ import {
   toPolicyAttachment,
   toPromptAttachment,
 } from '../media/attachment';
-import { canUseDm, canUseGroup, isCreator, requireMentionForChat } from '../policy/access';
+import { canRunAdminCommand, canUseDm, canUseGroup, isCreator, requireMentionForChat, runNeedsApproval } from '../policy/access';
 import { grantedToolsFor, isOwnerBatch, ownerOnlyGuard } from '../policy/owner-guard';
 import { paths } from '../config/paths';
 import { MeetingManager } from '../meeting/manager';
@@ -63,8 +71,19 @@ import type { VcRequestClient } from '../meeting/api';
 import { attachMeetingAgent, summarizeEndedMeeting } from '../meeting/orchestrator';
 import type { ScopeContext } from '../policy/run-policy';
 import { createOwnerRefreshController } from '../policy/owner';
-import { RunExecutor } from '../runtime/run-executor';
+import {
+  RunExecutor,
+  type BackgroundTurn,
+  type BackgroundTurnHandler,
+  type RunApprovalGates,
+} from '../runtime/run-executor';
+import { probeAgentSession } from '../agent/session-probe';
 import type { SessionCatalog } from '../session/catalog';
+import {
+  newSessionRequest,
+  rotationNotice,
+  SMART_SESSION_INSTRUCTION,
+} from '../session/smart-session';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
@@ -87,14 +106,25 @@ import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { reportInterruptedRuns } from './interrupted-notice';
 import { RunRegistry } from '../runtime/run-registry';
 import { buildKnowledgeContext } from '../knowledge/inject';
+import { getKnowledgeSyncIntervalMinutes, KnowledgeAutoSync } from '../knowledge/auto-sync';
+import { getSkillSyncIntervalMinutes, SkillLibraries } from '../knowledge/libraries';
 import { KnowledgeStore } from '../knowledge/store';
 import { Scheduler } from '../scheduler/scheduler';
+import { DreamService } from '../dream/service';
 import { JobStore } from '../scheduler/store';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
+import { PendingStore, type PendingRecord } from './pending-store';
+import { PendingRotationStore } from '../session/rotation-store';
+import { formatUsageLine, UsageLedger } from '../runtime/usage-ledger';
+import { ApprovalBroker, type GateContext } from '../runtime/approvals';
+import { ApprovalSocketServer } from '../runtime/approval-socket';
+import { AuditLog } from '../runtime/audit-log';
+import { createApprovalNotifier } from './approval-notifier';
 import { ProcessPool } from './process-pool';
-import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
+import { fetchQuotedContext, type QuotedContext } from './quote';
+import { ChatContextCursorStore, fetchChatContext, planChatContext } from './chat-context';
 import { lookupMessageThreadId } from './thread-id';
 import {
   addDoneReaction,
@@ -108,6 +138,7 @@ import {
   supplementPreview,
   supplementSignal,
 } from './supplement';
+import { planLongRunNotice, sendLongRunNotice, type LongRunRequester } from './long-run-notice';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
@@ -252,8 +283,12 @@ export interface StartChannelDeps {
     | 'runsFile'
     | 'knowledgeDir'
     | 'jobsFile'
-    | 'autoResumeFile'
-  >;
+    | 'pendingFile'
+    | 'usageFile'
+    | 'auditFile'
+    | 'profileDir'
+  > &
+    Partial<Pick<AppPaths, 'rotationsFile' | 'contextCursorsFile' | 'skillLibrariesDir' | 'userLockDir' | 'autoResumeFile'>>;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -263,6 +298,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // see which runs never finished. Absent only in tests that omit appPaths.
   const runs = deps.appPaths?.runsFile ? new RunRegistry(deps.appPaths.runsFile) : undefined;
   await runs?.load();
+  // Durable twin of the pending queue. Whatever the previous process left is
+  // taken now, before any new message can overwrite a scope's entry, and is
+  // re-queued or reported once the channel is up.
+  const pendingStore = deps.appPaths?.pendingFile ? new PendingStore(deps.appPaths.pendingFile) : undefined;
+  await pendingStore?.load();
+  const leftoverPending = pendingStore?.takeAll() ?? [];
+  // Who consumed how much of the owner's agent quota (/usage, card byline).
+  const usageLedger = deps.appPaths?.usageFile ? new UsageLedger(deps.appPaths.usageFile) : undefined;
+  await usageLedger?.load();
+  controls.usage = usageLedger;
   // Cross-session memory + skills. Absent only in tests that omit appPaths,
   // where every run simply gets no knowledge block.
   const knowledge = deps.appPaths?.knowledgeDir
@@ -275,6 +320,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     await knowledge.ensure().catch((err: unknown) =>
       log.warn('knowledge', 'ensure-failed', { err: String(err) }),
     );
+  }
+  // Shared skill libraries (`/skills lib`): read-only git mirrors merged into
+  // the skill index behind the profile's own skills, pulled on start-up and
+  // then periodically.
+  const skillLibraries = deps.appPaths?.skillLibrariesDir
+    ? new SkillLibraries({
+        dir: deps.appPaths.skillLibrariesDir,
+        libraries: () => controls.profileConfig.skills?.libraries ?? [],
+      })
+    : undefined;
+  if (skillLibraries) {
+    controls.skillLibraries = skillLibraries;
+    knowledge?.addSkillSource(skillLibraries);
+    skillLibraries.startAutoSync(() => getSkillSyncIntervalMinutes(controls.profileConfig.skills));
   }
   // Scheduled jobs (`/cron`). Absent only in tests that omit appPaths — the
   // bridge then simply has no scheduler, and `/cron` says so.
@@ -294,7 +353,56 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
-  const executor = new RunExecutor({ agent, pool, activeRuns });
+  // Who had the bot do what (/audit), and approvals for runs non-admins drive.
+  const auditLog = deps.appPaths?.auditFile ? new AuditLog(deps.appPaths.auditFile) : undefined;
+  await auditLog?.load().catch((err: unknown) => log.warn('audit', 'load-failed', { err: String(err) }));
+  controls.audit = auditLog;
+  let channelRef: LarkChannel | undefined;
+  const approvalBroker: ApprovalBroker = new ApprovalBroker({
+    notifier: createApprovalNotifier({
+      channel: () => {
+        if (!channelRef) throw new Error('channel not ready');
+        return channelRef;
+      },
+      controls,
+      timeoutMinutes: () => approvalBroker.timeoutMinutes,
+    }),
+    ...(auditLog ? { audit: auditLog } : {}),
+    allowlist: () => controls.profileConfig.approvals,
+  });
+  controls.approvals = approvalBroker;
+  // Claude's approval hook calls back over this socket. Without it, gated
+  // Claude runs are read-only rather than unguarded.
+  const approvalSocket = deps.appPaths?.profileDir
+    ? await ApprovalSocketServer.listen(approvalBroker, deps.appPaths.profileDir, controls.profile).catch((err: unknown) => {
+        log.warn('approvals', 'socket-listen-failed', { err: String(err) });
+        return undefined;
+      })
+    : undefined;
+  const approvalGates: RunApprovalGates = {
+    open: (ctx) => {
+      const gate = approvalBroker.openGate(ctx);
+      return {
+        token: gate.token,
+        approvals: {
+          ...(approvalSocket
+            ? { hookCommand: approvalSocket.hookCommand(gate.token), hookTimeoutSec: approvalBroker.timeoutMinutes * 60 + 30 }
+            : {}),
+          decide: gate.decide,
+        },
+      };
+    },
+    update: (token, ctx) => approvalBroker.updateGate(token, ctx),
+    close: (token) => approvalBroker.closeGate(token),
+  };
+  const executor = new RunExecutor({
+    agent,
+    pool,
+    activeRuns,
+    approvals: approvalGates,
+    ...(usageLedger ? { usage: usageLedger } : {}),
+    ...(auditLog ? { audit: auditLog } : {}),
+  });
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -312,6 +420,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       })
     : undefined;
   const activePolicyFingerprints = new Map<string, string>();
+  // 会话智能压缩: scopes whose last answer asked to close the conversation
+  // (`[[NEW_SESSION]]`); applied when the next message arrives. On disk, so a
+  // restart in between still closes it.
+  const pendingRotations = new PendingRotationStore(deps.appPaths?.rotationsFile);
+  await pendingRotations.load();
+  controls.pendingRotations = pendingRotations;
+  // 群聊 / 话题上下文: per scope, the newest message a run was given — where
+  // the next run's catch-up of what the group said in between starts.
+  const contextCursors = new ChatContextCursorStore(deps.appPaths?.contextCursorsFile);
+  await contextCursors.load();
   // Per-scope record of the model used on the last run, so a `/config` model
   // switch can inject a one-time "model changed" note into the next (resumed)
   // prompt. In-memory only: on restart the first run re-seeds silently.
@@ -354,6 +472,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     // Attach raw Feishu event body to normalized events so we can read fields
     // the normalizer drops (e.g. action.form_value on CardKit 2.0 form submits).
     includeRawEvent: true,
+    // The SDK caches chat rosters; task observers only read persisted names.
+    resolveSenderNames: true,
     outbound: {
       streamThrottleMs: 400,
     },
@@ -374,6 +494,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   };
 
   const channel = createLarkChannel(opts);
+  channelRef = channel;
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
 
   // Pending → run handoff: while a run is active on a chat, block its pending
@@ -421,6 +542,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackAuth,
           activePolicyFingerprints,
           lastRunModelByScope,
+          pendingRotations,
+          contextCursors,
           scope,
           mode,
           runs,
@@ -434,7 +557,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         log.info('flush', 'end');
       }
     });
-  });
+  }, (scope, messages) => pendingStore?.set(scope, messages));
 
   // The console's tasks panel reads live runs / queue depth and issues the
   // same interrupt the IM /stop command uses. Late-bound like `meeting`
@@ -614,6 +737,18 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         );
     }
   }
+  // Messages that were waiting behind a run when the previous process went
+  // away: recent ones are simply processed now, old ones are reported rather
+  // than acted on long after the fact.
+  for (const record of leftoverPending) {
+    if (Date.now() - record.queuedAt <= PENDING_REQUEUE_WINDOW_MS) {
+      log.info('pending', 'requeued', { scope: record.scope, count: record.messages.length });
+      for (const msg of record.messages) pending.push(record.scope, msg);
+    } else {
+      log.info('pending', 'expired', { scope: record.scope, count: record.messages.length });
+      void sendExpiredPendingNotice(channel, record);
+    }
+  }
   // Scheduler starts only after the WS is up: a job that fires before the
   // channel can deliver would produce an answer with nowhere to go.
   let scheduler: Scheduler | undefined;
@@ -633,6 +768,35 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Same reason as the scheduler: only resume once the channel can deliver.
   autoResumer.start();
   controls.autoResumer = autoResumer;
+
+  // 梦境整理: runs when an admin asks (`/dream run`, Web console) or, with
+  // 自动整理 on, when its gates pass — never while the profile has anything
+  // else to do. Notes the conversations the catalog records while the switch
+  // is on, so a later run can still read the ones a newer conversation replaced.
+  let dream: DreamService | undefined;
+  if (knowledge && deps.appPaths?.profileDir) {
+    const notDream = (scope: string) => !scope.startsWith('dream:');
+    dream = new DreamService({
+      profile: controls.profile,
+      stateFile: join(deps.appPaths.profileDir, 'dream-state.json'),
+      workDir: join(deps.appPaths.profileDir, 'dream'),
+      profileDir: deps.appPaths.profileDir,
+      ...(deps.appPaths.userLockDir ? { lockDir: deps.appPaths.userLockDir } : {}),
+      knowledge,
+      ...(sessionCatalog ? { sessionCatalog } : {}),
+      executor,
+      appConfig: () => controls.cfg,
+      profileConfig: () => controls.profileConfig,
+      isAdmin: (senderId) => canRunAdminCommand(controls.profileConfig, controls, senderId).ok,
+      isScopeBusy: (scopeId) => activeRuns.get(scopeId) !== undefined || activeRuns.isLingering(scopeId),
+      isProfileBusy: () =>
+        activeRuns.scopes().some(notDream) ||
+        activeRuns.lingeringScopes().some(notDream) ||
+        pending.totalDepth() > 0,
+    });
+    await dream.init().catch((err: unknown) => log.fail('dream', err, { step: 'init' }));
+    controls.dream = dream;
+  }
 
   const ownerRefresh = createOwnerRefreshController({
     controls,
@@ -674,10 +838,42 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     forceReconnect: () => controls.restart(),
   });
 
+  const worktreeCleanup = deps.appPaths?.profileDir ? startWorktreeCleanup({
+    store: workspaces,
+    idleDays: () => getWorktreeCleanupIdleDays(controls.cfg),
+    protectedPaths: async () => {
+      if (activeRuns.snapshot().length > 0 || activeRuns.hasAnyKeptProcess()) {
+        throw new Error('profile has active or kept processes');
+      }
+      return [...await protectedWorkspacePaths(dirname(dirname(deps.appPaths!.profileDir))), ...(controls.profileConfig.workspaces.default ? [controls.profileConfig.workspaces.default] : [])];
+    },
+  }) : undefined;
+
+  // Knowledge repo auto-sync (`/knowledge bind`): a no-op until the directory
+  // is bound to a remote; first round shortly after start-up, then every
+  // `knowledge.syncIntervalMinutes`. Repeated failures reach the owner's DM.
+  const knowledgeAutoSync = knowledge
+    ? new KnowledgeAutoSync({
+        store: knowledge,
+        intervalMinutes: () => getKnowledgeSyncIntervalMinutes(controls.profileConfig.knowledge),
+        owner: () => controls.botOwnerId,
+        send: (to, markdown) => channel.send(to, { markdown }),
+      })
+    : undefined;
+  if (knowledgeAutoSync) {
+    controls.knowledgeAutoSync = knowledgeAutoSync;
+    knowledgeAutoSync.start();
+  }
+
   return {
     channel,
     disconnect: async () => {
       activeRuns.pauseNewRuns('bridge-disconnect');
+      await worktreeCleanup?.stop();
+      // Side by side: each gives its in-flight git a few seconds at most.
+      await Promise.all([skillLibraries?.stop(), knowledgeAutoSync?.stop()]);
+      controls.skillLibraries = undefined;
+      controls.knowledgeAutoSync = undefined;
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       keepalive.stop();
@@ -689,9 +885,23 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       autoResumer.stop();
       controls.autoResumer = undefined;
       controls.scheduler = undefined;
+      await dream?.dispose().catch((err: unknown) => log.fail('dream', err, { step: 'dispose' }));
+      controls.dream = undefined;
       controls.meeting = undefined;
       controls.runsMonitor = undefined;
-      pending.cancelAll();
+      controls.usage = undefined;
+      controls.approvals = undefined;
+      controls.audit = undefined;
+      await approvalSocket?.close().catch(() => undefined);
+      // Keep the durable copy: the next process (or the rebuilt channel after
+      // /reconnect) picks the queued messages up again.
+      pending.stop();
+      // Nothing still waiting for a decision may slip through after this.
+      approvalBroker.cancelAll('bridge 正在重启或断开');
+      // Background work dies with this daemon; say so while the channel is up.
+      await executor.stopLingering().catch((err: unknown) => {
+        log.fail('disconnect', err, { step: 'stopLingering' });
+      });
       // Stop the agents first, then report — the notice goes out over this
       // channel, so it has to happen before `channel.disconnect()`. Doing it
       // after stopAll (rather than before) avoids racing a run that was about
@@ -723,6 +933,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         callbackNonceStore?.flush(),
         workspaces.flush(),
         jobs?.flush(),
+        pendingStore?.flush(),
+        pendingRotations.flush(),
+        contextCursors.flush(),
+        usageLedger?.flush(),
+        auditLog?.flush(),
       ]);
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === 'rejected') {
@@ -982,6 +1197,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // User tasks come first: an automatic 梦境整理 still drafting stops here.
+  deps.controls.dream?.preempt('有新的用户消息');
+
   if (
     await tryInjectSupplement({
       channel,
@@ -1034,7 +1252,7 @@ async function tryInjectSupplement(deps: {
     [msg],
     attachments,
     [],
-    [],
+    undefined,
     channel.botIdentity,
     [SUPPLEMENT_INSTRUCTION],
     undefined,
@@ -1074,6 +1292,8 @@ interface RunBatchDeps {
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
   lastRunModelByScope: Map<string, string>;
+  pendingRotations: PendingRotationStore;
+  contextCursors: ChatContextCursorStore;
   scope: string;
   mode: ChatMode;
   runs?: RunRegistry;
@@ -1094,6 +1314,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     callbackAuth,
     activePolicyFingerprints,
     lastRunModelByScope,
+    pendingRotations,
+    contextCursors,
     scope,
     mode,
     runs,
@@ -1150,26 +1372,40 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Topic upstream context. When the bot is pulled into a topic for the FIRST
-  // time (no session yet for this scope), the topic's earlier messages — the
-  // root question that may never have @-mentioned the bot, plus prior replies —
-  // live nowhere the agent can see them. Fetch them so it isn't blind to what
-  // the user is pointing at. An already-engaged topic keeps that history in its
-  // resumed session, so we skip the fetch there.
-  let topicContext: QuotedContext[] = [];
-  if (mode === 'topic' && threadId && !sessions.getRaw(scope)) {
-    const exclude = new Set([...batchIds, ...quoteTargets]);
-    topicContext = await fetchTopicContext(channel, threadId, {
-      maxMessages: 40,
-      excludeIds: exclude,
+  // 群聊 / 话题上下文: Feishu only delivers the group messages that @ the bot,
+  // so read back what was said around them — see chat-context.ts for which
+  // slice each situation gets.
+  const batchNewestMs = Math.max(...batch.map((m) => m.createTime || 0));
+  const contextUntilMs = batchNewestMs > 0 ? batchNewestMs : Date.now();
+  const contextPlan = planChatContext({
+    mode,
+    chatId,
+    ...(threadId ? { threadId } : {}),
+    cursorMs: contextCursors.get(scope),
+    hasSession: Boolean(sessions.getRaw(scope)?.sessionId),
+    untilMs: contextUntilMs,
+  });
+  let chatContext: BridgePromptChatContext | undefined;
+  if (contextPlan) {
+    const fetched = await fetchChatContext(channel, contextPlan, {
+      chatId,
+      ownAppId: controls.profileConfig.accounts.app.id,
+      excludeIds: new Set([...batchIds, ...quoteTargets]),
     });
-    if (topicContext.length > 0) {
-      log.info('topic', 'context-fetched', {
-        scope,
-        threadId,
-        count: topicContext.length,
-      });
+    if (fetched.messages.length > 0) {
+      chatContext = {
+        scope: contextPlan.container === 'thread' ? 'topic' : 'group',
+        window: contextPlan.window,
+        ...(fetched.truncated ? { truncated: true } : {}),
+        messages: fetched.messages.map(toPromptContextMessage),
+      };
     }
+    log.info('chat-context', 'fetched', {
+      scope,
+      window: contextPlan.window,
+      count: fetched.messages.length,
+      truncated: fetched.truncated,
+    });
   }
 
   // Detect a model switch since this scope's last run. When resuming an
@@ -1186,12 +1422,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const prevModel = lastRunModelByScope.get(scope);
   const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
   lastRunModelByScope.set(scope, modelSelection);
-  const extraInstructions = modelSwitched
-    ? [
-        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
-          '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
-      ]
-    : undefined;
+  const smartSession = getSmartSession(controls.cfg);
+  const instructions = [
+    ...(modelSwitched
+      ? [
+          `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
+            '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
+        ]
+      : []),
+    ...(smartSession ? [SMART_SESSION_INSTRUCTION] : []),
+  ];
+  const extraInstructions = instructions.length > 0 ? instructions : undefined;
 
   // Memory and the skill index are read fresh on every run: `/memory add` in
   // the middle of a conversation has to take effect on the next message, not
@@ -1210,7 +1451,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     batch,
     attachments,
     quotes,
-    topicContext,
+    chatContext,
     channel.botIdentity,
     extraInstructions,
     knowledgeContext,
@@ -1219,7 +1460,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     quotes: quotes.length,
-    topicContext: topicContext.length,
+    chatContext: chatContext?.messages.length ?? 0,
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
   });
 
@@ -1249,10 +1490,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     actorId: firstMsg.senderId,
     ...(threadId ? { threadId } : {}),
   };
-  const capability =
-    controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(controls.profileConfig)
-      : claudeCapability(controls.profileConfig);
+  const capability = agentCapability(controls.profileConfig);
   // Someone else's run may only touch what the owner opened to others.
   const guestWorkspace = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
   const guestGuard = ownerRun
@@ -1270,6 +1508,40 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
         ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
       });
+  // Agents that post the answer as its own reply (see AgentDescriptor.finalReply)
+  // treat the progress stream as best-effort: its failures are logged, not fatal.
+  const separateFinalReply = capability.descriptor.finalReply === 'separate';
+  // Assigned once the reply surface below is set up. A background turn only
+  // arrives after this run's own reply, so it is always ready by then.
+  let deliverBackgroundTurn: BackgroundTurnHandler | undefined;
+  // With approvals on, a batch carrying anyone's words but an admin's is
+  // gated: the agent may read freely, but each side-effecting step waits
+  // for an admin.
+  const requester = batch.find((m) => runNeedsApproval(controls.profileConfig, controls, m.senderId));
+  const gate: GateContext | undefined = requester
+    ? {
+        actor: { id: requester.senderId, ...(requester.senderName ? { name: requester.senderName } : {}) },
+        source: 'im',
+        scopeId: scope,
+        chatId,
+        ...(threadId ? { threadId } : {}),
+        originMessageId: lastMsg.messageId,
+        where:
+          mode === 'p2p'
+            ? '私聊'
+            : (controls.knownChats?.find((c) => c.id === chatId)?.name ?? '群聊'),
+        agent: capability.agentId,
+      }
+    : undefined;
+  // 会话智能压缩: an agent-requested close is consumed by this message either
+  // way. Never rotate under a process this scope still keeps (its background
+  // work would be cut off — and a fresh submit would reuse it anyway) or when
+  // the user quotes an earlier message, which points back into the old context.
+  const pendingRotation = pendingRotations.take(scope);
+  const rotationBlocked = executor.hasLiveProcess(scope) || quotes.length > 0;
+  // 长任务完成提醒 measures from here: queueing behind the concurrency cap is
+  // waiting the requester does too.
+  const runSubmittedAt = Date.now();
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
@@ -1285,6 +1557,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     ...(guestGuard ? { guard: guestGuard } : {}),
+    ...(smartSession
+      ? {
+          compactWindowTokens: smartSession.compactWindowTokens,
+          ...(rotationBlocked
+            ? {}
+            : {
+                rotation: {
+                  settings: smartSession,
+                  ...(pendingRotation ? { pending: pendingRotation } : {}),
+                  probe: (handle: string, cwd: string) => probeAgentSession(controls.profileConfig, handle, cwd),
+                },
+              }),
+        }
+      : {}),
+    ...(firstMsg.senderName ? { actorName: firstMsg.senderName } : {}),
+    ...(gate ? { gate } : {}),
+    onBackgroundTurn: (turn) => deliverBackgroundTurn?.(turn) ?? Promise.resolve(),
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -1306,6 +1595,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const { execution, cwdRealpath: cwd } = flow;
   // Written before the first token so a hard kill at any point after this
   // leaves a trace the next process can act on.
+  const chatName = mode === 'p2p' ? undefined : controls.knownChats?.find(c => c.id === chatId)?.name;
   runs?.start({
     runId: execution.runId,
     scope,
@@ -1313,6 +1603,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     originMessageId: lastMsg.messageId,
     ...(threadId ? { threadId } : {}),
     promptPreview: lastMsg.content ?? '',
+    chatType: mode === 'p2p' ? 'p2p' : 'group',
+    ...(chatName ? { chatName } : {}),
+    actorId: firstMsg.senderId,
+    ...(firstMsg.senderName ? { actorName: firstMsg.senderName } : {}),
     startedAt: Date.now(),
     // Only the owner's runs are picked up again unasked (task-ledger.ts).
     ...(ownerRun
@@ -1327,6 +1621,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       : {}),
   });
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
+  // The agent now holds everything up to this batch; the next run catches up
+  // from here. p2p scopes never read it back, so they don't keep one.
+  if (mode !== 'p2p') contextCursors.advance(scope, contextUntilMs);
   const handle = execution.handle;
   const supplementTarget = {
     originIds: new Set(batch.map((m) => m.messageId)),
@@ -1341,7 +1638,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } else {
     log.info('session', 'fresh', { cwd });
   }
+  if (flow.rotated) {
+    log.info('session', 'rotated', {
+      scope,
+      reason: flow.rotated.reason,
+      ...(flow.rotated.idleMinutes !== undefined ? { idleMinutes: flow.rotated.idleMinutes } : {}),
+      ...(flow.rotated.contextTokens !== undefined ? { contextTokens: flow.rotated.contextTokens } : {}),
+    });
+  }
+  // The conversation this run lands in — what an `[[NEW_SESSION]]` at its end closes.
+  const sessionHandleKey = capability.descriptor.sessionHandle;
+  let conversationHandle = flow.resumeFrom;
   const recordSession = (evt: AgentEvent): void => {
+    if (evt.type === 'system' && evt[sessionHandleKey]) conversationHandle = evt[sessionHandleKey];
     recordRunSessionEvent({
       scopeId: scope,
       sessions,
@@ -1353,6 +1662,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (evt.type === 'system' && evt.sessionId) {
       log.info('session', 'set', { sessionId: evt.sessionId });
     }
+    if (evt.type === 'usage' && cardRenderOptions.meta) {
+      cardRenderOptions.meta.usage = usageLineOf([evt]);
+    }
     // Ground truth for "which model is actually running": claude reports the
     // model it loaded in its init event. Logging requested-vs-actual reveals
     // whether the --model pin took effect or claude silently fell back (e.g.
@@ -1362,6 +1674,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         requested: requestedModel ?? 'default',
         actual: evt.model,
       });
+      // Same ground truth for the reader: the byline shows the concrete model
+      // (e.g. Opus 5.5) instead of only the "always latest" alias picked in /config.
+      if (cardRenderOptions.meta) {
+        cardRenderOptions.meta.model = resolvedModelLabel(agentKind, modelPref, evt.model);
+      }
     }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
@@ -1403,8 +1720,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     canAutoResume && state.terminal === 'paused' && state.limit
       ? { ...state, limit: { ...state.limit, autoResumeAt: resumeAtFor(state.limit) } }
       : state;
+  // So is a trailing `[[NEW_SESSION…]]`, read from `lastRawState` (the answer as
+  // the agent wrote it) once the run is over.
+  let lastRawState: RunState | undefined;
   const filterForPrefs = (raw: RunState): RunState => {
-    const state = withAutoResume(stripNoReply(raw));
+    lastRawState = raw;
+    const state = withAutoResume(stripControlMarkers(raw));
     if (getShowToolCalls(controls.cfg)) return state;
     return {
       ...state,
@@ -1422,7 +1743,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       agent: capability.agentId,
       model: modelLabel(agentKind, modelPref),
       effort: resolveEffortArg(agentKind, controls.profileConfig.preferences.effort),
-      provider: agentKind === 'codex' ? 'openai' : 'anthropic',
+      provider: capability.descriptor.provider,
+      ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
     },
     ...(callbackAuth
       ? {
@@ -1445,6 +1767,26 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (cardRenderOptions.meta) cardRenderOptions.meta.sponsor = sponsor;
   });
 
+  // Turns the agent runs on its own after this reply (a background task it
+  // started reported back) go out as a follow-up reply to the same message.
+  deliverBackgroundTurn = async (turn) => {
+    const state = backgroundTurnState(turn, filterForPrefs);
+    if (!state) return;
+    // The follow-up's byline reports the background turn's own consumption.
+    const usage = turn.kind === 'turn' ? usageLineOf(turn.events) : undefined;
+    await sendFinalReply({
+      channel,
+      chatId,
+      scope,
+      state: separateFinalReply ? finalAnswerOnlyState(state) : state,
+      replyMode,
+      sendOpts,
+      cardRenderOptions: cardRenderOptions.meta
+        ? { ...cardRenderOptions, meta: { ...cardRenderOptions.meta, usage } }
+        : cardRenderOptions,
+    });
+  };
+
   // Add a "Typing" reaction to the triggering message as an instant ack that
   // the bot noticed it, never letting that outbound API call block agent
   // event draining. Card mode's own footer ("🧠 正在思考…") already gives this
@@ -1462,6 +1804,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let runLimit: RunLimit | undefined;
   let runError: string | undefined;
   let pausedCard: { messageId: string; card: object } | undefined;
+  // Whether the answer went out as a message of its own (which pushes), as
+  // opposed to landing in the progress card that was created at the start.
+  let answerIsNewMessage = false;
 
   try {
     if (cotEnabled) {
@@ -1503,11 +1848,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             reason: cotPublisher.degradedReason,
           });
         }
+        answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
           scope,
-          state: finalAnswerOnlyState(stripNoReply(finalState)),
+          state: finalAnswerOnlyState(stripControlMarkers((lastRawState = finalState))),
           replyMode,
           sendOpts,
           cardRenderOptions,
@@ -1521,7 +1867,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let latestState: RunState = initialState;
       let producerStarted = false;
       let cardCtrl:
-        | { update(next: object | ((current: object) => object)): Promise<void> }
+        | { update(next: object | ((current: object) => object)): Promise<void>; readonly messageId?: string }
         | undefined;
       let cardMessageId: string | undefined;
       // Whether the last card rendered had to cut the answer to fit.
@@ -1584,7 +1930,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
-      if (opensProgressEagerly(controls.profileConfig.agentKind)) progress.ensureOpen();
+      if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
       // Keep the clock ticking while the agent is quiet. Only touches a card
       // that is still running, so it can never overwrite the final one.
       const heartbeat = setInterval(() => {
@@ -1600,7 +1946,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           renderDone,
           producerStarted: () => producerStarted,
           fallback: async (state) => {
-            if (controls.profileConfig.agentKind === 'codex') return;
+            if (separateFinalReply) return;
             if (renderText(filterForPrefs(state)).trim() === '') return;
             const fitted = fitCardToBudget(
               filterForPrefs(state),
@@ -1620,15 +1966,28 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               });
             }
           },
+          rescue: separateFinalReply
+            ? undefined
+            : (state) =>
+                rescueCardReply({
+                  channel,
+                  chatId,
+                  scope,
+                  sendOpts,
+                  cardRenderOptions,
+                  streamedMessageId: cardCtrl?.messageId,
+                  state: filterForPrefs(state),
+                }),
         });
       } catch (err) {
-        if (controls.profileConfig.agentKind !== 'codex') throw err;
+        if (!separateFinalReply) throw err;
         log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
       } finally {
         clearInterval(heartbeat);
       }
       await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
-      if (controls.profileConfig.agentKind === 'codex') {
+      if (separateFinalReply) {
+        answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
@@ -1703,7 +2062,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
-      if (opensProgressEagerly(controls.profileConfig.agentKind)) progress.ensureOpen();
+      if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
       try {
         await awaitRenderAwareStream({
           mode: replyMode,
@@ -1711,19 +2070,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           renderDone,
           producerStarted: () => producerStarted,
           fallback: async (state) => {
-            if (controls.profileConfig.agentKind === 'codex') return;
+            if (separateFinalReply) return;
             const body = renderText(filterForPrefs(state), locale);
             if (body.trim()) {
               await channel.send(chatId, { markdown: body }, sendOpts);
             }
           },
+          rescue: separateFinalReply
+            ? undefined
+            : async (state) => {
+                const body = renderText(finalAnswerOnlyState(filterForPrefs(state)));
+                if (!body.trim()) return;
+                const result = await channel.send(chatId, { markdown: body }, sendOpts);
+                requireMessageReceipt(result, 'markdown');
+                log.info('outbound', 'rescue-sent', { scope, via: 'markdown', messageId: result.messageId });
+              },
         });
       } catch (err) {
-        if (controls.profileConfig.agentKind !== 'codex') throw err;
+        if (!separateFinalReply) throw err;
         log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
       }
       await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
-      if (controls.profileConfig.agentKind === 'codex') {
+      if (separateFinalReply) {
+        answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
@@ -1749,12 +2118,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async () => {},
       );
+      answerIsNewMessage = true;
       await sendFinalReply({
         channel,
         chatId,
         scope,
         state:
-          controls.profileConfig.agentKind === 'codex'
+          separateFinalReply
             ? finalAnswerOnlyState(filterForPrefs(finalState))
             : filterForPrefs(finalState),
         replyMode,
@@ -1830,6 +2200,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               .catch((err) => log.fail('auto-resume', err, { step: 'interrupt-notice' }));
           }
         }
+      }
+    }
+    const longRunNotice = planLongRunNotice({
+      thresholdMs: getLongRunNoticeMs(controls.cfg),
+      elapsedMs: Date.now() - runSubmittedAt,
+      terminal: runTerminal,
+      p2p: mode === 'p2p',
+      answerIsNewMessage,
+      requesters: humanRequesters(batch),
+    });
+    if (longRunNotice) void sendLongRunNotice(channel, chatId, longRunNotice, sendOpts, scope);
+    if (smartSession && runTerminal === 'done') {
+      const request = newSessionRequest(answerTextOf(lastRawState));
+      if (request) {
+        pendingRotations.set(scope, { ...request, ...(conversationHandle ? { handle: conversationHandle } : {}) });
+        log.info('session', 'rotation-requested', { scope, hasSummary: Boolean(request.summary) });
       }
     }
   }
@@ -1980,6 +2366,17 @@ async function deliverAnswerOutsideCard(input: {
   }
 }
 
+/** The answer text of a run state: its final text, else its last text block. */
+function answerTextOf(state: RunState | undefined): string | undefined {
+  if (!state) return undefined;
+  if (state.finalText) return state.finalText;
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i];
+    if (block?.kind === 'text') return block.content;
+  }
+  return undefined;
+}
+
 interface LazyProgressStream {
   /**
    * Mirrors the underlying `channel.stream(...)` promise, and stays pending
@@ -2052,15 +2449,16 @@ function createLazyProgressStream(
  * `recallIfEmptyStreamedReply` applies: a stream we open is one that survives.
  */
 /**
- * Claude streams its whole answer into the progress message, so open it as
- * soon as the run starts. Waiting for visible text left runs that go straight
- * to tool calls (hidden when `showToolCalls` is off) with no card and no stop
- * button for a minute or more — only the Typing reaction showed anything was
- * happening. Codex keeps the lazy open: its final-only rounds would otherwise
- * leave an empty placeholder card behind (see `createLazyProgressStream`).
+ * Agents that stream their whole answer into the progress message (Claude)
+ * open it as soon as the run starts. Waiting for visible text left runs that
+ * go straight to tool calls (hidden when `showToolCalls` is off) with no card
+ * and no stop button for a minute or more — only the Typing reaction showed
+ * anything was happening. Agents that post the answer separately (Codex) keep
+ * the lazy open: their final-only rounds would otherwise leave an empty
+ * placeholder card behind (see `createLazyProgressStream`).
  */
-function opensProgressEagerly(agentKind: string): boolean {
-  return agentKind !== 'codex';
+function opensProgressEagerly(separateFinalReply: boolean): boolean {
+  return !separateFinalReply;
 }
 
 function shouldOpenProgressStream(state: RunState): boolean {
@@ -2250,6 +2648,12 @@ async function awaitRenderAwareStream(input: {
   renderDone: Promise<RunState>;
   producerStarted: () => boolean;
   fallback: (state: RunState) => Promise<void>;
+  /**
+   * Delivers the answer when a stream that already showed part of the run
+   * fails to take its final update. Without one, that failure is rethrown
+   * (Codex: its answer goes out separately anyway).
+   */
+  rescue?: (state: RunState) => Promise<void>;
 }): Promise<void> {
   const streamResult = input.progress.settled.then(
     () => ({ kind: 'stream' as const, ok: true as const }),
@@ -2301,9 +2705,11 @@ async function awaitRenderAwareStream(input: {
         mode: input.mode,
         graceMs: STREAM_TERMINAL_GRACE_MS,
       });
-      void streamResult.then((result) => {
+      const { rescue } = input;
+      void streamResult.then(async (result) => {
         if (!result.ok) {
           log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
+          if (rescue && !isTargetRevoked(result.err)) await runFallbackReply(input.mode, first.state, rescue, 'rescue');
         }
       });
       return;
@@ -2319,24 +2725,87 @@ async function awaitRenderAwareStream(input: {
 
   if (!terminal.ok) {
     // A stream that failed before producing anything delivered nothing, so the
-    // reply still has to go out; one that failed later already showed its
-    // content and the error is the caller's to handle.
-    if (input.producerStarted()) throw terminal.err;
+    // reply still has to go out as a whole. One that failed later showed part
+    // of the run, but not necessarily its end: the failed update can be the
+    // last one, carrying the answer (Feishu rejects a long run's finished card
+    // over content limits), so the answer still has to reach the user.
+    if (input.producerStarted()) {
+      if (!input.rescue || isTargetRevoked(terminal.err)) throw terminal.err;
+      log.fail('stream', terminal.err, { mode: input.mode, step: 'stream-final' });
+      await runFallbackReply(input.mode, first.state, input.rescue, 'rescue');
+      return;
+    }
     log.fail('stream', terminal.err, { mode: input.mode, step: 'stream' });
     await runFallbackReply(input.mode, first.state, input.fallback);
   }
+}
+
+/** The message being answered (or the reply itself) was recalled: nothing to deliver to. */
+function isTargetRevoked(err: unknown): boolean {
+  return err instanceof LarkChannelError && err.code === 'target_revoked';
 }
 
 async function runFallbackReply(
   mode: 'card' | 'markdown',
   state: RunState,
   fallback: (state: RunState) => Promise<void>,
+  step: 'fallback' | 'rescue' = 'fallback',
 ): Promise<void> {
   try {
     await fallback(state);
   } catch (err) {
-    log.fail('stream', err, { mode, step: 'fallback' });
+    log.fail('stream', err, { mode, step });
   }
+}
+
+/**
+ * Put a run's answer on screen after its streamed card failed to take the
+ * final update. That card can't be trusted with the full run again (tool
+ * panels are what usually push it over Feishu's limits), so send the answer
+ * alone, trying what is least likely to be rejected last: in place of the
+ * stuck card, then as a new card, then as a plain post.
+ */
+async function rescueCardReply(input: {
+  channel: LarkChannel;
+  chatId: string;
+  scope: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  cardRenderOptions: RunCardRenderOptions;
+  streamedMessageId: string | undefined;
+  state: RunState;
+}): Promise<void> {
+  const answer = finalAnswerOnlyState(input.state);
+  const body = renderText(answer);
+  if (!body.trim()) return;
+  const card = renderCard(answer, input.cardRenderOptions);
+  const stepFailed = (via: string, err: unknown): void => {
+    log.warn('outbound', 'rescue-step-failed', {
+      scope: input.scope,
+      via,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  };
+
+  if (input.streamedMessageId) {
+    try {
+      await input.channel.updateCard(input.streamedMessageId, card);
+      log.info('outbound', 'rescue-sent', { scope: input.scope, via: 'update-card', messageId: input.streamedMessageId });
+      return;
+    } catch (err) {
+      stepFailed('update-card', err);
+    }
+  }
+  try {
+    const result = await input.channel.send(input.chatId, { card }, input.sendOpts);
+    requireMessageReceipt(result, 'card');
+    log.info('outbound', 'rescue-sent', { scope: input.scope, via: 'card', messageId: result.messageId });
+    return;
+  } catch (err) {
+    stepFailed('card', err);
+  }
+  const result = await input.channel.send(input.chatId, { markdown: body }, input.sendOpts);
+  requireMessageReceipt(result, 'markdown');
+  log.info('outbound', 'rescue-sent', { scope: input.scope, via: 'markdown', messageId: result.messageId });
 }
 
 function scheduleWorkingReactionCleanup(
@@ -2381,7 +2850,7 @@ function buildPrompt(
   batch: NormalizedMessage[],
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
-  topicContext: QuotedContext[] = [],
+  chatContext?: BridgePromptChatContext,
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
   knowledge?: BridgePromptKnowledge,
@@ -2432,7 +2901,7 @@ function buildPrompt(
         : BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
     ...(knowledge ? { knowledge } : {}),
-    ...(topicContext.length > 0 ? { topicContext: topicContext.map(toPromptTopicMessage) } : {}),
+    ...(chatContext ? { chatContext } : {}),
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
@@ -2451,6 +2920,13 @@ function senderTypeOf(msg: NormalizedMessage): 'user' | 'bot' | undefined {
   if (senderType === 'user') return 'user';
   if (senderType === 'app' || senderType === 'bot') return 'bot';
   return undefined;
+}
+
+/** The people (never bots — an @ would wake them) whose messages make up a batch. */
+function humanRequesters(batch: NormalizedMessage[]): LongRunRequester[] {
+  return batch
+    .filter((m) => senderTypeOf(m) === 'user')
+    .map((m) => ({ openId: m.senderId, ...(m.senderName ? { name: m.senderName } : {}) }));
 }
 
 function senderAnnotation(msg: NormalizedMessage): string {
@@ -2520,7 +2996,7 @@ function toPromptQuote(q: QuotedContext): BridgePromptQuotedMessage {
   };
 }
 
-function toPromptTopicMessage(q: QuotedContext): BridgePromptTopicMessage {
+function toPromptContextMessage(q: QuotedContext): BridgePromptContextMessage {
   return {
     messageId: q.messageId,
     senderId: q.senderId,
@@ -2553,4 +3029,67 @@ function parseJsonOrRaw(input: string): unknown {
 
 function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined;
+}
+
+const BACKGROUND_TURN_PREFIX = '（后台任务有了新进展）\n\n';
+
+/**
+ * The reply state for a background turn, or undefined when it has nothing to
+ * show (only tool calls, or a `[[NO_REPLY]]` answer). A stop notice is always
+ * shown so a silently vanished task never looks like it is still running.
+ */
+export function backgroundTurnState(
+  turn: BackgroundTurn,
+  filterForPrefs: (state: RunState) => RunState,
+): RunState | undefined {
+  if (turn.kind === 'stopped') {
+    const notice =
+      turn.reason === 'shutdown'
+        ? 'bridge 重启，还在运行的后台任务已停止。会话上下文没丢，需要的话回一句「继续」重新发起。'
+        : `后台任务运行超过 ${Math.round(turn.afterMs / 60_000)} 分钟仍未结束，已停止。需要的话请重新发起。`;
+    return reduce(reduce(initialState, { type: 'text', delta: notice }), {
+      type: 'done',
+      terminationReason: 'normal',
+    });
+  }
+  const own = finalizeIfRunning(turn.events.reduce(reduce, initialState));
+  if (!renderText(filterForPrefs(own)).trim()) return undefined;
+  const withPrefix = turn.events.reduce(
+    reduce,
+    reduce(initialState, { type: 'text', delta: BACKGROUND_TURN_PREFIX }),
+  );
+  return filterForPrefs(finalizeIfRunning(withPrefix));
+}
+
+/** Queued messages older than this at boot are reported instead of processed. */
+const PENDING_REQUEUE_WINDOW_MS = 10 * 60 * 1000;
+
+async function sendExpiredPendingNotice(channel: LarkChannel, record: PendingRecord): Promise<void> {
+  const last = record.messages[record.messages.length - 1];
+  const first = record.messages[0];
+  if (!last || !first) return;
+  const preview = first.content.replace(/\s+/g, ' ').trim().slice(0, 40);
+  const text =
+    `bridge 重启前，这里有 ${record.messages.length} 条消息还在排队、没来得及处理` +
+    `${preview ? `（最早一条：「${preview}」）` : ''}。` +
+    '已经过去超过 10 分钟，没有自动补处理，需要的话请重新发送。';
+  try {
+    await channel.send(last.chatId, { text }, {
+      replyTo: last.messageId,
+      ...(last.threadId ? { replyInThread: true } : {}),
+    });
+  } catch (err) {
+    log.warn('pending', 'expired-notice-failed', { scope: record.scope, err: String(err) });
+  }
+}
+
+/** Byline usage for a set of events (one turn), or undefined when none was reported. */
+function usageLineOf(events: readonly AgentEvent[]): string | undefined {
+  const usages = events.filter((e): e is Extract<AgentEvent, { type: 'usage' }> => e.type === 'usage');
+  if (usages.length === 0) return undefined;
+  return formatUsageLine({
+    inputTokens: usages.reduce((n, u) => n + (u.inputTokens ?? 0), 0),
+    outputTokens: usages.reduce((n, u) => n + (u.outputTokens ?? 0), 0),
+    costUsd: usages.reduce((n, u) => n + (u.costUsd ?? 0), 0),
+  });
 }
