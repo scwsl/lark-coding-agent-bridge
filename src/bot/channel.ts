@@ -1933,6 +1933,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
       // Keep the clock ticking while the agent is quiet. Only touches a card
       // that is still running, so it can never overwrite the final one.
+      // Set once the stream's failed final update was rescued: that already
+      // re-sent the answer, so the card-broken delivery below must not repeat it.
+      let rescued = false;
       const heartbeat = setInterval(() => {
         if (cardCtrl && latestState.terminal === 'running') {
           void cardCtrl.update(renderLiveCard(latestState));
@@ -1968,8 +1971,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           },
           rescue: separateFinalReply
             ? undefined
-            : (state) =>
-                rescueCardReply({
+            : (state) => {
+                rescued = true;
+                return rescueCardReply({
                   channel,
                   chatId,
                   scope,
@@ -1977,7 +1981,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                   cardRenderOptions,
                   streamedMessageId: cardCtrl?.messageId,
                   state: filterForPrefs(state),
-                }),
+                });
+              },
         });
       } catch (err) {
         if (!separateFinalReply) throw err;
@@ -2001,7 +2006,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         // The card is the reply. If it doesn't hold the whole answer — its
         // last update was rejected, or the answer outgrew it — post the
         // answer as ordinary messages so it is never lost.
-        const reason = cardHealth.lastFailed ? 'card-broken' : cardTrimmed ? 'too-long' : undefined;
+        const reason = cardHealth.lastFailed && !rescued ? 'card-broken' : cardTrimmed ? 'too-long' : undefined;
         if (reason) {
           await deliverAnswerOutsideCard({
             channel,
