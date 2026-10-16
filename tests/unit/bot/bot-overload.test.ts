@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, pickMentions, planBotOverload } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -150,8 +150,19 @@ describe('overloadCard', () => {
 });
 
 describe('overload card mentions', () => {
-  it('@s at most 10 people', () => {
+  it('@s at most 10 people, picked at random each time', () => {
     expect(MAX_OVERLOAD_MENTIONS).toBe(10);
+    const people = Array.from({ length: 25 }, (_, i) => `ou_${i}`);
+    let seed = 1;
+    const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+    const first = pickMentions(people, 10, random);
+    const second = pickMentions(people, 10, random);
+    expect(first).toHaveLength(10);
+    expect(new Set(first).size).toBe(10);
+    expect(first.every((id) => people.includes(id))).toBe(true);
+    expect(second).not.toEqual(first);
+    expect(pickMentions(['ou_a', 'ou_b'], 10)).toHaveLength(2);
+    expect(pickMentions([], 10)).toEqual([]);
   });
 
   it('@s every listed human at the top and counts the rest', () => {

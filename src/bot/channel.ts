@@ -62,7 +62,7 @@ import {
 import { resolveAppSecret } from '../config/secret-resolver';
 import { tmpdir } from 'node:os';
 import { overloadCard } from '../card/templates';
-import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS } from './bot-overload';
+import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, pickMentions } from './bot-overload';
 import { log, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -1399,7 +1399,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (decision.card) {
         const humans = (await deps.chatHumans?.list(chatId)) ?? [];
         const card = overloadCard({
-          mention: humans.slice(0, MAX_OVERLOAD_MENTIONS),
+          mention: pickMentions(humans, MAX_OVERLOAD_MENTIONS),
           more: Math.max(0, humans.length - MAX_OVERLOAD_MENTIONS),
           windows: decision.windows.map((w) => ({
             ...w,

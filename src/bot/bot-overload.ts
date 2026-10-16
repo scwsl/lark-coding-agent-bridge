@@ -124,6 +124,19 @@ const MEMBERS_TTL_MS = 60 * 60_000;
 export const MAX_OVERLOAD_MENTIONS = 10;
 
 /**
+ * Up to `max` of `people`, picked at random each time — a big group should not
+ * hear about every overload from the same few. Order of the pick is random too.
+ */
+export function pickMentions(people: readonly string[], max: number, random: () => number = Math.random): string[] {
+  const pool = [...people];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return pool.slice(0, Math.max(0, max));
+}
+
+/**
  * The people of a group, for the overload card's mentions. The member list
  * API only returns users — bots are never in it — so no bot is woken up.
  * Cached per chat for an hour; a failed read yields nobody.
