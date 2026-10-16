@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { interruptedNoticeText } from '../../../src/bot/interrupted-notice.js';
-import { findLedger, isKilledExit } from '../../../src/bot/task-ledger.js';
+import { findLedger, isKilledExit, stripLedgerLines } from '../../../src/bot/task-ledger.js';
 import type { RunRecord } from '../../../src/runtime/run-registry.js';
 
 describe('task ledger', () => {
@@ -70,6 +70,25 @@ describe('run registry keeps what an interrupted task needs to resume', () => {
       });
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('stripLedgerLines', () => {
+  it('drops the ledger line and keeps the rest of the answer', () => {
+    const text = '做完了：\n\n- 结论 A\n\n📒 任务台账：/Users/a/tasks/x.md\n\n下一步 B';
+    expect(stripLedgerLines(text)).toBe('做完了：\n\n- 结论 A\n\n下一步 B');
+  });
+
+  it('handles a ledger line at the end, in English, or quoted', () => {
+    expect(stripLedgerLines('结论\n📒 任务台账：`~/.occam/tasks/x.md`')).toBe('结论\n');
+    expect(stripLedgerLines('Done.\n📒 Task ledger: /tmp/l.md\nNext')).toBe('Done.\nNext');
+    expect(stripLedgerLines('> 📒 任务台账：/tmp/l.md\n正文')).toBe('正文');
+  });
+
+  it('leaves text without a ledger path line untouched', () => {
+    for (const text of ['提到任务台账这个词，但没有路径行', '任务台账：已经更新到第 3 步']) {
+      expect(stripLedgerLines(text)).toBe(text);
     }
   });
 });

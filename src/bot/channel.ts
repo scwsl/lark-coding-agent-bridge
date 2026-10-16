@@ -89,7 +89,7 @@ import {
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
-import { INTERRUPT_RESUME_DELAY_MS, MAX_INTERRUPT_RESUMES, isKilledExit } from './task-ledger';
+import { INTERRUPT_RESUME_DELAY_MS, MAX_INTERRUPT_RESUMES, isKilledExit, stripLedgerLines } from './task-ledger';
 import type { RunRecord } from '../runtime/run-registry';
 import {
   AutoResumer,
@@ -1733,7 +1733,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let lastRawState: RunState | undefined;
   const filterForPrefs = (raw: RunState): RunState => {
     lastRawState = raw;
-    const state = withAutoResume(stripControlMarkers(raw));
+    // Group members can't open the owner's ledger path: hide the line there.
+    const shown = mode === 'p2p' ? raw : withoutLedgerLines(raw);
+    const state = withAutoResume(stripControlMarkers(shown));
     if (getShowToolCalls(controls.cfg)) return state;
     return {
       ...state,
@@ -3108,4 +3110,19 @@ function usageLineOf(events: readonly AgentEvent[]): string | undefined {
     outputTokens: usages.reduce((n, u) => n + (u.outputTokens ?? 0), 0),
     costUsd: usages.reduce((n, u) => n + (u.costUsd ?? 0), 0),
   });
+}
+
+/** The run's text without `📒 任务台账：…` lines (see {@link stripLedgerLines}). */
+function withoutLedgerLines(state: RunState): RunState {
+  let changed = false;
+  const blocks = state.blocks.map((b) => {
+    if (b.kind !== 'text') return b;
+    const content = stripLedgerLines(b.content);
+    if (content === b.content) return b;
+    changed = true;
+    return { ...b, content };
+  });
+  const finalText = state.finalText !== undefined ? stripLedgerLines(state.finalText) : undefined;
+  if (finalText !== state.finalText) changed = true;
+  return changed ? { ...state, blocks, finalText } : state;
 }

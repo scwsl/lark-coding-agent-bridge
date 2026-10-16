@@ -12,6 +12,19 @@ export function findLedger(text: string): string | undefined {
   return LEDGER_RE.exec(text)?.[1];
 }
 
+const LEDGER_LINE_RE = /^[ \t>*_-]*(?:📒\s*)?(?:任务台账|[Tt]ask ledger)\s*[:：]\s*`?(?:~|\/)[^\n]*(?:\r?\n|$)/gm;
+
+/**
+ * The reply without its ledger line(s). Group members can't open a path on
+ * the owner's machine, so group replies hide it; the bridge still reads the
+ * ledger from the raw answer (see {@link findLedger}).
+ */
+export function stripLedgerLines(text: string): string {
+  if (!LEDGER_LINE_RE.test(text)) return text;
+  LEDGER_LINE_RE.lastIndex = 0;
+  return text.replace(LEDGER_LINE_RE, '').replace(/\n{3,}/g, '\n\n');
+}
+
 /**
  * The run's process was killed from outside (SIGTERM / SIGKILL: exit 143 /
  * 137) rather than failing on its own — worth resuming, unlike a real error.
