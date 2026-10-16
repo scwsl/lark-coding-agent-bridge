@@ -1260,68 +1260,93 @@ export class DreamService {
     }
     const published: string[] = [];
     for (const [name, group] of groups) {
-      if (signal.aborted) return { blocked: true, published };
-      const repo = `skills:${name || '-'}`;
-      const label = name ? `skill 库 ${name}` : 'skill 库';
-      let target: DreamTarget = { repo, label, branch: dreamBranch(id), phase: 'failed', items: 0, ...(direct ? { direct } : {}) };
-      if (!group.library) {
-        this.saveTarget(id, { ...target, phase: 'skipped', error: `${group.problem}，${group.items.length} 个 skill 提案未提交` });
-        continue;
+      // publish: push with skillUpdates: pr — new skills go straight in, rewrites of existing ones wait in a Draft PR.
+      const split = direct && settings.skillUpdates === 'pr';
+      const parts = split
+        ? [
+            { items: group.items.filter((item) => item.action === 'create'), direct: true, suffix: '' },
+            { items: group.items.filter((item) => item.action === 'update'), direct: false, suffix: ':update' },
+          ].filter((part) => part.items.length > 0)
+        : [{ items: group.items, direct, suffix: '' }];
+      for (const part of parts) {
+        if (signal.aborted) return { blocked: true, published };
+        const repo = `skills:${name || '-'}${part.suffix}`;
+        const label = `${name ? `skill 库 ${name}` : 'skill 库'}${part.suffix ? '（修改已有技能）' : ''}`;
+        let target: DreamTarget = { repo, label, branch: dreamBranch(id), phase: 'failed', items: 0, ...(part.direct ? { direct: true } : {}) };
+        if (!group.library) {
+          this.saveTarget(id, { ...target, phase: 'skipped', error: `${group.problem}，${part.items.length} 个 skill 提案未提交` });
+          continue;
+        }
+        if (split && !part.direct) {
+          // One review at a time: while the last rewrite PR is open, today's rewrites are proposed again later.
+          const open = await (this.deps.countOpenPrs ?? ((url: string) => countOpenDreamPullRequests(this.deps.workDir, url)))(
+            group.library.url,
+          ).catch(() => undefined);
+          if (open !== undefined && open >= settings.auto.maxOpenPrs) {
+            this.saveTarget(id, {
+              ...target,
+              phase: 'skipped',
+              error: `上一批技能修改的 Draft PR 还有 ${open} 个没审完，这批 ${part.items.length} 个修改先不提，之后会重新提出`,
+            });
+            continue;
+          }
+        }
+        const dir = join(this.deps.workDir, 'batches', id, `skills-${group.library.name}${part.suffix ? '-update' : ''}`);
+        const spec: RepoSpec = { repo, label, url: group.library.url, ...(group.library.ref ? { ref: group.library.ref } : {}) };
+        const prepared = await prepareCheckout(spec, dir, target.branch, { direct: part.direct });
+        if ('error' in prepared) {
+          // Pinned to a tag / commit is a configuration fact, not a hiccup: skip
+          // rather than retry forever.
+          const permanent = /不能作为写入目标|不合法/.test(prepared.error);
+          this.saveTarget(id, { ...target, phase: permanent ? 'skipped' : 'failed', error: prepared.error });
+          if (!permanent) return { blocked: true, published };
+          continue;
+        }
+        if (part.direct) target = { ...target, branch: prepared.base };
+        const draft = await writeSkillDraft(dir, group.library, part.items);
+        const skillRejected = [
+          ...rejected.filter((item) => item.kind === 'skill'),
+          ...draft.rejected.map((item) => ({ scopeId: item.proposal.scopeId, kind: 'skill' as const, reason: item.reason })),
+        ];
+        if (draft.files.length === 0) {
+          this.saveTarget(id, {
+            ...target,
+            base: prepared.base,
+            phase: 'skipped',
+            error: draft.rejected[0]?.reason ?? '没有改动',
+            checkoutDir: dir,
+          });
+          continue;
+        }
+        const files = [...draft.files];
+        // The changelog records what reached the default branch; a PR's body is its own record.
+        if (changelog && part.direct) {
+          const logged = await writeChangelog(dir, changelogEntry({ batchId: id, at: this.now(), ...changelog, skills: draft.written }));
+          if ('file' in logged) files.push(logged.file);
+        }
+        const result = await this.commitTarget(
+          id,
+          {
+            ...target,
+            base: prepared.base,
+            items: draft.written.length,
+            checkoutDir: dir,
+            title: skillsPrTitle(id, draft.written.length),
+            body: skillsPrBody({
+              batchId: id,
+              profile: this.deps.profile,
+              library: group.library.name,
+              written: draft.written,
+              rejected: skillRejected,
+              legend,
+            }),
+          },
+          files,
+          `skill 提案 ${draft.written.length} 个`,
+        );
+        if (result.phase === 'failed') return { blocked: true, published };
+        published.push(...draft.written.map((item) => item.hash));
       }
-      const dir = join(this.deps.workDir, 'batches', id, `skills-${group.library.name}`);
-      const spec: RepoSpec = { repo, label, url: group.library.url, ...(group.library.ref ? { ref: group.library.ref } : {}) };
-      const prepared = await prepareCheckout(spec, dir, target.branch, { direct });
-      if ('error' in prepared) {
-        // Pinned to a tag / commit is a configuration fact, not a hiccup: skip
-        // rather than retry forever.
-        const permanent = /不能作为写入目标|不合法/.test(prepared.error);
-        this.saveTarget(id, { ...target, phase: permanent ? 'skipped' : 'failed', error: prepared.error });
-        if (!permanent) return { blocked: true, published };
-        continue;
-      }
-      if (direct) target = { ...target, branch: prepared.base };
-      const draft = await writeSkillDraft(dir, group.library, group.items);
-      const skillRejected = [
-        ...rejected.filter((item) => item.kind === 'skill'),
-        ...draft.rejected.map((item) => ({ scopeId: item.proposal.scopeId, kind: 'skill' as const, reason: item.reason })),
-      ];
-      if (draft.files.length === 0) {
-        this.saveTarget(id, {
-          ...target,
-          base: prepared.base,
-          phase: 'skipped',
-          error: draft.rejected[0]?.reason ?? '没有改动',
-          checkoutDir: dir,
-        });
-        continue;
-      }
-      const files = [...draft.files];
-      if (changelog) {
-        const logged = await writeChangelog(dir, changelogEntry({ batchId: id, at: this.now(), ...changelog, skills: draft.written }));
-        if ('file' in logged) files.push(logged.file);
-      }
-      const result = await this.commitTarget(
-        id,
-        {
-          ...target,
-          base: prepared.base,
-          items: draft.written.length,
-          checkoutDir: dir,
-          title: skillsPrTitle(id, draft.written.length),
-          body: skillsPrBody({
-            batchId: id,
-            profile: this.deps.profile,
-            library: group.library.name,
-            written: draft.written,
-            rejected: skillRejected,
-            legend,
-          }),
-        },
-        files,
-        `skill 提案 ${draft.written.length} 个`,
-      );
-      if (result.phase === 'failed') return { blocked: true, published };
-      published.push(...draft.written.map((item) => item.hash));
     }
     return { blocked: false, published };
   }
@@ -1435,7 +1460,7 @@ export class DreamService {
     if (info.state === 'OPEN') return { note: '还没合并，没有生效；不要的话直接在平台上关闭这个 PR' };
     if (info.state === 'CLOSED') return { note: '已关闭、没合并，没有生效，不用撤销' };
     if (info.state !== 'MERGED' || !info.mergeCommit) return { note: `PR 状态是 ${info.state || '未知'}，没法撤销` };
-    const url = repos.find((item) => item.repo === target.repo)?.url;
+    const url = repos.find((item) => item.repo === target.repo.replace(/:update$/, ''))?.url;
     if (!url) return { note: '这个仓库已经不在配置里，没法撤销' };
     const branch = `${dreamBranch(id)}-revert`;
     const dir = join(this.deps.workDir, 'reverts', id, target.repo.replace(/[^\w.-]+/g, '-'));

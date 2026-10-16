@@ -353,6 +353,13 @@ export interface DreamTuning {
    */
   publish?: 'pr' | 'push';
   /**
+   * How changes to skills that already exist are published; default: as
+   * {@link publish}. With `publish: push` and `skillUpdates: pr`, new skills
+   * go straight onto the default branch but a rewrite of an existing one
+   * waits in a Draft PR for review.
+   */
+  skillUpdates?: 'pr' | 'push';
+  /**
    * 课前学习: repositories (other bots' knowledge / skill libraries) studied at
    * the start of every run, only what changed since the last run. Read-only:
    * never written to. What is worth keeping lands in this profile's own
@@ -414,6 +421,7 @@ export interface DreamSettings {
   skillLibrary?: string;
   scopes?: string[];
   publish: 'pr' | 'push';
+  skillUpdates: 'pr' | 'push';
   external: DreamExternalLibraryConfig[];
   requireArgumentHint: boolean;
   localSkillDirs: string[];
@@ -444,6 +452,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   maxRunMinutes: 20,
   minIdleMinutes: 30,
   publish: 'pr',
+  skillUpdates: 'pr',
   external: [],
   requireArgumentHint: false,
   localSkillDirs: [],
@@ -687,6 +696,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     ...(library ? { skillLibrary: library } : {}),
     ...(scopes.length > 0 ? { scopes } : {}),
     publish: raw.publish === 'push' ? 'push' : 'pr',
+    skillUpdates: raw.skillUpdates === 'pr' || raw.skillUpdates === 'push' ? raw.skillUpdates : raw.publish === 'push' ? 'push' : 'pr',
     external: resolveExternalLibraries(raw.externalLibraries),
     requireArgumentHint: raw.requireArgumentHint === true,
     localSkillDirs: absoluteDirs(raw.localSkillDirs),

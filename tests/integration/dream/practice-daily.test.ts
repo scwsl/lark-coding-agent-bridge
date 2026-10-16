@@ -150,6 +150,8 @@ describe('publish: push', { timeout: TIMEOUT }, () => {
 
 interface HarnessOptions {
   answer: (prompt: string) => string;
+  /** Open dream PRs `gh` reports per repository. Default 5. */
+  openPrs?: number;
   quota?: QuotaReading;
   /** dreamTuning on top of the harness's own. */
   tuning?: Record<string, unknown>;
@@ -237,7 +239,7 @@ async function harness(opts: HarnessOptions) {
     readTranscript: async () => undefined,
     isProfileBusy: () => false,
     readQuota: async () => opts.quota ?? { windows: [{ label: '5 小时窗口', usedPercent: 95 }, { label: '本周', usedPercent: 40 }] },
-    countOpenPrs: async () => 5,
+    countOpenPrs: async () => opts.openPrs ?? 5,
     afterPublish: async (repo) => {
       published.push(repo);
     },
@@ -342,6 +344,37 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(h.prompts).toHaveLength(2);
     expect(h.prompts[1]).toContain('夜间光伏低于 100W');
     expect(h.prompts[1]).not.toContain('skills/show-status/SKILL.md');
+  });
+
+  it('with skillUpdates: pr, pushes new skills but opens a Draft PR for rewrites of existing ones', async () => {
+    const h = await harness({ answer: () => LEARNED, tuning: { skillUpdates: 'pr' }, openPrs: 0 });
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    const run = h.service.runs()[0]!;
+    expect(run.targets.map((target) => [target.repo, target.phase])).toEqual([
+      ['knowledge', 'published'],
+      ['skills:occam', 'published'],
+      ['skills:occam:update', 'pr-created'],
+    ]);
+    // main has the new skill and the changelog, not the rewrite
+    expect(await showFile(h.skillsRemote, 'main', 'skills/status-panel/SKILL.md')).toContain('argument-hint');
+    expect(await showFile(h.skillsRemote, 'main', 'skills/deploy/SKILL.md')).not.toContain('argument-hint');
+    expect(await showFile(h.skillsRemote, 'main', 'CHANGELOG.md')).not.toContain('更新技能 `deploy`');
+    // the rewrite waits on its own branch for review
+    expect(await showFile(h.skillsRemote, `dream/${run.id}`, 'skills/deploy/SKILL.md')).toContain('argument-hint: "[环境]"');
+    expect(await showFile(h.skillsRemote, `dream/${run.id}`, 'CHANGELOG.md')).toBe('');
+    expect(h.published).toEqual(['knowledge', 'skills:occam']);
+  });
+
+  it('holds back rewrites while the last rewrite PR is still open', async () => {
+    const h = await harness({ answer: () => LEARNED, tuning: { skillUpdates: 'pr' }, openPrs: 1 });
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    const update = h.service.runs()[0]!.targets.find((target) => target.repo === 'skills:occam:update');
+    expect(update).toMatchObject({ phase: 'skipped', error: expect.stringContaining('没审完') });
+    expect(await branches(h.skillsRemote)).toEqual(['main']);
   });
 
   it('skips the day once the weekly window is over the limit, and says so once', async () => {

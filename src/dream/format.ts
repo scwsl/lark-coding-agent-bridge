@@ -33,7 +33,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
     `- 每轮上限：${settings.maxSessions} 个会话、${settings.maxInputChars} 字符、${settings.maxRunMinutes} 分钟；会话空闲 ${settings.minIdleMinutes} 分钟后才读${settings.scopes ? `；只读 ${settings.scopes.length} 个指定会话` : ''}`,
     `- 已登记会话：${view.trackedSessions} 个`,
     settings.publish === 'push'
-      ? `- 发布方式：直接提交到默认分支并推送，每批写进仓库的 CHANGELOG.md${view.pendingDrafts > 0 ? `；待重推 ${view.pendingDrafts} 个` : ''}`
+      ? `- 发布方式：直接提交到默认分支并推送，每批写进仓库的 CHANGELOG.md${settings.skillUpdates === 'pr' ? '；修改已有技能改开 Draft PR，审核合并后生效' : ''}${view.pendingDrafts > 0 ? `；待重推 ${view.pendingDrafts} 个` : ''}`
       : `- 已开 Draft PR：${view.openedPrs} 个（\`/practice prs\` 看审核状态）${view.pendingDrafts > 0 ? `；待重试草稿 ${view.pendingDrafts} 个` : ''}`,
     ...(settings.requireArgumentHint ? ['- 技能要求：每个 skill 必须写 `argument-hint` 参数说明'] : []),
     ...externalLines(view),
