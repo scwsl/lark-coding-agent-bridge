@@ -349,6 +349,29 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(h.prompts).toHaveLength(0);
   });
 
+  it('goes ahead over the limit when the weekly window resets today before quotaResetBefore', async () => {
+    const h = await harness({
+      answer: () => LEARNED,
+      tuning: { quotaResetBefore: '10:00' },
+      quota: { windows: [{ label: '本周', usedPercent: 92, resets: 'Oct 16 at 9am (UTC)' }] },
+    });
+    const check = await h.service.checkAuto();
+    expect(check.started).toBeDefined();
+    await h.service.idle();
+    expect(h.service.runs()[0]!.note).toContain('今天 10:00 前就重置，照常整理');
+    expect(h.told[0]!.text).toContain('照常整理');
+  });
+
+  it('still skips when the reset is not before quotaResetBefore today', async () => {
+    const h = await harness({
+      answer: () => LEARNED,
+      tuning: { quotaResetBefore: '10:00' },
+      quota: { windows: [{ label: '本周', usedPercent: 92, resets: 'Oct 20 at 9am (UTC)' }] },
+    });
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'quota' });
+    expect(h.prompts).toHaveLength(0);
+  });
+
   it('reports an unreadable external library and goes on', async () => {
     const h = await harness({
       answer: () => LEARNED,

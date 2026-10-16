@@ -265,6 +265,12 @@ export interface DreamTuning {
   /** Which window {@link maxQuotaPercent} looks at: `any` — the fullest (default) — or `week`, the weekly one only. */
   quotaWindow?: 'any' | 'week';
   /**
+   * `HH:MM` (in {@link timezone}): over {@link maxQuotaPercent} is no reason
+   * to skip when that window resets today before this time — whatever is
+   * left would be thrown away by the reset anyway. Absent: always skip.
+   */
+  quotaResetBefore?: string;
+  /**
    * 每日模式: 自动整理 starts at this local time (`HH:MM`, in {@link timezone})
    * every day instead of waiting for material to pile up. The allowed hours
    * become the three hours from it ({@link window} is ignored), and the
@@ -319,6 +325,8 @@ export interface DreamAutoSettings {
   maxAutoFailures: number;
   maxQuotaPercent: number;
   quotaWindow: 'any' | 'week';
+  /** Over the quota limit is fine when the window resets today before this local time. */
+  quotaResetBefore?: { at: number; text: string };
   /** 每日模式: start time, minutes after local midnight; {@link window} is then derived from it. */
   daily?: { at: number; text: string };
 }
@@ -592,6 +600,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     ? raw.scopes.filter((scope): scope is string => typeof scope === 'string' && scope.trim() !== '').map((scope) => scope.trim())
     : [];
   const daily = typeof raw.dailyAt === 'string' ? parseDreamClock(raw.dailyAt) : undefined;
+  const resetBefore = typeof raw.quotaResetBefore === 'string' ? parseDreamClock(raw.quotaResetBefore) : undefined;
   const notifyChat = typeof raw.notifyChat === 'string' && /^o[cu]_[\w-]+$/.test(raw.notifyChat.trim()) ? raw.notifyChat.trim() : '';
   return {
     maxSessions: pick(raw.maxSessions, 1, 200, DREAM_DEFAULTS.maxSessions),
@@ -621,6 +630,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
       maxAutoFailures: pick(raw.maxAutoFailures, 1, 20, DREAM_AUTO_DEFAULTS.maxAutoFailures),
       maxQuotaPercent: pick(raw.maxQuotaPercent, 10, 100, DREAM_AUTO_DEFAULTS.maxQuotaPercent),
       quotaWindow: raw.quotaWindow === 'week' ? 'week' : 'any',
+      ...(resetBefore ? { quotaResetBefore: resetBefore } : {}),
       ...(daily ? { daily } : {}),
     },
   };

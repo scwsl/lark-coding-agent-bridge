@@ -96,7 +96,7 @@ function autoLines(view: DreamStatusView): string[] {
   const { auto } = view;
   if (!auto.enabled) return [`- 自动整理：未开启${view.enabled ? '（`/config` 里打开「自动整理」）' : ''}`];
   const s = auto.settings;
-  const quota = `${s.quotaWindow === 'week' ? '本周额度' : '额度'}已用低于 ${s.maxQuotaPercent}%`;
+  const quota = `${s.quotaWindow === 'week' ? '本周额度' : '额度'}已用低于 ${s.maxQuotaPercent}%${s.quotaResetBefore ? `（当天 ${s.quotaResetBefore.text} 前重置则不限）` : ''}`;
   const lines = [
     s.daily
       ? `- 自动整理：已开启，每天 ${s.daily.text}（${s.timezone}）开始；${s.window.text} 内 bot 空闲、${quota}时跑，每天一轮`

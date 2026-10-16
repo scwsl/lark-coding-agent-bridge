@@ -37,7 +37,7 @@ export interface DreamAutoCheck {
   reason?: string;
   material?: DreamMaterial;
   openPrs?: number;
-  quota?: { percent: number; label: string } | { unknown: true };
+  quota?: { percent: number; label: string; resets?: string } | { unknown: true };
 }
 
 export interface DreamMaterial {
@@ -158,6 +158,12 @@ export function msUntilDaily(now: number, at: number, timezone: string): number 
   const { minutes } = localClock(now, timezone);
   const delta = (at - minutes + 1440) % 1440 || 1440;
   return delta * 60_000 - (now % 60_000);
+}
+
+/** Epoch ms of today's `at` (minutes after local midnight in `timezone`); may lie in the past. */
+export function localTimeToday(now: number, at: number, timezone: string): number {
+  const { minutes } = localClock(now, timezone);
+  return now - (now % 60_000) + (at - minutes) * 60_000;
 }
 
 export function formatDays(days: number): string {

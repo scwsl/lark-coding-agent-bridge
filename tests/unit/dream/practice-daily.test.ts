@@ -211,3 +211,24 @@ describe('changelogEntry', () => {
     expect(entry).toContain('理由：平台规则（依据 X1）');
   });
 });
+
+describe('quota reset time', () => {
+  it("parses Claude's wordings and ISO times into the next reset", async () => {
+    const { quotaResetAt } = await import('../../../src/agent/quota.js');
+    const now = at('2026-10-16T13:00:00Z');
+    expect(quotaResetAt('Oct 20 at 9am (Asia/Shanghai)', now)).toBe(at('2026-10-20T01:00:00Z'));
+    expect(quotaResetAt('Oct 18, 2:59pm (Asia/Shanghai)', now)).toBe(at('2026-10-18T06:59:00Z'));
+    expect(quotaResetAt('Oct 17 at 12:20am (Asia/Shanghai)', now)).toBe(at('2026-10-16T16:20:00Z'));
+    expect(quotaResetAt('Jan 2 at 1am (UTC)', now)).toBe(at('2027-01-02T01:00:00Z'));
+    expect(quotaResetAt('2026-10-20T01:00:00.000Z', now)).toBe(at('2026-10-20T01:00:00Z'));
+    expect(quotaResetAt('soon', now)).toBeUndefined();
+    expect(quotaResetAt(undefined, now)).toBeUndefined();
+  });
+
+  it('reads quotaResetBefore and today’s deadline in the time zone', async () => {
+    const { localTimeToday } = await import('../../../src/dream/schedule.js');
+    expect(resolveDreamSettings({ quotaResetBefore: '10:00' }).auto.quotaResetBefore).toEqual({ at: 600, text: '10:00' });
+    // 04:10 Shanghai on 10-20 → 10:00 Shanghai the same day
+    expect(localTimeToday(at('2026-10-19T20:10:30Z'), 600, 'Asia/Shanghai')).toBe(at('2026-10-20T02:00:00Z'));
+  });
+});

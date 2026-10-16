@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
-import { fullestQuotaWindow, readAgentQuota, type QuotaReading } from '../agent/quota';
+import { fullestQuotaWindow, quotaResetAt, readAgentQuota, type QuotaReading } from '../agent/quota';
 import { agentDescriptor, isAgentKind } from '../agent/registry';
 import { readAgentTranscript, type AgentTranscript } from '../agent/session-transcript';
 import type { ProfileConfig, SkillLibraryConfig } from '../config/profile-schema';
@@ -76,6 +76,7 @@ import {
 import {
   cheapDreamGate,
   dreamWindowAt,
+  localTimeToday,
   materialGate,
   msUntilDaily,
   type DreamAutoCheck,
@@ -163,6 +164,8 @@ export interface DreamStartOptions {
   trigger?: 'manual' | 'auto';
   /** Share of the run limits to use: 自动整理 without a quota reading runs on half. */
   budget?: number;
+  /** Said first in the run's outcome (why an automatic run went ahead despite a full quota…). */
+  note?: string;
 }
 
 export type DreamStartResult =
@@ -384,7 +387,7 @@ export class DreamService {
       const release = locks.release;
       locks = undefined;
       const unwatch = this.watch(current);
-      current.done = this.execute(run, actor, current, options.budget ?? 1)
+      current.done = this.execute(run, actor, current, options.budget ?? 1, options.note)
         .catch((err: unknown) => {
           log.fail('dream', err, { step: 'run', batch: id });
           if (this.state.run(id)?.checkpointAt === undefined) this.discardDrafts(id, '整理出错，草稿作废');
@@ -570,7 +573,17 @@ export class DreamService {
     }
     const quota = await this.readQuota(auto.quotaWindow);
     const context = { ...(material ? { material } : {}), openPrs, quota };
+    let lead: string | undefined;
     if ('percent' in quota && quota.percent >= auto.maxQuotaPercent) {
+      const reason = `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`;
+      const resetAt = quotaResetAt(quota.resets, now);
+      const before = auto.quotaResetBefore;
+      if (resetAt !== undefined && before && resetAt > now && resetAt <= localTimeToday(now, before.at, auto.timezone)) {
+        // Whatever is left goes away at the reset: use it.
+        lead = `${quota.label}额度已用 ${quota.percent}%，但今天 ${before.text} 前就重置，照常整理`;
+      }
+    }
+    if (!lead && 'percent' in quota && quota.percent >= auto.maxQuotaPercent) {
       const reason = `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`;
       if (auto.daily) {
         // The weekly window will not empty within the hours left: today is skipped, once, and said so.
@@ -587,6 +600,7 @@ export class DreamService {
     const started = await this.start(AUTO_ACTOR, notifyChat ? (run) => this.tell(notifyChat, formatDreamRun(run)) : undefined, {
       trigger: 'auto',
       budget: 'unknown' in quota ? UNKNOWN_QUOTA_BUDGET : 1,
+      ...(lead ? { note: lead } : {}),
     });
     if ('error' in started) {
       return this.noteCheck({ at: now, block: started.code === 'locked' ? 'locked' : 'running', reason: started.error, ...context });
@@ -629,7 +643,9 @@ export class DreamService {
     void this.deps.notify(chatId, text).catch((err: unknown) => log.fail('dream', err, { step: 'notify' }));
   }
 
-  private async readQuota(window: 'any' | 'week' = 'any'): Promise<{ percent: number; label: string } | { unknown: true }> {
+  private async readQuota(
+    window: 'any' | 'week' = 'any',
+  ): Promise<{ percent: number; label: string; resets?: string } | { unknown: true }> {
     const read =
       this.deps.readQuota ??
       (async () => {
@@ -646,7 +662,9 @@ export class DreamService {
       : window === 'week' && !reading.blocked
         ? reading.windows.find((item) => item.label === '本周')
         : fullestQuotaWindow(reading);
-    return chosen ? { percent: Math.round(chosen.usedPercent), label: chosen.label } : { unknown: true };
+    return chosen
+      ? { percent: Math.round(chosen.usedPercent), label: chosen.label, ...(chosen.resets ? { resets: chosen.resets } : {}) }
+      : { unknown: true };
   }
 
   /** While an automatic batch drafts, anything else the profile starts stops it. */
@@ -696,7 +714,7 @@ export class DreamService {
     if (Object.keys(patch).length > 0) this.state.updateAuto(patch);
   }
 
-  private async execute(run: DreamRun, actor: DreamActor, current: CurrentRun, budget: number): Promise<void> {
+  private async execute(run: DreamRun, actor: DreamActor, current: CurrentRun, budget: number, lead?: string): Promise<void> {
     const signal = current.abort.signal;
     const stopped = (rest: string) => this.finish(run.id, 'cancelled', `${current.stopped ?? '已取消'}，${rest}`);
     const configured = getDream(this.deps.appConfig());
@@ -746,6 +764,7 @@ export class DreamService {
       // Read, nothing worth keeping: the libraries' cursors move all the same.
       this.state.advanceExternal(learning.cursors);
       const note = [
+        lead,
         resumed,
         learning.error,
         deferred.length > 0 ? `${deferred.length} 个会话延后` : '没有新的已结束会话可整理',
@@ -858,6 +877,7 @@ export class DreamService {
     const targets = this.state.run(run.id)?.targets ?? [];
     const problems = targets.filter((target) => target.error);
     const summary = [
+      lead,
       budget < 1 ? '读不到额度，按一半预算运行' : undefined,
       resumed,
       learning.error,
