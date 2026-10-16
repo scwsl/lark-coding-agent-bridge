@@ -47,11 +47,16 @@ const SKILL_INDEX_MAX_CHARS = 16_000;
 export async function buildKnowledgeContext(
   input: BuildKnowledgeContextInput,
 ): Promise<KnowledgeContext | undefined> {
-  const [profile, chat, skills] = await Promise.all([
+  // A topic (`oc_xxx:omt_yyy`) also sees its group's notes (`oc_xxx`), so a
+  // topic group can keep one shared memory instead of one per topic.
+  const groupId = input.scopeId.includes(':') ? input.scopeId.split(':')[0] : undefined;
+  const [profile, group, topic, skills] = await Promise.all([
     input.store.listMemories({ kind: 'profile' }),
+    groupId ? input.store.listMemories({ kind: 'chat', scopeId: groupId }) : Promise.resolve([]),
     input.store.listMemories({ kind: 'chat', scopeId: input.scopeId }),
     input.store.listSkills(),
   ]);
+  const chat = [...group, ...topic];
 
   const budgeted = applyBudget(profile, chat, input.maxChars ?? DEFAULT_MAX_CHARS);
   const trimmedSkills = budgetSkills(skills.slice(0, MAX_SKILLS).map(toSkillRef));

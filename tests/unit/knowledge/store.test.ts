@@ -182,6 +182,18 @@ describe('prompt injection', () => {
     expect(JSON.stringify(context)).not.toContain('很长的正文');
   });
 
+  it('gives a topic its group notes plus its own, and keeps topics apart', async () => {
+    await store.addMemory({ kind: 'chat', scopeId: 'oc_g' }, 'group note');
+    await store.addMemory({ kind: 'chat', scopeId: 'oc_g:omt_a' }, 'topic a note');
+
+    const a = await buildKnowledgeContext({ store, scopeId: 'oc_g:omt_a' });
+    expect(a?.chatMemory).toEqual(['group note', 'topic a note']);
+    const b = await buildKnowledgeContext({ store, scopeId: 'oc_g:omt_b' });
+    expect(b?.chatMemory).toEqual(['group note']);
+    const group = await buildKnowledgeContext({ store, scopeId: 'oc_g' });
+    expect(group?.chatMemory).toEqual(['group note']);
+  });
+
   it('keeps the newest notes and prefers chat scope when the budget is tight', async () => {
     for (let i = 0; i < 10; i++) {
       await store.addMemory({ kind: 'profile' }, `global-${i}`.padEnd(20, 'x'));
