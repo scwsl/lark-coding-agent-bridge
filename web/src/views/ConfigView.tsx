@@ -172,7 +172,7 @@ export function ConfigView({ profile }: { profile: string }) {
             checked={cfg.smartSession} onChange={(v) => set("smartSession", v)} />
           <ToggleRow label="Worktree 自动清理" hint="每小时检查 bridge 创建的 worktree；默认闲置 7 天、已合入主工作区且无会话引用才清理。改动、未跟踪/忽略文件、锁定目录会保留；只删除 bridge 新建的分支。天数可在配置文件调整。"
             checked={cfg.autoWorktreeCleanup} onChange={(v) => set("autoWorktreeCleanup", v)} />
-          <ToggleRow label="课堂精练" hint="打开后可以手动触发（/dream run 或下方「课堂精练」卡片）：读取已结束的会话，只读整理出记忆、笔记和 skill 提案，在知识库和 skill 库开 Draft PR，合并前不生效。默认关闭。"
+          <ToggleRow label="课堂精练" hint="打开后可以手动触发（/practice run 或下方「课堂精练」卡片）：读取已结束的会话，只读整理出记忆、笔记和 skill 提案，在知识库和 skill 库开 Draft PR，合并前不生效。默认关闭。"
             checked={cfg.dream} onChange={(v) => set("dream", v)} />
           <ToggleRow label="自动整理" hint="需先打开课堂精练。不按天跑：新内容攒够（默认 5 个会话范围或 6 万字）、距上次至少 3 天、上一批 Draft PR 已审完、在允许时段（默认 01:00-07:00）且 bot 空闲时才自己整理一轮；有用户消息就让路，额度接近上限时跳过，不推送任何消息。条件在配置文件 dreamTuning 里调。默认关闭。"
             checked={cfg.dreamAuto} onChange={(v) => set("dreamAuto", v)} />

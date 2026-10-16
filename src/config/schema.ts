@@ -212,7 +212,7 @@ export interface AppPreferences {
   /** Thresholds behind {@link smartSession}; config-file only. See {@link getSmartSession}. */
   smartSessionTuning?: SmartSessionTuning;
   /**
-   * 课堂精练. When on, an admin's `/dream run` turns ended conversations into
+   * 课堂精练. When on, an admin's `/practice run` turns ended conversations into
    * reviewable Draft PRs against the knowledge repo and the profile's own skill
    * library. Never merges. Independent of {@link smartSession}. Default off.
    */

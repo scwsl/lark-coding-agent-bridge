@@ -777,7 +777,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   autoResumer.start();
   controls.autoResumer = autoResumer;
 
-  // 课堂精练: runs when an admin asks (`/dream run`, Web console) or, with
+  // 课堂精练: runs when an admin asks (`/practice run`, Web console) or, with
   // 自动整理 on, when its gates pass — never while the profile has anything
   // else to do. Notes the conversations the catalog records while the switch
   // is on, so a later run can still read the ones a newer conversation replaced.

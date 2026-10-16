@@ -2,7 +2,7 @@ import { formatChars } from './schedule';
 import type { DreamRevertResult, DreamStatusView } from './service';
 import type { DreamRun, DreamTarget } from './state';
 
-/** Chat text for `/dream`: status, a finished run, the PR list. Counts and links only — never draft content. */
+/** Chat text for `/practice`: status, a finished run, the PR list. Counts and links only — never draft content. */
 
 const STATUS_LABEL: Record<DreamRun['status'], string> = {
   queued: '⏳ 排队中',
@@ -31,7 +31,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
     `- skill 库：${view.targets.skills.library ? `\`${view.targets.skills.library}\`` : `⚠️ ${view.targets.skills.problem}`}`,
     `- 每轮上限：${settings.maxSessions} 个会话、${settings.maxInputChars} 字符、${settings.maxRunMinutes} 分钟；会话空闲 ${settings.minIdleMinutes} 分钟后才读${settings.scopes ? `；只读 ${settings.scopes.length} 个指定会话` : ''}`,
     `- 已登记会话：${view.trackedSessions} 个`,
-    `- 已开 Draft PR：${view.openedPrs} 个（\`/dream prs\` 看审核状态）${view.pendingDrafts > 0 ? `；待重试草稿 ${view.pendingDrafts} 个` : ''}`,
+    `- 已开 Draft PR：${view.openedPrs} 个（\`/practice prs\` 看审核状态）${view.pendingDrafts > 0 ? `；待重试草稿 ${view.pendingDrafts} 个` : ''}`,
   ];
   if (view.lastSucceededAt) lines.push(`- 上次完成：${formatTime(view.lastSucceededAt)}`);
   if (view.running) lines.push(`- 进行中：批次 \`${view.running.id}\`（${STATUS_LABEL[view.running.status]}，${formatTime(view.running.startedAt)} 开始）`);
@@ -42,7 +42,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
   }
   lines.push(
     '',
-    '`/dream run` 立即整理 · `/dream cancel` 取消 · `/dream prs` PR 列表 · `/dream diff [批次]` 查看差异 · `/dream revert <批次>` 撤销',
+    '`/practice run` 立即整理 · `/practice cancel` 取消 · `/practice prs` PR 列表 · `/practice diff [批次]` 查看差异 · `/practice revert <批次>` 撤销',
   );
   return lines.join('\n');
 }

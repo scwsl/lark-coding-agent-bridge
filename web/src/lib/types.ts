@@ -55,7 +55,7 @@ export interface ConfigView {
   showToolCalls: boolean;
   smartSession: boolean;
   autoWorktreeCleanup: boolean;
-  /** 课堂精练 switch (manual runs: /dream run or the dream card). */
+  /** 课堂精练 switch (manual runs: /practice run or the dream card). */
   dream: boolean;
   /** 自动整理 on top of {@link dream}. */
   dreamAuto: boolean;
@@ -271,7 +271,7 @@ export interface DreamAutoCheck {
   quota?: { percent: number; label: string } | { unknown: true };
 }
 
-/** 课堂精练 (`/dream`): status, recent runs and their Draft PRs. */
+/** 课堂精练 (`/practice`): status, recent runs and their Draft PRs. */
 export interface DreamView {
   /** True when this console's process runs the profile (run / cancel available). */
   live: boolean;

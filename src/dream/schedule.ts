@@ -95,7 +95,7 @@ export function cheapDreamGate(input: {
   if (ledger.consecutiveFailures >= auto.maxAutoFailures) {
     return {
       block: 'paused',
-      reason: `自动整理连续失败 ${ledger.consecutiveFailures} 次，已暂停；手动 \`/dream run\` 跑通一次后恢复`,
+      reason: `自动整理连续失败 ${ledger.consecutiveFailures} 次，已暂停；手动 \`/practice run\` 跑通一次后恢复`,
     };
   }
   const window = dreamWindowAt(now, auto.window, auto.timezone);

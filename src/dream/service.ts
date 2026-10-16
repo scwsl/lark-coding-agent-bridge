@@ -76,7 +76,7 @@ import { DreamStateStore, sessionKey, type DreamRun, type DreamSessionRecord, ty
  * `origin`) and the profile's own skill library (from `skills.libraries`).
  * Nothing it produces takes effect until a human merges.
  *
- * A run is started by an admin (`/dream run`, Web) or by 自动整理 — which is
+ * A run is started by an admin (`/practice run`, Web) or by 自动整理 — which is
  * not a daily clock but a set of gates ({@link DreamService.checkAuto}). Each
  * run goes draft → checkpoint → publish: every target repository gets its
  * local commit first; only when all of them have one do the cursors move, in
@@ -1148,7 +1148,7 @@ export class DreamService {
       body: [
         `撤销课堂精练批次 \`${id}\` 合并进 ${label} 的内容（原 PR：${target.prUrl}）。`,
         '',
-        `由 profile \`${this.deps.profile}\` 的 \`/dream revert\` 生成。和其他课堂精练 PR 一样，合并这个 PR 才生效。`,
+        `由 profile \`${this.deps.profile}\` 的 \`/practice revert\` 生成。和其他课堂精练 PR 一样，合并这个 PR 才生效。`,
       ].join('\n'),
     });
     if ('error' in pr) return { note: pr.error };

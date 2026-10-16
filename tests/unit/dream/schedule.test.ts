@@ -63,7 +63,7 @@ describe('cheapDreamGate', () => {
     expect(cheapDreamGate({ now: inside, auto: auto(), ledger: { consecutiveFailures: 1, lastFailedAt: inside - DAY } })).toBeUndefined();
     expect(cheapDreamGate({ now: inside, auto: auto(), ledger: { consecutiveFailures: 3 } })).toMatchObject({
       block: 'paused',
-      reason: expect.stringContaining('/dream run'),
+      reason: expect.stringContaining('/practice run'),
     });
   });
 });

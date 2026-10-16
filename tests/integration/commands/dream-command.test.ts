@@ -128,24 +128,24 @@ function texts(channel: FakeChannel): string {
   return JSON.stringify(channel.sent.map((m) => m.content));
 }
 
-describe('/dream', () => {
+describe('/practice', () => {
   it('is for admins only', async () => {
     const h = await createHarness();
-    await h.run('/dream run', { senderId: 'ou-member' });
+    await h.run('/practice run', { senderId: 'ou-member' });
     expect(h.dream.start).not.toHaveBeenCalled();
     expect(h.channel.sent).toHaveLength(1);
   });
 
   it('only works in a private chat', async () => {
     const h = await createHarness();
-    await h.run('/dream', { chatType: 'group' });
+    await h.run('/practice', { chatType: 'group' });
     expect(h.dream.status).not.toHaveBeenCalled();
     expect(texts(h.channel)).toContain('私聊');
   });
 
   it('shows status with targets, counts and links, never draft text', async () => {
     const h = await createHarness();
-    await h.run('/dream');
+    await h.run('/practice');
     const out = texts(h.channel);
     expect(out).toContain('课堂精练');
     expect(out).toContain('git@github.com:acme/k.git');
@@ -155,10 +155,10 @@ describe('/dream', () => {
 
   it('says whether 自动整理 is on and why it did not run', async () => {
     const off = await createHarness();
-    await off.run('/dream');
+    await off.run('/practice');
     expect(texts(off.channel)).toContain('自动整理：未开启');
     const on = await createHarness({ autoOn: true });
-    await on.run('/dream');
+    await on.run('/practice');
     const out = texts(on.channel);
     expect(out).toContain('01:00-07:00');
     expect(out).toContain('没跑——待审积压');
@@ -166,34 +166,34 @@ describe('/dream', () => {
 
   it('reverts a batch through a Draft PR', async () => {
     const h = await createHarness();
-    await h.run('/dream revert');
+    await h.run('/practice revert');
     expect(h.dream.revert).not.toHaveBeenCalled();
     expect(texts(h.channel)).toContain('用法');
-    await h.run(`/dream revert ${RUN.id}`);
+    await h.run(`/practice revert ${RUN.id}`);
     expect(h.dream.revert).toHaveBeenCalledWith(RUN.id);
     expect(texts(h.channel)).toContain('pull/9');
-    await h.run('/dream revert nope');
+    await h.run('/practice revert nope');
     expect(texts(h.channel)).toContain('没有批次');
-    await h.run(`/dream revert ${RUN.id}`, { senderId: 'ou-member' });
+    await h.run(`/practice revert ${RUN.id}`, { senderId: 'ou-member' });
     expect(h.dream.revert).toHaveBeenCalledTimes(2);
   });
 
   it('starts a run, reports its outcome once, and cancels', async () => {
     const h = await createHarness();
-    await h.run('/dream run');
+    await h.run('/practice run');
     expect(h.dream.start).toHaveBeenCalledWith({ id: 'ou-admin', name: 'User' }, expect.any(Function));
     expect(texts(h.channel)).toContain('已开始整理');
     h.finish(RUN);
     await vi.waitFor(() => expect(texts(h.channel)).toContain('Draft PR 已开'));
-    await h.run('/dream cancel');
+    await h.run('/practice cancel');
     expect(h.dream.cancel).toHaveBeenCalled();
   });
 
   it('lists PRs and shows a fenced diff', async () => {
     const h = await createHarness();
-    await h.run('/dream prs');
+    await h.run('/practice prs');
     expect(texts(h.channel)).toContain('待审核（草稿）');
-    await h.run(`/dream diff ${RUN.id}`);
+    await h.run(`/practice diff ${RUN.id}`);
     expect(h.dream.diff).toHaveBeenCalledWith(RUN.id);
     const last = texts(h.channel);
     expect(last).toContain('```diff');

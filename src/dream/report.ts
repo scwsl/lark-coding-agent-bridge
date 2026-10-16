@@ -83,7 +83,7 @@ export function knowledgePrBody(input: {
   }
   if (input.flags.length > 0) {
     lines.push(`## 待人工确认（${input.flags.length}）`, '');
-    lines.push('合并 / 冲突 / 疑似过时只做标记，写在对应范围的 `notes/<scope>/dream-review.md` 里，不改原条目。', '');
+    lines.push('合并 / 冲突 / 疑似过时只做标记，写在对应范围的 `notes/<scope>/practice-review.md` 里，不改原条目。', '');
     for (const flag of input.flags) {
       lines.push(`- ${flagLine(flag)}`);
       lines.push(`  - 理由：${flag.reason}`, `  - 来源：${sources(flag.sources)}`);

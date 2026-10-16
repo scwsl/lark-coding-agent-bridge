@@ -7,10 +7,10 @@ import { ApiError } from './api';
 import type { ProfileTarget } from './knowledge';
 
 /**
- * The console's 课堂精练 panel: the same status `/dream` shows — 自动整理's
+ * The console's 课堂精练 panel: the same status `/practice` shows — 自动整理's
  * last check included — plus run / cancel / revert for a profile this process
  * hosts. A profile run by its own daemon is shown from its state file, read
- * without writing anything back; actions for it go through Feishu (`/dream`
+ * without writing anything back; actions for it go through Feishu (`/practice`
  * in a DM with the bot).
  */
 
@@ -73,7 +73,7 @@ export async function mutateDream(target: ProfileTarget, body: unknown): Promise
   const action = (body as { action?: unknown } | undefined)?.action;
   const service = target.live ? target.controls?.dream : undefined;
   if (!service) {
-    throw new ApiError(409, '这个 profile 不由控制台托管：请在飞书里私聊 bot 发送 /dream run');
+    throw new ApiError(409, '这个 profile 不由控制台托管：请在飞书里私聊 bot 发送 /practice run');
   }
   let message: string;
   if (action === 'run') {

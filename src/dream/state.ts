@@ -53,12 +53,12 @@ export interface DreamTarget {
   prUrl?: string;
   prNumber?: number;
   error?: string;
-  /** Local checkout, kept for retries and `/dream diff`. */
+  /** Local checkout, kept for retries and `/practice diff`. */
   checkoutDir?: string;
   /** PR title / body, kept so a retry opens exactly the PR the first try meant to. */
   title?: string;
   body?: string;
-  /** Draft PR that reverts this target's merged batch (`/dream revert`). */
+  /** Draft PR that reverts this target's merged batch (`/practice revert`). */
   revertPrUrl?: string;
 }
 
@@ -66,7 +66,7 @@ export interface DreamRun {
   /** Batch id; also the `dream/<id>` branch name of every target. */
   id: string;
   status: DreamRunStatus;
-  /** Who started it: an admin (`/dream run`, Web) or 自动整理. Absent in runs from before P2: manual. */
+  /** Who started it: an admin (`/practice run`, Web) or 自动整理. Absent in runs from before P2: manual. */
   trigger?: 'manual' | 'auto';
   actorId: string;
   startedAt: number;

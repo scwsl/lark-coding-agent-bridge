@@ -440,7 +440,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               {
                 tag: 'markdown',
                 content:
-                  '**课堂精练**\n<font color="grey">开=管理员可用 /dream run 把已结束的会话整理成记忆 / 笔记 / skill 草稿，以 Draft PR 提交到知识库和自有 skill 库，审核合并后才生效；不推送日报</font>',
+                  '**课堂精练**\n<font color="grey">开=管理员可用 /practice run 把已结束的会话整理成记忆 / 笔记 / skill 草稿，以 Draft PR 提交到知识库和自有 skill 库，审核合并后才生效；不推送日报</font>',
               },
               {
                 tag: 'select_static',

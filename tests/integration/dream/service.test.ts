@@ -427,7 +427,7 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect((await h.service.checkAuto()).started).toBeDefined();
     await h.service.idle();
     h.clock.now = NOW + 2 * 24 * HOUR;
-    expect(await h.service.checkAuto()).toMatchObject({ block: 'paused', reason: expect.stringContaining('/dream run') });
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'paused', reason: expect.stringContaining('/practice run') });
 
     answer = JSON.stringify({ memory: [{ action: 'add', target: 'chat', text: '一条事实', reason: 'r', sources: ['S1#1'] }] });
     await h.service.start({ id: 'ou-admin' });

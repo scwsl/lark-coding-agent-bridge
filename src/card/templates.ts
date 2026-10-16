@@ -317,7 +317,7 @@ export function helpCard(agentName = 'Agent'): object {
           '`/skills [show <名字>]` — skill 索引，agent 按需读取正文',
           '`/skills lib [add|sync|rm]` — 共享 skill 库（git 仓库，管理员）',
           '`/knowledge [bind|sync]` — 记忆与 skill 的 git 同步，绑定后定时自动同步',
-          '`/dream [run|cancel|prs|diff|revert]` — 课堂精练：把已结束的会话整理成待审核的 Draft PR，可撤销已合并的批次（管理员私聊）',
+          '`/practice [run|cancel|prs|diff|revert]` — 课堂精练：把已结束的会话整理成待审核的 Draft PR，可撤销已合并的批次（管理员私聊）',
         ]),
         helpSection('green-50', '🧪 联调', [
           '`/joint-debug <单号>` — 把 JIRA 单合入 devops、触发 Jenkins 部署到联调环境（8.221）并走 web 冒烟，如 `/joint-debug ANTELOPE-6747`',
