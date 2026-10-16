@@ -162,6 +162,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import type { PendingRotationStore } from '../session/rotation-store';
+import type { CodeSnippetStore } from '../card/code-snippets';
 import { decideRotation } from '../session/smart-session';
 import { probeAgentSession } from '../agent/session-probe';
 import { describeMeetingError, type MeetingManager } from '../meeting/manager';
@@ -223,6 +224,8 @@ export interface Controls {
   audit?: AuditLog;
   /** 会话智能压缩 closes the agent asked for, read by `/status`. Late-bound by startChannel. */
   pendingRotations?: Pick<PendingRotationStore, 'get'>;
+  /** Code blocks behind finished cards' 「复制代码」 buttons (see /copycode). */
+  codeSnippets?: Pick<CodeSnippetStore, 'get' | 'put'>;
   /** 梦境整理 backing `/dream` and the console's dream panel. Late-bound by startChannel. */
   dream?: DreamService;
 }
@@ -292,6 +295,7 @@ const handlers: Record<string, Handler> = {
   '/account': handleAccount,
   '/config': handleConfig,
   '/stop': handleStop,
+  '/copycode': handleCopyCode,
   '/timeout': handleTimeout,
   '/ps': handlePs,
   '/exit': handleExit,
@@ -426,6 +430,27 @@ export async function runCommandHandler(
  * handlers where a failed reply shouldn't bubble up and crash the bot —
  * losing the message is better than dying.
  */
+/**
+ * 「复制代码」 button on a finished card: send that code block alone as a
+ * plain-text reply to the card, so long-press / right-click 复制 takes it
+ * whole. Cards themselves can't write the clipboard.
+ */
+async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> {
+  const key = args.trim();
+  const code = key ? ctx.controls.codeSnippets?.get(key) : undefined;
+  if (!code) {
+    await reply(ctx, '这段代码已经找不到了（太久以前的卡片），请让我重新发一次。');
+    return;
+  }
+  log.info('command', 'copycode', { key, chars: code.length });
+  try {
+    await ctx.channel.send(ctx.msg.chatId, { text: code }, commandReplyOptions(ctx));
+  } catch (err) {
+    log.fail('command', err, { step: 'copycode' });
+    await reply(ctx, '代码发送失败，请稍后再点一次。');
+  }
+}
+
 async function reply(ctx: CommandContext, markdown: string): Promise<void> {
   try {
     await ctx.channel.send(ctx.msg.chatId, { markdown }, commandReplyOptions(ctx));

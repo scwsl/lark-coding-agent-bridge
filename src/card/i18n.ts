@@ -32,6 +32,8 @@ export interface RunStrings {
   secondsAgo(n: number): string;
   minutesAgo(n: number): string;
   stop: string;
+  /** Label of a code block's copy button; `index` is 1-based, absent when the answer has one block. */
+  copyCode(index?: number, lang?: string): string;
   stopConfirmTitle: string;
   stopConfirmText: string;
   interrupted: string;
@@ -83,6 +85,7 @@ const zh: RunStrings = {
   secondsAgo: (n) => `${n} 秒前`,
   minutesAgo: (n) => `${n} 分钟前`,
   stop: '⏹ 终止',
+  copyCode: (i, lang) => `📋 复制${i ? ` #${i}` : '代码'}${lang ? ` ${lang.toUpperCase()}` : ''}`,
   stopConfirmTitle: '终止这个任务？',
   stopConfirmText: '任务和它启动的命令都会被结束，无法恢复。',
   interrupted: '_⏹ 已被中断_',
@@ -147,6 +150,7 @@ const en: RunStrings = {
   secondsAgo: (n) => `${n}s ago`,
   minutesAgo: (n) => `${n} min ago`,
   stop: '⏹ Stop',
+  copyCode: (i, lang) => `📋 Copy${i ? ` #${i}` : ' code'}${lang ? ` ${lang.toUpperCase()}` : ''}`,
   stopConfirmTitle: 'Stop this task?',
   stopConfirmText: 'The task and every command it started will be ended. This cannot be undone.',
   interrupted: '_⏹ Stopped_',
