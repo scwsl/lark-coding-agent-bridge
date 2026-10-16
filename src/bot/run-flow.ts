@@ -19,7 +19,7 @@ import type { BackgroundTurnHandler, RunExecution, RunExecutor } from '../runtim
 import type { GateContext } from '../runtime/approvals';
 import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import type { AgentSessionProbe } from '../agent/session-probe';
-import type { SmartSessionSettings } from '../config/schema';
+import { effortPrefForChat, type SmartSessionSettings } from '../config/schema';
 import type { SessionCatalog } from '../session/catalog';
 import {
   decideRotation,
@@ -201,7 +201,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       ),
       effort: resolveEffortArg(
         input.profileConfig.agentKind,
-        input.profileConfig.preferences.effort,
+        effortPrefForChat(input.profileConfig.preferences, input.scope.chatId),
       ),
       images:
         descriptor.imageArgs

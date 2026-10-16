@@ -46,6 +46,7 @@ import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
+  effortPrefForChat,
   getAgentStopGraceMs,
   getCotMessages,
   getMaxConcurrentRuns,
@@ -1742,7 +1743,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       title: channel.botIdentity?.name ?? controls.profile,
       agent: capability.agentId,
       model: modelLabel(agentKind, modelPref),
-      effort: resolveEffortArg(agentKind, controls.profileConfig.preferences.effort),
+      effort: resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)),
       provider: capability.descriptor.provider,
       ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
     },

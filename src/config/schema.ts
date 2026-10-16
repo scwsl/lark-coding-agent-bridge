@@ -143,6 +143,12 @@ export interface AppPreferences {
    */
   effort?: EffortLevel;
   /**
+   * Per-chat override of {@link effort}, keyed by chat_id (a group's topics
+   * follow the group). Chats not listed use `effort`. Hand-edited only;
+   * `/config` still edits the profile-wide value.
+   */
+  chatEffort?: Record<string, EffortLevel>;
+  /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from
    * the legacy tool display; `detailed` also includes tool args/output.
@@ -398,6 +404,20 @@ export function getShowToolCalls(cfg: AppConfig): boolean {
 export function getEffort(cfg: AppConfig): EffortLevel | undefined {
   const raw = cfg.preferences?.effort;
   return ALL_EFFORT_LEVELS.includes(raw as EffortLevel) ? (raw as EffortLevel) : undefined;
+}
+
+/**
+ * The effort preference that applies in one chat: its `chatEffort` entry,
+ * else the profile-wide `effort`. Returns the raw stored value; pass it
+ * through `resolveEffortArg` for the per-agent gating.
+ */
+export function effortPrefForChat(
+  prefs: Pick<AppPreferences, 'effort' | 'chatEffort'> | undefined,
+  chatId: string | undefined,
+): EffortLevel | undefined {
+  const override = chatId ? prefs?.chatEffort?.[chatId] : undefined;
+  // A mistyped override falls back to the profile value, not to the CLI default.
+  return ALL_EFFORT_LEVELS.includes(override as EffortLevel) ? override : prefs?.effort;
 }
 
 export function getCotMessages(cfg: AppConfig): CotMessagesMode {
