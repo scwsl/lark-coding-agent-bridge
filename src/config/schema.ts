@@ -178,6 +178,13 @@ export interface AppPreferences {
    */
   longRunNoticeMinutes?: number;
   /**
+   * 过载保护: in these group chats, a batch made only of other bots' messages
+   * is not answered while the agent account's quota is tight — the bot posts
+   * an overload card instead and starts no run. Humans are always answered.
+   * Config-file only. See {@link resolveBotOverload}.
+   */
+  botOverload?: BotOverloadConfig;
+  /**
    * Whether the bot only responds to messages that @-mention it in groups
    * (regular and topic groups). p2p is always unrestricted. Default true:
    * groups are quiet unless the user @bot. Set false to let any group
@@ -226,6 +233,49 @@ export interface AppPreferences {
   dreamAuto?: boolean;
   /** Limits behind {@link dream}; config-file only. See {@link getDream}. */
   dreamTuning?: DreamTuning;
+}
+
+export interface BotOverloadConfig {
+  /** Group chats (`oc_…`) the rule applies to. Empty: off. */
+  chats?: string[];
+  /** Weekly window used above this (percent) … Default 80. */
+  weekPercent?: number;
+  /** … unless it resets within this many hours. Default 6. */
+  weekGraceHours?: number;
+  /** 5-hour window used above this (percent) … Default 80. */
+  sessionPercent?: number;
+  /** … unless it resets within this many hours. Default 1. */
+  sessionGraceHours?: number;
+  /** At most one overload card per chat this often; the rest are dropped silently. Default 10. */
+  cooldownMinutes?: number;
+}
+
+export interface BotOverloadSettings {
+  chats: string[];
+  weekPercent: number;
+  weekGraceHours: number;
+  sessionPercent: number;
+  sessionGraceHours: number;
+  cooldownMinutes: number;
+}
+
+/** 过载保护 settings, or `undefined` when no chat is listed. Out-of-range values fall back to the defaults. */
+export function resolveBotOverload(cfg: Pick<AppConfig, 'preferences'>): BotOverloadSettings | undefined {
+  const raw = cfg.preferences?.botOverload;
+  const chats = Array.isArray(raw?.chats)
+    ? raw.chats.filter((chat): chat is string => typeof chat === 'string' && /^oc_[\w-]+$/.test(chat.trim())).map((chat) => chat.trim())
+    : [];
+  if (chats.length === 0) return undefined;
+  const pick = (value: unknown, min: number, max: number, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+  return {
+    chats,
+    weekPercent: pick(raw?.weekPercent, 1, 100, 80),
+    weekGraceHours: pick(raw?.weekGraceHours, 0, 168, 6),
+    sessionPercent: pick(raw?.sessionPercent, 1, 100, 80),
+    sessionGraceHours: pick(raw?.sessionGraceHours, 0, 5, 1),
+    cooldownMinutes: pick(raw?.cooldownMinutes, 0, 24 * 60, 10),
+  };
 }
 
 export interface DreamTuning {

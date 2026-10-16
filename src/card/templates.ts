@@ -842,3 +842,93 @@ function escapeMd(s: string): string {
 function escapeCode(s: string): string {
   return s.replace(/`/g, "'");
 }
+
+/** One tight quota window as the overload card shows it. */
+export interface OverloadCardWindow {
+  label: string;
+  usedPercent: number;
+  limit: number;
+  /** Epoch ms of the window's reset. */
+  resetAt?: number;
+  /** Bots get answered again from this time on (reset minus grace). */
+  resumeAt?: number;
+}
+
+/**
+ * 过载保护's answer to another bot's question while the quota is tight —
+ * a sibling of the watchdog's 「低血糖晕厥」 card: same one-glance header,
+ * then the gauge, when it gets better, and that humans are still served.
+ * Mentions nobody: an @ would wake the other bot and start a loop.
+ */
+export function overloadCard(input: { windows: readonly OverloadCardWindow[]; cooldownMinutes: number }): object {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const time = (at: number) => {
+    const d = new Date(at);
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const gauge = (percent: number) => {
+    const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
+    return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
+  };
+  const resume = input.windows.every((w) => w.resumeAt !== undefined)
+    ? Math.max(...input.windows.map((w) => w.resumeAt!))
+    : undefined;
+  return {
+    schema: '2.0',
+    config: { width_mode: 'default', summary: { content: '🥵 Occam 算力过载，暂停回答 bot 的提问' } },
+    header: {
+      title: { tag: 'plain_text', content: '🔥 Occam · 算力过载' },
+      subtitle: { tag: 'plain_text', content: 'Overload · 额度见底，暂停接 bot 的单' },
+      template: 'red',
+      icon: { tag: 'standard_icon', token: 'warning_outlined' },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '16px 16px 20px 16px',
+      vertical_spacing: '10px',
+      elements: [
+        {
+          tag: 'column_set',
+          columns: [
+            {
+              tag: 'column',
+              width: 'weighted',
+              weight: 1,
+              padding: '20px',
+              background_style: 'red-50',
+              elements: [
+                { tag: 'markdown', content: '# 🥵', text_align: 'center' },
+                { tag: 'markdown', content: '**被问冒烟了，先散会儿热**', text_align: 'center' },
+                {
+                  tag: 'markdown',
+                  content: "<font color='grey'>🧯 过载保护已启动 · 风扇全速中</font>",
+                  text_align: 'center',
+                  text_size: 'notation',
+                },
+              ],
+            },
+          ],
+        },
+        ...input.windows.map((w) => ({
+          tag: 'markdown',
+          content: [
+            `**${w.label}额度** \`${gauge(w.usedPercent)}\` **${w.usedPercent}%**<font color='grey'>（上限 ${w.limit}%）</font>`,
+            w.resetAt !== undefined
+              ? `⏳ ${time(w.resetAt)} 重置${w.resumeAt !== undefined ? `，${time(w.resumeAt)} 起恢复回答 bot` : ''}`
+              : '⏳ 重置时间读不到，额度回落后恢复',
+          ].join('\n'),
+        })),
+        HR,
+        {
+          tag: 'markdown',
+          content: `这条 bot 的消息我先不处理${resume !== undefined ? `，${time(resume)} 后再来找我` : ''}。人类同事的消息照常回复，急事请让人直接 @ 我。`,
+        },
+        {
+          tag: 'markdown',
+          content: `<font color='grey'>额度留给人类同事 · 同一个群 ${input.cooldownMinutes} 分钟内只发一张 · 不 @ 任何 bot</font>`,
+          text_size: 'notation',
+        },
+      ],
+    },
+  };
+}
