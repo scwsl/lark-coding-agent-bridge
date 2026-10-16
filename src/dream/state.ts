@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { isAgentKind, type AgentKind } from '../agent/registry';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
+import type { ExternalCursor } from './external';
 import type { DreamAutoCheck, DreamAutoLedger } from './schedule';
 
 /**
@@ -17,9 +18,11 @@ export type DreamRunStatus = 'queued' | 'running' | 'deferred' | 'succeeded' | '
 /**
  * How far one target repository of a run got. `committed`: the draft exists as
  * a local commit only; `pushed`: the branch is on the remote but no PR yet;
- * `pr-created`: done. A retry picks up from the phase it stopped at.
+ * `pr-created`: done. With `publish: push` (`direct`) the commit goes onto
+ * the default branch itself and `published` is done. A retry picks up from
+ * the phase it stopped at.
  */
-export type DreamTargetPhase = 'skipped' | 'failed' | 'committed' | 'pushed' | 'pr-created';
+export type DreamTargetPhase = 'skipped' | 'failed' | 'committed' | 'pushed' | 'pr-created' | 'published';
 
 export interface DreamSessionRecord {
   /** `<agentId>:<handle>`. */
@@ -60,6 +63,8 @@ export interface DreamTarget {
   body?: string;
   /** Draft PR that reverts this target's merged batch (`/practice revert`). */
   revertPrUrl?: string;
+  /** `publish: push`: committed on {@link base} itself and pushed there, no PR. */
+  direct?: boolean;
 }
 
 export interface DreamRun {
@@ -89,6 +94,8 @@ export interface DreamRun {
    * pushed / opened, never redone.
    */
   checkpointAt?: number;
+  /** 课前学习 of this run: the commit each external library was read up to (cursor after the checkpoint). */
+  external?: Array<{ library: string; head: string; files: number; pending: number; error?: string }>;
 }
 
 interface DreamStateData {
@@ -99,6 +106,8 @@ interface DreamStateData {
   published: string[];
   /** 自动整理 bookkeeping. */
   auto?: DreamAutoLedger;
+  /** 课前学习: how far each external library has been read. */
+  external?: Record<string, ExternalCursor>;
 }
 
 const MAX_SESSIONS = 1000;
@@ -178,7 +187,8 @@ export class DreamStateStore {
     if (cutAfterCheckpoint > (auto?.lastCompletedAt ?? 0)) {
       auto = { ...(auto ?? { consecutiveFailures: 0 }), lastCompletedAt: cutAfterCheckpoint };
     }
-    this.data = { version: 1, sessions, runs, published, ...(auto ? { auto } : {}) };
+    const external = normalizeExternal(parsed.external);
+    this.data = { version: 1, sessions, runs, published, ...(auto ? { auto } : {}), ...(external ? { external } : {}) };
     if (interrupted) this.schedulePersist();
   }
 
@@ -194,6 +204,18 @@ export class DreamStateStore {
     this.schedulePersist();
   }
 
+  externalCursor(library: string): ExternalCursor | undefined {
+    const cursor = this.data.external?.[library];
+    return cursor ? { ...cursor, ...(cursor.pending ? { pending: [...cursor.pending] } : {}) } : undefined;
+  }
+
+  /** Move external libraries' cursors outside a checkpoint (read, nothing worth drafting). */
+  advanceExternal(cursors: Readonly<Record<string, ExternalCursor>>): void {
+    if (Object.keys(cursors).length === 0) return;
+    this.data.external = { ...(this.data.external ?? {}), ...cloneExternal(cursors) };
+    this.schedulePersist();
+  }
+
   /**
    * The batch's commit point, in one write: its drafts are committed, these
    * cursors move and these proposal hashes count as proposed.
@@ -203,10 +225,12 @@ export class DreamStateStore {
     at: number,
     advances: ReadonlyArray<{ key: string; consumed: number; hash: string }>,
     published: readonly string[],
+    external: Readonly<Record<string, ExternalCursor>> = {},
   ): void {
     const run = this.data.runs.find((item) => item.id === id);
     if (!run) return;
     run.checkpointAt = at;
+    if (Object.keys(external).length > 0) this.data.external = { ...(this.data.external ?? {}), ...cloneExternal(external) };
     for (const item of advances) {
       const record = this.data.sessions[item.key];
       if (!record) continue;
@@ -372,7 +396,31 @@ function cloneRun(run: DreamRun): DreamRun {
     ...run,
     deferred: run.deferred.map((item) => ({ ...item })),
     targets: run.targets.map((target) => ({ ...target })),
+    ...(run.external ? { external: run.external.map((item) => ({ ...item })) } : {}),
   };
+}
+
+function cloneExternal(cursors: Readonly<Record<string, ExternalCursor>>): Record<string, ExternalCursor> {
+  return Object.fromEntries(
+    Object.entries(cursors).map(([name, cursor]) => [name, { ...cursor, ...(cursor.pending ? { pending: [...cursor.pending] } : {}) }]),
+  );
+}
+
+function normalizeExternal(raw: unknown): Record<string, ExternalCursor> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, ExternalCursor> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const item = value as Partial<ExternalCursor>;
+    if (typeof item.commit !== 'string' || !/^[0-9a-f]{7,64}$/.test(item.commit)) continue;
+    const pending = Array.isArray(item.pending) ? item.pending.filter((path): path is string => typeof path === 'string') : [];
+    out[name] = {
+      commit: item.commit,
+      learnedAt: typeof item.learnedAt === 'number' ? item.learnedAt : 0,
+      ...(pending.length > 0 ? { pending } : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function normalizeSession(key: string, raw: unknown): DreamSessionRecord | undefined {

@@ -57,6 +57,7 @@ async function createHarness(opts: { autoOn?: boolean } = {}) {
       openedPrs: 1,
       pendingDrafts: 0,
       trackedSessions: 3,
+      external: [],
       auto: {
         enabled: autoOn,
         settings: DREAM_DEFAULTS.auto,

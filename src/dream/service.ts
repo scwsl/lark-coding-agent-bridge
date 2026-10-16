@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readdir, realpath, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
@@ -22,9 +22,19 @@ import { knowledgeRemoteUrl } from '../knowledge/sync';
 import { evaluateRunPolicy, type RunPolicyAllow } from '../policy/run-policy';
 import type { RunExecution, SubmitRunInput } from '../runtime/run-executor';
 import type { SessionCatalog, SessionCatalogEntry } from '../session/catalog';
-import { acquireDreamLocks, type HeldDreamLocks } from './lock';
-import { buildDreamScopePrompt } from './prompt';
 import {
+  collectExternalMaterial,
+  describeExternal,
+  fetchExternalLibrary,
+  listLocalSkills,
+  type ExternalCursor,
+  type ExternalMaterial,
+} from './external';
+import { formatDreamRun } from './format';
+import { acquireDreamLocks, type HeldDreamLocks } from './lock';
+import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
+import {
+  hasArgumentHint,
   parseDreamOutput,
   validateDreamProposals,
   type DreamRejection,
@@ -43,13 +53,16 @@ import {
   pullRequestDiff,
   pullRequestMergeInfo,
   pullRequestState,
+  pushDirect,
   pushDraft,
   revertDraft,
+  writeChangelog,
   writeKnowledgeDraft,
   writeSkillDraft,
   type RepoSpec,
 } from './publish';
 import {
+  changelogEntry,
   commitMessage,
   flagLine,
   knowledgePrBody,
@@ -57,16 +70,19 @@ import {
   sessionLegend,
   skillsPrBody,
   skillsPrTitle,
+  type ChangelogSources,
   type SessionLegend,
 } from './report';
 import {
   cheapDreamGate,
   dreamWindowAt,
   materialGate,
+  msUntilDaily,
   type DreamAutoCheck,
   type DreamAutoLedger,
 } from './schedule';
 import { measureNewInput, selectDreamInputs, type DreamScopeInput } from './select';
+import type { DreamMaterial } from './schedule';
 import { DreamStateStore, sessionKey, type DreamRun, type DreamSessionRecord, type DreamTarget } from './state';
 
 /**
@@ -132,6 +148,14 @@ export interface DreamServiceDeps {
   autoCheckMs?: number;
   /** How often a running automatic batch checks that the profile is still idle. */
   watchdogMs?: number;
+  /**
+   * After a `publish: push` batch reached a repository's default branch:
+   * bring the profile's local copy of it up to date (`knowledge`,
+   * `skills:<library>`), so what was learned takes effect now.
+   */
+  afterPublish?: (repo: string) => Promise<void>;
+  /** Send one message to a chat or user (`dreamTuning.notifyChat`). Absent: automatic runs stay silent. */
+  notify?: (chatId: string, text: string) => Promise<void>;
   now?: () => number;
 }
 
@@ -168,6 +192,27 @@ export interface DreamStatusView {
     settings: DreamAutoSettings;
     ledger: DreamAutoLedger;
   };
+  /** 课前学习: each external library and how far it has been read. */
+  external: Array<{ name: string; label: string; cursor?: { commit: string; learnedAt: number; pending: number } }>;
+}
+
+/** `publish: push`: what each repository's CHANGELOG.md entry needs beyond the proposals. */
+interface ChangelogContext {
+  trigger: 'manual' | 'auto';
+  timezone: string;
+  sources: ChangelogSources;
+}
+
+/** What 课前学习 brought into a run. */
+interface LearningOutcome {
+  additions: MemoryAddition[];
+  skills: SkillProposal[];
+  rejected: DreamRejection[];
+  /** Cursors to move at the checkpoint; empty when the learning turn failed. */
+  cursors: Record<string, ExternalCursor>;
+  /** Per library, for the run record and the changelog. */
+  report: NonNullable<DreamRun['external']>;
+  error?: string;
 }
 
 export interface DreamRevertResult {
@@ -186,6 +231,11 @@ interface CurrentRun {
 }
 
 const KEEP_CHECKOUT_RUNS = 5;
+/** 课前学习's scope: notes land in `notes/external/`. */
+const LEARNING_SCOPE = 'external';
+const MAX_LEARNING_MEMORY = 30;
+const MAX_LEARNING_SKILLS = 10;
+const MAX_OWN_SKILL_CHARS = 20_000;
 const AUTO_CHECK_MS = 30 * 60_000;
 const WATCHDOG_MS = 15_000;
 const UNKNOWN_QUOTA_BUDGET = 0.5;
@@ -201,6 +251,7 @@ export class DreamService {
   private checking: Promise<DreamAutoCheck> | undefined;
   private lastCheck: DreamAutoCheck | undefined;
   private autoTimer: NodeJS.Timeout | undefined;
+  private dailyTimer: { timer: NodeJS.Timeout; key: string } | undefined;
   private unsubscribe: (() => void) | undefined;
 
   constructor(private readonly deps: DreamServiceDeps) {
@@ -217,15 +268,41 @@ export class DreamService {
     const every = this.deps.autoCheckMs ?? AUTO_CHECK_MS;
     if (every > 0) {
       this.autoTimer = setInterval(() => {
+        this.armDaily();
         void this.checkAuto().catch((err: unknown) => log.fail('dream', err, { step: 'auto-check' }));
       }, every);
       this.autoTimer.unref?.();
+      this.armDaily();
     }
+  }
+
+  /**
+   * 每日模式: a timer for the exact start time on top of the periodic check,
+   * so a run starts at, say, 04:00 rather than up to half an hour later.
+   * Re-armed by every periodic check, which picks up a changed time.
+   */
+  private armDaily(): void {
+    const settings = getDreamAuto(this.deps.appConfig())?.auto;
+    const key = settings?.daily ? `${settings.daily.at}|${settings.timezone}` : '';
+    if (this.dailyTimer?.key === key) return;
+    if (this.dailyTimer) clearTimeout(this.dailyTimer.timer);
+    this.dailyTimer = undefined;
+    if (!settings?.daily) return;
+    // A second past the minute, so the window is surely open.
+    const timer = setTimeout(() => {
+      this.dailyTimer = undefined;
+      void this.checkAuto().catch((err: unknown) => log.fail('dream', err, { step: 'daily-check' }));
+      this.armDaily();
+    }, msUntilDaily(this.now(), settings.daily.at, settings.timezone) + 1_000);
+    timer.unref?.();
+    this.dailyTimer = { timer, key };
   }
 
   async dispose(): Promise<void> {
     if (this.autoTimer) clearInterval(this.autoTimer);
     this.autoTimer = undefined;
+    if (this.dailyTimer) clearTimeout(this.dailyTimer.timer);
+    this.dailyTimer = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.stop('bridge 正在停止');
@@ -403,6 +480,14 @@ export class DreamService {
     const run = this.state.run(id);
     if (!run) return { error: `没有批次 \`${id}\`。` };
     const targets = run.targets.filter((target) => target.prUrl);
+    const direct = run.targets.filter((target) => target.direct && target.phase === 'published' && target.commit);
+    if (targets.length === 0 && direct.length > 0) {
+      return {
+        error: `批次 \`${id}\` 是直接推送的，没有 PR。要撤销，在对应仓库里 \`git revert\`：${direct
+          .map((target) => `${target.label} \`${target.commit!.slice(0, 7)}\``)
+          .join('、')}。`,
+      };
+    }
     if (targets.length === 0) return { error: `批次 \`${id}\` 没有开出过 PR，没有可撤销的内容。` };
     if (this.reverting) return { error: '已经有一个撤销在进行，稍后再试。' };
     this.reverting = true;
@@ -463,35 +548,43 @@ export class DreamService {
       return this.noteCheck({ at: now, block: 'restricted', reason: '当前 agent 配置无法保证只读执行，不开放自动整理' });
     }
     this.noteCatalog();
-    const measured = await measureNewInput({ records: this.state.sessions(), settings, read: this.reader() });
-    const material = { scopes: measured.scopes, sessions: measured.sessions, chars: measured.chars };
-    const gate = materialGate({ now, auto, material, since: this.state.autoLedger().lastCompletedAt ?? measured.oldestAt });
-    if (!gate.ok) return this.noteCheck({ at: now, block: 'material', reason: gate.reason, material });
-    const openPrs = await this.openDreamPrs(url);
+    // 每日模式 runs whatever piled up — 课前学习 and own skills count as much as conversations.
+    let material: DreamMaterial | undefined;
+    if (!auto.daily) {
+      const measured = await measureNewInput({ records: this.state.sessions(), settings, read: this.reader() });
+      const counted = { scopes: measured.scopes, sessions: measured.sessions, chars: measured.chars };
+      const gate = materialGate({ now, auto, material: counted, since: this.state.autoLedger().lastCompletedAt ?? measured.oldestAt });
+      if (!gate.ok) return this.noteCheck({ at: now, block: 'material', reason: gate.reason, material: counted });
+      material = gate.material;
+    }
+    // Pushed straight to the default branch, nothing waits for review.
+    const openPrs = settings.publish === 'push' ? 0 : await this.openDreamPrs(url);
     if (openPrs >= auto.maxOpenPrs) {
       return this.noteCheck({
         at: now,
         block: 'backlog',
         reason: `待审积压：还有 ${openPrs} 个课堂精练 Draft PR 没合并或关闭（上限 ${auto.maxOpenPrs}），暂停自动整理`,
-        material: gate.material,
+        ...(material ? { material } : {}),
         openPrs,
       });
     }
-    const quota = await this.readQuota();
-    const context = { material: gate.material, openPrs, quota };
+    const quota = await this.readQuota(auto.quotaWindow);
+    const context = { ...(material ? { material } : {}), openPrs, quota };
     if ('percent' in quota && quota.percent >= auto.maxQuotaPercent) {
-      return this.noteCheck({
-        at: now,
-        block: 'quota',
-        reason: `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`,
-        ...context,
-      });
+      const reason = `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`;
+      if (auto.daily) {
+        // The weekly window will not empty within the hours left: today is skipped, once, and said so.
+        this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
+        this.tell(settings.notifyChat, `**📚 今天的课堂精练跳过**\n\n${reason}，明天 ${auto.daily.text} 再看。`);
+      }
+      return this.noteCheck({ at: now, block: 'quota', reason, ...context });
     }
     // The checks above took a while: a user may have shown up meanwhile.
     if (this.deps.isProfileBusy?.()) {
       return this.noteCheck({ at: now, block: 'busy', reason: '有任务在跑或有消息在排队，用户任务优先', ...context });
     }
-    const started = await this.start(AUTO_ACTOR, undefined, {
+    const notifyChat = settings.notifyChat;
+    const started = await this.start(AUTO_ACTOR, notifyChat ? (run) => this.tell(notifyChat, formatDreamRun(run)) : undefined, {
       trigger: 'auto',
       budget: 'unknown' in quota ? UNKNOWN_QUOTA_BUDGET : 1,
     });
@@ -530,7 +623,13 @@ export class DreamService {
     return worst;
   }
 
-  private async readQuota(): Promise<{ percent: number; label: string } | { unknown: true }> {
+  /** One message to `dreamTuning.notifyChat`; failures are only logged. */
+  private tell(chatId: string | undefined, text: string): void {
+    if (!chatId || !this.deps.notify) return;
+    void this.deps.notify(chatId, text).catch((err: unknown) => log.fail('dream', err, { step: 'notify' }));
+  }
+
+  private async readQuota(window: 'any' | 'week' = 'any'): Promise<{ percent: number; label: string } | { unknown: true }> {
     const read =
       this.deps.readQuota ??
       (async () => {
@@ -542,8 +641,12 @@ export class DreamService {
         });
       });
     const reading = await read().catch(() => undefined);
-    const fullest = reading ? fullestQuotaWindow(reading) : undefined;
-    return fullest ? { percent: Math.round(fullest.usedPercent), label: fullest.label } : { unknown: true };
+    const chosen = !reading
+      ? undefined
+      : window === 'week' && !reading.blocked
+        ? reading.windows.find((item) => item.label === '本周')
+        : fullestQuotaWindow(reading);
+    return chosen ? { percent: Math.round(chosen.usedPercent), label: chosen.label } : { unknown: true };
   }
 
   /** While an automatic batch drafts, anything else the profile starts stops it. */
@@ -627,22 +730,37 @@ export class DreamService {
       ),
       deferred,
     });
-    if (selection.scopes.length === 0) {
-      const note = [resumed, deferred.length > 0 ? `${deferred.length} 个会话延后` : '没有新的已结束会话可整理']
-        .filter(Boolean)
-        .join('；');
-      return this.finish(run.id, deferred.length > 0 && !resumed ? 'deferred' : 'succeeded', note);
-    }
-
     const [profileMemory, skills] = await Promise.all([
       this.deps.knowledge.listMemories({ kind: 'profile' }),
       this.deps.knowledge.listSkills(),
     ]);
     const deadline = this.now() + settings.maxRunMinutes * 60_000;
-    const additions: MemoryAddition[] = [];
+
+    // 课前学习 first: external libraries' news and this profile's own skills.
+    const learning = await this.learn(run.id, settings, { actor, deadline, signal, profileMemory, skills });
+    if (signal.aborted) return stopped('游标未移动');
+    if (learning.report.length > 0) this.state.updateRun(run.id, { external: learning.report });
+    const learned = learning.additions.length + learning.skills.length > 0;
+
+    if (selection.scopes.length === 0 && !learned) {
+      // Read, nothing worth keeping: the libraries' cursors move all the same.
+      this.state.advanceExternal(learning.cursors);
+      const note = [
+        resumed,
+        learning.error,
+        deferred.length > 0 ? `${deferred.length} 个会话延后` : '没有新的已结束会话可整理',
+        settings.external.length > 0 && !learning.error ? '课前学习没有值得吸收的新内容' : undefined,
+      ]
+        .filter(Boolean)
+        .join('；');
+      const status = learning.error && !resumed ? 'failed' : deferred.length > 0 && !resumed ? 'deferred' : 'succeeded';
+      return this.finish(run.id, status, note);
+    }
+
+    const additions: MemoryAddition[] = [...learning.additions];
     const flags: MemoryFlag[] = [];
-    const skillProposals: SkillProposal[] = [];
-    const rejected: DreamRejection[] = [];
+    const skillProposals: SkillProposal[] = [...learning.skills];
+    const rejected: DreamRejection[] = [...learning.rejected];
     const done: DreamScopeInput[] = [];
 
     for (const scope of selection.scopes) {
@@ -662,6 +780,7 @@ export class DreamService {
         skills,
         remainingMs: remaining,
         signal,
+        requireArgumentHint: settings.requireArgumentHint,
       });
       if (signal.aborted) return stopped('游标未移动');
       if ('error' in outcome) {
@@ -680,7 +799,7 @@ export class DreamService {
       skillItems: skillProposals.length,
       rejected: rejected.length,
     });
-    if (done.length === 0) {
+    if (done.length === 0 && !learned) {
       return this.finish(run.id, 'deferred', `${deferred.length} 个会话延后：${deferred[0]?.reason ?? ''}`);
     }
 
@@ -688,7 +807,17 @@ export class DreamService {
     const switchedOff = this.switchedOff(run);
     if (switchedOff) return this.finish(run.id, 'cancelled', `${switchedOff}，游标未移动`);
     const legend = done.flatMap((scope) => scope.sessions.map(sessionLegend));
-    const drafted = await this.draftTargets(run.id, { additions, flags, rejected, skills: skillProposals, legend }, signal);
+    const changelog: ChangelogContext = {
+      trigger: run.trigger ?? 'manual',
+      timezone: settings.auto.timezone,
+      sources: { external: learning.report.filter((item) => !item.error), sessions: legend.length },
+    };
+    const drafted = await this.draftTargets(
+      run.id,
+      { additions, flags, rejected, skills: skillProposals, legend },
+      signal,
+      settings.publish === 'push' ? changelog : undefined,
+    );
     if (signal.aborted) {
       this.discardDrafts(run.id, '已取消，草稿作废');
       return stopped('草稿作废，游标未移动');
@@ -713,6 +842,7 @@ export class DreamService {
         scope.sessions.map((session) => ({ key: session.record.key, consumed: session.nextConsumed, hash: session.nextHash })),
       ),
       drafted.published,
+      learning.cursors,
     );
 
     // Publish: push and open PRs. A failure here keeps the draft for the next run.
@@ -730,6 +860,7 @@ export class DreamService {
     const summary = [
       budget < 1 ? '读不到额度，按一半预算运行' : undefined,
       resumed,
+      learning.error,
       `${done.length} 个范围、${legend.length} 个会话`,
       `记忆 / 笔记 ${additions.length + flags.length} 条，skill ${skillProposals.length} 个，未采纳 ${rejected.length} 条`,
       targets.length === 0 ? '没有值得提交的内容' : undefined,
@@ -752,6 +883,7 @@ export class DreamService {
       skills: SkillSummary[];
       remainingMs: number;
       signal: AbortSignal;
+      requireArgumentHint: boolean;
     },
   ): Promise<ReturnType<typeof validateDreamProposals> | { error: string }> {
     const built = buildDreamScopePrompt({
@@ -760,6 +892,7 @@ export class DreamService {
       chatMemory: ctx.chatMemory,
       skills: ctx.skills,
       isAdmin: this.deps.isAdmin,
+      requireArgumentHint: ctx.requireArgumentHint,
     });
     const answer = await this.runAgent(`dream:${batch}:${ordinal + 1}`, built.prompt, ctx.actor, ctx.remainingMs, ctx.signal);
     if ('error' in answer) return answer;
@@ -772,7 +905,106 @@ export class DreamService {
       chatMemory: ctx.chatMemory,
       skills: ctx.skills,
       isPublished: (hash) => this.state.isPublished(hash),
+      requireArgumentHint: ctx.requireArgumentHint,
     });
+  }
+
+  /**
+   * 课前学习: fetch every external library, gather what changed since its
+   * cursor, read this profile's own skills, and — when there is anything to
+   * learn or an own skill lacks its `argument-hint` — one read-only turn that
+   * proposes notes and skills, validated like any other proposal. The
+   * cursors only move with the batch's checkpoint.
+   */
+  private async learn(
+    batch: string,
+    settings: DreamSettings,
+    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal; profileMemory: MemoryEntry[]; skills: SkillSummary[] },
+  ): Promise<LearningOutcome> {
+    const outcome: LearningOutcome = { additions: [], skills: [], rejected: [], cursors: {}, report: [] };
+    const own = defaultSkillLibrary(this.deps.profileConfig().skills?.libraries ?? [], settings.skillLibrary);
+    const ownLibrary = 'library' in own ? own.library.name : undefined;
+    const ownSkills: Array<{ name: string; body: string; missingArgumentHint: boolean }> = [];
+    for (const skill of ctx.skills) {
+      if (!ownLibrary || skill.source !== ownLibrary) continue;
+      const body = await readFile(skill.path, 'utf8').catch(() => undefined);
+      if (body === undefined) continue;
+      ownSkills.push({
+        name: skill.name,
+        body: body.length > MAX_OWN_SKILL_CHARS ? `${body.slice(0, MAX_OWN_SKILL_CHARS)}…` : body,
+        missingArgumentHint: settings.requireArgumentHint && !hasArgumentHint(body),
+      });
+    }
+
+    const materials: ExternalMaterial[] = [];
+    const share = settings.external.length > 0 ? Math.floor(settings.maxInputChars / 2 / settings.external.length) : 0;
+    let nextRef = 1;
+    for (const library of settings.external) {
+      if (ctx.signal.aborted) return outcome;
+      const dir = join(this.deps.workDir, 'external', library.name);
+      const fetched = await fetchExternalLibrary(library, dir);
+      if ('error' in fetched) {
+        outcome.report.push({ library: library.name, head: '', files: 0, pending: 0, error: fetched.error });
+        continue;
+      }
+      const material = await collectExternalMaterial({
+        library: library.name,
+        dir,
+        head: fetched.head,
+        cursor: this.state.externalCursor(library.name),
+        budget: share,
+        startRef: nextRef,
+      });
+      nextRef += material.files.length;
+      outcome.report.push({ library: library.name, head: material.head, files: material.files.length, pending: material.pending.length });
+      outcome.cursors[library.name] = {
+        commit: material.head,
+        learnedAt: this.now(),
+        ...(material.pending.length > 0 ? { pending: material.pending } : {}),
+      };
+      if (material.files.length > 0) materials.push(material);
+    }
+    const missing = ownSkills.filter((skill) => skill.missingArgumentHint).length;
+    if (materials.length === 0 && missing === 0) return outcome;
+
+    const localSkills = await listLocalSkills(settings.localSkillDirs);
+    const built = buildExternalLearningPrompt({
+      materials,
+      profileMemory: ctx.profileMemory,
+      skills: ctx.skills,
+      ...(ownLibrary ? { ownLibrary } : {}),
+      ownSkills,
+      localSkills,
+      requireArgumentHint: settings.requireArgumentHint,
+    });
+    const answer = await this.runAgent(`dream:${batch}:learn`, built.prompt, ctx.actor, ctx.deadline - this.now(), ctx.signal);
+    const failed = (error: string): LearningOutcome => ({ ...outcome, cursors: {}, error: `课前学习没做成（${error}），外部库游标未移动` });
+    if ('error' in answer) return failed(answer.error);
+    const parsed = parseDreamOutput(answer.text);
+    if ('error' in parsed) return failed(`模型输出不合格：${parsed.error}`);
+    const ownNames = new Set(ctx.skills.map((skill) => skill.name));
+    const validated = validateDreamProposals(parsed, {
+      scopeId: LEARNING_SCOPE,
+      refs: built.refs,
+      profileMemory: ctx.profileMemory,
+      chatMemory: [],
+      skills: ctx.skills,
+      isPublished: (hash) => this.state.isPublished(hash),
+      requireArgumentHint: settings.requireArgumentHint,
+      external: { ...(ownLibrary ? { ownLibrary } : {}) },
+      reservedSkillNames: new Set(localSkills.map((skill) => skill.name).filter((name) => !ownNames.has(name))),
+      maxMemory: MAX_LEARNING_MEMORY,
+      maxSkills: Math.max(MAX_LEARNING_SKILLS, missing),
+    });
+    log.info('dream', 'learned', {
+      batch,
+      libraries: materials.length,
+      files: materials.reduce((sum, item) => sum + item.files.length, 0),
+      notes: validated.additions.length,
+      skills: validated.skills.length,
+      rejected: validated.rejected.length,
+    });
+    return { ...outcome, additions: validated.additions, skills: validated.skills, rejected: validated.rejected };
   }
 
   /**
@@ -884,16 +1116,17 @@ export class DreamService {
       legend: SessionLegend[];
     },
     signal: AbortSignal,
+    changelog?: ChangelogContext,
   ): Promise<{ blocked: boolean; published: string[] }> {
     let blocked = false;
     const published: string[] = [];
     if (input.additions.length > 0 || input.flags.length > 0) {
-      const target = await this.draftKnowledge(id, input, signal);
+      const target = await this.draftKnowledge(id, input, signal, changelog);
       if (target.phase === 'failed') blocked = true;
       if (target.commit) published.push(...input.additions.map((item) => item.hash), ...input.flags.map((item) => item.hash));
     }
     if (input.skills.length > 0 && !signal.aborted && !blocked) {
-      const outcome = await this.draftSkills(id, input.skills, input.rejected, input.legend, signal);
+      const outcome = await this.draftSkills(id, input.skills, input.rejected, input.legend, signal, changelog);
       if (outcome.blocked) blocked = true;
       published.push(...outcome.published);
     }
@@ -904,13 +1137,23 @@ export class DreamService {
     id: string,
     input: { additions: MemoryAddition[]; flags: MemoryFlag[]; rejected: DreamRejection[]; legend: SessionLegend[] },
     signal: AbortSignal,
+    changelog?: ChangelogContext,
   ): Promise<DreamTarget> {
-    const target: DreamTarget = { repo: 'knowledge', label: '知识库', branch: dreamBranch(id), phase: 'failed', items: 0 };
+    const direct = changelog !== undefined;
+    let target: DreamTarget = {
+      repo: 'knowledge',
+      label: '知识库',
+      branch: dreamBranch(id),
+      phase: 'failed',
+      items: 0,
+      ...(direct ? { direct } : {}),
+    };
     const url = await knowledgeRemoteUrl(this.deps.knowledge);
     if (!url) return this.saveTarget(id, { ...target, error: '知识库没有绑定远端（/knowledge bind），草稿未生成' });
     const dir = join(this.deps.workDir, 'batches', id, 'knowledge');
-    const prepared = await prepareCheckout({ repo: 'knowledge', label: '知识库', url }, dir, target.branch);
+    const prepared = await prepareCheckout({ repo: 'knowledge', label: '知识库', url }, dir, target.branch, { direct });
     if ('error' in prepared) return this.saveTarget(id, { ...target, error: prepared.error });
+    if (direct) target = { ...target, branch: prepared.base };
     if (signal.aborted) return this.saveTarget(id, { ...target, error: '已取消' });
     // Merge / conflict / stale flags go into a per-scope review note, so they
     // show up in the diff and survive the merge as a record; the original
@@ -937,6 +1180,14 @@ export class DreamService {
         checkoutDir: dir,
       });
     }
+    const files = [...draft.files];
+    if (changelog) {
+      const logged = await writeChangelog(
+        dir,
+        changelogEntry({ batchId: id, at: this.now(), ...changelog, knowledge: written, flags: writtenFlags }),
+      );
+      if ('file' in logged) files.push(logged.file);
+    }
     const title = knowledgePrTitle(id, written.length + writtenFlags.length);
     const body = knowledgePrBody({
       batchId: id,
@@ -950,7 +1201,7 @@ export class DreamService {
     return this.commitTarget(
       id,
       { ...target, base: prepared.base, items: written.length + writtenFlags.length, checkoutDir: dir, title, body },
-      draft.files,
+      files,
       `记忆 / 笔记 ${written.length} 条，待确认标记 ${writtenFlags.length} 条`,
     );
   }
@@ -961,7 +1212,9 @@ export class DreamService {
     rejected: DreamRejection[],
     legend: SessionLegend[],
     signal: AbortSignal,
+    changelog?: ChangelogContext,
   ): Promise<{ blocked: boolean; published: string[] }> {
+    const direct = changelog !== undefined;
     const profileConfig = this.deps.profileConfig();
     const libraries = profileConfig.skills?.libraries ?? [];
     const settings = resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning);
@@ -988,14 +1241,14 @@ export class DreamService {
       if (signal.aborted) return { blocked: true, published };
       const repo = `skills:${name || '-'}`;
       const label = name ? `skill 库 ${name}` : 'skill 库';
-      const target: DreamTarget = { repo, label, branch: dreamBranch(id), phase: 'failed', items: 0 };
+      let target: DreamTarget = { repo, label, branch: dreamBranch(id), phase: 'failed', items: 0, ...(direct ? { direct } : {}) };
       if (!group.library) {
         this.saveTarget(id, { ...target, phase: 'skipped', error: `${group.problem}，${group.items.length} 个 skill 提案未提交` });
         continue;
       }
       const dir = join(this.deps.workDir, 'batches', id, `skills-${group.library.name}`);
       const spec: RepoSpec = { repo, label, url: group.library.url, ...(group.library.ref ? { ref: group.library.ref } : {}) };
-      const prepared = await prepareCheckout(spec, dir, target.branch);
+      const prepared = await prepareCheckout(spec, dir, target.branch, { direct });
       if ('error' in prepared) {
         // Pinned to a tag / commit is a configuration fact, not a hiccup: skip
         // rather than retry forever.
@@ -1004,6 +1257,7 @@ export class DreamService {
         if (!permanent) return { blocked: true, published };
         continue;
       }
+      if (direct) target = { ...target, branch: prepared.base };
       const draft = await writeSkillDraft(dir, group.library, group.items);
       const skillRejected = [
         ...rejected.filter((item) => item.kind === 'skill'),
@@ -1018,6 +1272,11 @@ export class DreamService {
           checkoutDir: dir,
         });
         continue;
+      }
+      const files = [...draft.files];
+      if (changelog) {
+        const logged = await writeChangelog(dir, changelogEntry({ batchId: id, at: this.now(), ...changelog, skills: draft.written }));
+        if ('file' in logged) files.push(logged.file);
       }
       const result = await this.commitTarget(
         id,
@@ -1036,7 +1295,7 @@ export class DreamService {
             legend,
           }),
         },
-        draft.files,
+        files,
         `skill 提案 ${draft.written.length} 个`,
       );
       if (result.phase === 'failed') return { blocked: true, published };
@@ -1062,6 +1321,7 @@ export class DreamService {
 
   private async pushAndOpen(id: string, target: DreamTarget): Promise<DreamTarget> {
     const dir = target.checkoutDir!;
+    if (target.direct) return this.pushStraight(id, target);
     let current = target;
     if (current.phase === 'committed') {
       const access = await checkPullRequestAccess(dir);
@@ -1094,9 +1354,24 @@ export class DreamService {
     return current;
   }
 
+  /** publish: push — onto the default branch, then refresh the profile's local copy. */
+  private async pushStraight(id: string, target: DreamTarget): Promise<DreamTarget> {
+    if (target.phase !== 'committed') return target;
+    const pushed = await pushDirect(target.checkoutDir!, target.base ?? target.branch, this.hooksDir());
+    if ('error' in pushed) {
+      const permanent = /没有推送权限/.test(pushed.error);
+      return this.saveTarget(id, { ...target, ...(permanent ? { phase: 'skipped' as const } : {}), error: pushed.error });
+    }
+    const done = this.saveTarget(id, { ...target, phase: 'published', commit: pushed.commit, error: undefined });
+    log.info('dream', 'pushed-direct', { batch: id, repo: target.repo });
+    await this.deps.afterPublish?.(target.repo).catch((err: unknown) => log.fail('dream', err, { step: 'after-publish', repo: target.repo }));
+    return done;
+  }
+
   /** Retry every earlier draft stuck at `committed` / `pushed`. Returns a summary or ''. */
   private async resumePendingTargets(signal: AbortSignal): Promise<string> {
     let opened = 0;
+    let pushed = 0;
     let still = 0;
     for (const run of this.state.runs()) {
       for (const target of run.targets) {
@@ -1105,11 +1380,18 @@ export class DreamService {
         if (!target.checkoutDir) continue;
         const result = await this.pushAndOpen(run.id, target);
         if (result.phase === 'pr-created') opened++;
+        else if (result.phase === 'published') pushed++;
         else still++;
       }
     }
-    if (opened === 0 && still === 0) return '';
-    return `补开了 ${opened} 个之前没开成的 PR${still > 0 ? `，还有 ${still} 个仍在等待` : ''}`;
+    if (opened === 0 && pushed === 0 && still === 0) return '';
+    return [
+      opened > 0 ? `补开了 ${opened} 个之前没开成的 PR` : undefined,
+      pushed > 0 ? `补推了 ${pushed} 个之前没推成的草稿` : undefined,
+      still > 0 ? `还有 ${still} 个仍在等待` : undefined,
+    ]
+      .filter(Boolean)
+      .join('，');
   }
 
   private async revertTarget(
@@ -1279,6 +1561,14 @@ export async function composeDreamStatus(input: {
       settings: settings.auto,
       ledger: input.state.autoLedger(),
     },
+    external: settings.external.map((library) => {
+      const cursor = input.state.externalCursor(library.name);
+      return {
+        name: library.name,
+        label: describeExternal(library),
+        ...(cursor ? { cursor: { commit: cursor.commit, learnedAt: cursor.learnedAt, pending: cursor.pending?.length ?? 0 } } : {}),
+      };
+    }),
   };
 }
 

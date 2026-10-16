@@ -156,3 +156,56 @@ function tail(input: {
 function sources(refs: readonly DreamSourceRef[]): string {
   return refs.map((ref) => ref.ref).join('、');
 }
+
+/** What a batch learned from, for the changelog: external libraries read and conversations. */
+export interface ChangelogSources {
+  external: ReadonlyArray<{ library: string; head: string; files: number }>;
+  sessions: number;
+}
+
+/**
+ * One batch's entry in a repository's `CHANGELOG.md` (`publish: push`): when,
+ * from what, and every change with its reason — the record a human reads
+ * instead of a PR.
+ */
+export function changelogEntry(input: {
+  batchId: string;
+  at: number;
+  timezone: string;
+  trigger: 'manual' | 'auto';
+  sources: ChangelogSources;
+  knowledge?: readonly MemoryAddition[];
+  flags?: readonly MemoryFlag[];
+  skills?: readonly SkillProposal[];
+}): string {
+  const lines = [`## ${localTime(input.at, input.timezone)} · 批次 \`${input.batchId}\`${input.trigger === 'auto' ? '（自动）' : ''}`, ''];
+  const from = [
+    ...input.sources.external.filter((item) => item.files > 0).map((item) => `课前学习 ${item.library}@${item.head.slice(0, 7)}（${item.files} 个文件）`),
+    ...(input.sources.sessions > 0 ? [`本 bot 的会话 ${input.sources.sessions} 个`] : []),
+  ];
+  if (from.length > 0) lines.push(`来源：${from.join('；')}`, '');
+  for (const skill of input.skills ?? []) {
+    lines.push(`- ${skill.action === 'create' ? '新建' : '更新'}技能 \`${skill.name}\`：${skill.description}`);
+    lines.push(`  - 理由：${skill.reason}（依据 ${sources(skill.sources)}）`);
+  }
+  for (const item of input.knowledge ?? []) {
+    lines.push(`- ${item.target === 'note' ? '笔记' : '记忆'} \`${knowledgePath(item)}\`：${item.text}`);
+    lines.push(`  - 理由：${item.reason}（依据 ${sources(item.sources)}）`);
+  }
+  for (const flag of input.flags ?? []) lines.push(`- 待人工确认：${flagLine(flag)}`);
+  return lines.join('\n');
+}
+
+function localTime(at: number, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(at));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+}

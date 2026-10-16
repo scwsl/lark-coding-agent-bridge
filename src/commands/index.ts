@@ -1813,7 +1813,7 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
         ctx,
         'error' in started
           ? `❌ ${started.error}`
-          : `📚 已开始整理，批次 \`${started.run.id}\`。读取已结束的会话、生成草稿并开 Draft PR，完成后在这里回复结果；\`/practice cancel\` 可以取消。`,
+          : `📚 已开始整理，批次 \`${started.run.id}\`。${getDream(ctx.controls.cfg)?.external.length ? '先做课前学习，再' : ''}读取已结束的会话、生成草稿并${getDream(ctx.controls.cfg)?.publish === 'push' ? '直接提交推送（写更新日志）' : '开 Draft PR'}，完成后在这里回复结果；\`/practice cancel\` 可以取消。`,
       );
       return;
     }
@@ -1852,14 +1852,14 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
           '**📚 课堂精练**',
           '',
           '`/practice` — 状态：开关、目标仓库、上次结果、待审核 PR 数',
-          '`/practice run` — 立即整理：读取已结束的会话，生成记忆 / 笔记 / skill 草稿并开 Draft PR',
+          '`/practice run` — 立即整理：先学配置的外部库（课前学习），再读取已结束的会话，生成记忆 / 笔记 / skill 草稿并发布',
           '`/practice cancel` — 取消正在进行的整理',
           '`/practice prs` — 整理开出的 PR 及审核状态',
           '`/practice diff [批次]` — 查看某个批次的差异（默认最近一次）',
           '`/practice revert <批次>` — 撤销一个已合并的批次（开一个撤销用的 Draft PR）',
           '',
-          '整理结果只以 Draft PR 的形式出现，审核合并后才生效；「课堂精练」「自动整理」两个开关在 `/config` 里。',
-          '自动整理不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且没有别的任务时才跑，用户消息一来就让路。',
+          '默认以 Draft PR 发布、审核合并后才生效；配置文件里 `dreamTuning.publish: "push"` 改为直接提交推送并写 CHANGELOG.md。「课堂精练」「自动整理」两个开关在 `/config` 里。',
+          '自动整理默认不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且没有别的任务时才跑；设了 `dreamTuning.dailyAt` 就每天定时跑。用户消息一来就让路。',
         ].join('\n'),
       );
   }

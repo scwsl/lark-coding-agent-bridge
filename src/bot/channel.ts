@@ -110,6 +110,7 @@ import { RunRegistry } from '../runtime/run-registry';
 import { buildKnowledgeContext } from '../knowledge/inject';
 import { getKnowledgeSyncIntervalMinutes, KnowledgeAutoSync } from '../knowledge/auto-sync';
 import { getSkillSyncIntervalMinutes, SkillLibraries } from '../knowledge/libraries';
+import { syncKnowledge } from '../knowledge/sync';
 import { KnowledgeStore } from '../knowledge/store';
 import { Scheduler } from '../scheduler/scheduler';
 import { DreamService } from '../dream/service';
@@ -801,6 +802,18 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         activeRuns.scopes().some(notDream) ||
         activeRuns.lingeringScopes().some(notDream) ||
         pending.totalDepth() > 0,
+      // publish: push — what was just pushed takes effect now, not at the next periodic sync.
+      afterPublish: async (repo) => {
+        if (repo === 'knowledge') {
+          const synced = await syncKnowledge(knowledge);
+          if ('error' in synced) log.warn('dream', 'knowledge-refresh-failed', { error: synced.error });
+          return;
+        }
+        if (repo.startsWith('skills:')) await skillLibraries?.sync(repo.slice('skills:'.length));
+      },
+      notify: async (chatId, markdown) => {
+        await channel.send(chatId, { markdown });
+      },
     });
     await dream.init().catch((err: unknown) => log.fail('dream', err, { step: 'init' }));
     controls.dream = dream;

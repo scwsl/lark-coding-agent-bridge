@@ -454,7 +454,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               {
                 tag: 'markdown',
                 content:
-                  '**自动整理**\n<font color="grey">需先开课堂精练。不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且 bot 空闲时才自己整理一轮，有用户消息就让路；条件在配置文件 dreamTuning 里调</font>',
+                  '**自动整理**\n<font color="grey">需先开课堂精练。默认不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且 bot 空闲时才自己整理一轮，有用户消息就让路；条件在配置文件 dreamTuning 里调（dailyAt 可改为每天定时）</font>',
               },
               {
                 tag: 'select_static',

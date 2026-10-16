@@ -13,7 +13,10 @@ import { normalizeText, type MemoryAddition, type SkillProposal } from './propos
  * The deterministic publishing half of 课堂精练: a fresh checkout of the target
  * repository's latest remote state, files written from validated proposals
  * only, one commit on `dream/<batch>`, a push of that new branch and a Draft
- * PR. Never a force push, never the default branch, never a merge.
+ * PR. Never a force push, never a merge. The default branch is only written
+ * with `publish: push` — a profile whose owner chose to let it learn without
+ * review: the commit then goes straight onto it, together with an entry in
+ * the repository's `CHANGELOG.md`.
  *
  * Every write stays inside a fixed allow-list of paths derived from scope ids
  * and slugs that already passed validation; the agent never names a path.
@@ -48,6 +51,7 @@ export async function prepareCheckout(
   spec: RepoSpec,
   dir: string,
   branch: string,
+  options: { direct?: boolean } = {},
 ): Promise<{ base: string } | { error: string }> {
   if (!isPlausibleGitUrl(spec.url)) return { error: '仓库地址不合法' };
   if (spec.ref !== undefined && (!isSafeRef(spec.ref) || /^[0-9a-f]{7,40}$/i.test(spec.ref))) {
@@ -78,6 +82,8 @@ export async function prepareCheckout(
   const head = await git(dir, ['symbolic-ref', '-q', '--short', 'HEAD']);
   const base = head.ok ? head.stdout.trim() : '';
   if (!base) return { error: `${spec.ref ?? '默认分支'} 不是分支（tag 或固定提交），不能作为写入目标` };
+  // publish: push commits onto the default branch itself.
+  if (options.direct) return { base };
   const created = await git(dir, ['checkout', '-q', '-b', branch]);
   if (!created.ok) return { error: `创建分支失败：${gitFailure(created)}` };
   return { base };
@@ -197,6 +203,75 @@ export async function writeSkillDraft(
   return { files, written, rejected };
 }
 
+/**
+ * Put one batch's entry at the top of the repository's `CHANGELOG.md`
+ * (newest first), creating the file with a short header the first time.
+ * Returns the path to commit, or an error when the file is not a plain file.
+ */
+export async function writeChangelog(dir: string, entry: string): Promise<{ file: string } | { error: string }> {
+  const file = join(dir, CHANGELOG_FILE);
+  if (await isSymlink(file)) return { error: `${CHANGELOG_FILE} 是符号链接，不写` };
+  const current = await readIfExists(file);
+  const block = `${entry.trim()}\n`;
+  let next: string;
+  if (current === undefined) {
+    next = `${CHANGELOG_HEADER}\n${block}`;
+  } else {
+    const at = current.search(/^## /m);
+    next = at < 0 ? `${current.replace(/\s*$/, '')}\n\n${block}` : `${current.slice(0, at)}${block}\n${current.slice(at)}`;
+  }
+  await writeFile(file, next, 'utf8');
+  return { file: CHANGELOG_FILE };
+}
+
+export const CHANGELOG_FILE = 'CHANGELOG.md';
+const CHANGELOG_HEADER = '# 更新日志\n\n课堂精练每一批对本仓库的改动，最新的在最前面。由 lark-channel-bridge 自动写入。\n';
+
+/**
+ * publish: push — put the batch commit onto `base` on the remote. When the
+ * remote moved meanwhile, rebase onto it once and push again; a conflict
+ * leaves the commit as it was for the next run. Never a force push.
+ */
+export async function pushDirect(
+  dir: string,
+  base: string,
+  hooksDir: string,
+): Promise<{ commit: string } | { error: string }> {
+  if (!isSafeRef(base)) return { error: '分支名不合法' };
+  await mkdir(hooksDir, { recursive: true, mode: 0o700 });
+  const push = () =>
+    git(dir, ['-c', `core.hooksPath=${hooksDir}`, 'push', '-q', '--no-verify', 'origin', `HEAD:refs/heads/${base}`], {
+      timeoutMs: PUSH_TIMEOUT_MS,
+    });
+  const headCommit = async () => (await git(dir, ['rev-parse', 'HEAD'])).stdout.trim();
+  let pushed = await push();
+  if (pushed.ok) return { commit: await headCommit() };
+  const reason = gitFailure(pushed);
+  if (/permission|denied|403|not allowed|protected/i.test(reason) && !/rejected|fetch first|non-fast-forward/i.test(reason)) {
+    return { error: `没有推送权限：${reason}` };
+  }
+  const fetched = await git(dir, ['fetch', '-q', '--no-tags', 'origin', base], { timeoutMs: PUSH_TIMEOUT_MS });
+  if (!fetched.ok) return { error: `推送失败，拉取远端也失败：${gitFailure(fetched)}` };
+  // Pushed before, state just not saved: the remote already has this commit.
+  if ((await git(dir, ['merge-base', '--is-ancestor', 'HEAD', 'FETCH_HEAD'])).ok) return { commit: await headCommit() };
+  const rebased = await git(dir, [...(await identityArgs(dir)), '-c', `core.hooksPath=${hooksDir}`, 'rebase', '-q', 'FETCH_HEAD'], {
+    timeoutMs: 30_000,
+  });
+  if (!rebased.ok) {
+    await git(dir, ['rebase', '--abort']);
+    return { error: `远端已有新提交，变基时冲突，留到下一轮重试：${gitFailure(rebased)}` };
+  }
+  pushed = await push();
+  if (!pushed.ok) return { error: `推送失败：${gitFailure(pushed)}` };
+  return { commit: await headCommit() };
+}
+
+/** The host's own git identity when it has one; a machine without any still commits. */
+async function identityArgs(dir: string): Promise<string[]> {
+  const named = (await git(dir, ['config', 'user.name'])).ok && (await git(dir, ['config', 'user.email'])).ok;
+  return named ? [] : ['-c', 'user.name=lark-channel-bridge', '-c', 'user.email=bridge@localhost'];
+}
+
 /** Commit exactly `files`, with the repository's hooks switched off. */
 export async function commitDraft(
   dir: string,
@@ -207,9 +282,7 @@ export async function commitDraft(
   await mkdir(hooksDir, { recursive: true, mode: 0o700 });
   const added = await git(dir, ['add', '--', ...files]);
   if (!added.ok) return { error: `git add 失败：${gitFailure(added)}` };
-  // The host's own git identity when it has one; a machine without any still commits.
-  const named = (await git(dir, ['config', 'user.name'])).ok && (await git(dir, ['config', 'user.email'])).ok;
-  const identity = named ? [] : ['-c', 'user.name=lark-channel-bridge', '-c', 'user.email=bridge@localhost'];
+  const identity = await identityArgs(dir);
   const committed = await git(
     dir,
     [...identity, '-c', `core.hooksPath=${hooksDir}`, 'commit', '-q', '--no-verify', '-m', message],

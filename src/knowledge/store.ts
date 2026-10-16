@@ -62,6 +62,27 @@ export class KnowledgeStore {
     return join(this.dir, 'skills');
   }
 
+  /**
+   * Topic notes (`notes/<scope>/<topic>.md`, written by 课堂精练) of these
+   * scopes, name `<scope>/<topic>`. Only real files inside the directory.
+   */
+  async listNotes(scopeIds: readonly string[]): Promise<Array<{ name: string; path: string }>> {
+    const out: Array<{ name: string; path: string }> = [];
+    for (const scope of [...new Set(scopeIds.map(sanitizeScopeId))]) {
+      const dir = join(this.dir, 'notes', scope);
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries.filter((item) => item.isFile() && /^[a-z0-9][a-z0-9-]*\.md$/.test(item.name)).sort((a, b) => a.name.localeCompare(b.name))) {
+        out.push({ name: `${scope}/${entry.name.slice(0, -3)}`, path: join(dir, entry.name) });
+      }
+    }
+    return out;
+  }
+
   memoryFile(scope: MemoryScope): string {
     if (scope.kind === 'profile') return join(this.dir, 'MEMORY.md');
     return join(this.dir, 'chats', `${sanitizeScopeId(scope.scopeId)}.md`);
@@ -258,6 +279,12 @@ export function parseSkillHeader(dirName: string, raw: string): { name: string; 
     (line) => line.trim() && !line.startsWith('#') && !line.startsWith('---'),
   );
   return { name: heading || dirName, description: (firstProse ?? '').trim() };
+}
+
+/** One top-level frontmatter value of a SKILL.md (`argument-hint`, …), or undefined without one. */
+export function skillFrontmatterValue(raw: string, key: string): string | undefined {
+  const frontmatter = /^---\s*\n([\s\S]*?)\n---/.exec(raw);
+  return frontmatter?.[1] ? frontmatterValue(frontmatter[1], key) : undefined;
 }
 
 /**

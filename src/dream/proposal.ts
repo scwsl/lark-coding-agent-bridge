@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isSafeSkillName, parseSkillHeader, type MemoryEntry, type SkillSummary } from '../knowledge/store';
+import { isSafeSkillName, parseSkillHeader, skillFrontmatterValue, type MemoryEntry, type SkillSummary } from '../knowledge/store';
 import type { DreamSourceRef } from './prompt';
 import { findSecret } from './secrets';
 
@@ -105,6 +105,19 @@ export interface ValidateContext {
   skills: readonly SkillSummary[];
   /** Already proposed in an earlier batch (merged, open or rejected). */
   isPublished: (hash: string) => boolean;
+  /** Every skill must declare `argument-hint` in its frontmatter. */
+  requireArgumentHint?: boolean;
+  /**
+   * 课前学习: the input is another bot's repository, not a conversation of
+   * ours. Its knowledge may only become notes — never a rule every chat is
+   * told — and only skills of this library may be updated.
+   */
+  external?: { ownLibrary?: string };
+  /** Names a new skill may not take: skills the agent CLI already loads from elsewhere. */
+  reservedSkillNames?: ReadonlySet<string>;
+  /** Caps for this one call; default {@link MAX_MEMORY_PER_SCOPE} / {@link MAX_SKILLS_PER_SCOPE}. */
+  maxMemory?: number;
+  maxSkills?: number;
 }
 
 export function validateDreamProposals(
@@ -120,8 +133,9 @@ export function validateDreamProposals(
   };
 
   for (const item of raw.memory) {
-    if (out.additions.length + out.flags.length >= MAX_MEMORY_PER_SCOPE) {
-      reject('memory', `超过每个会话范围 ${MAX_MEMORY_PER_SCOPE} 条的上限`);
+    const maxMemory = ctx.maxMemory ?? MAX_MEMORY_PER_SCOPE;
+    if (out.additions.length + out.flags.length >= maxMemory) {
+      reject('memory', `超过每个会话范围 ${maxMemory} 条的上限`);
       continue;
     }
     const result = validateMemoryItem(item, ctx, existingText);
@@ -139,8 +153,9 @@ export function validateDreamProposals(
   }
 
   for (const item of raw.skills) {
-    if (out.skills.length >= MAX_SKILLS_PER_SCOPE) {
-      reject('skill', `超过每个会话范围 ${MAX_SKILLS_PER_SCOPE} 个的上限`);
+    const maxSkills = ctx.maxSkills ?? MAX_SKILLS_PER_SCOPE;
+    if (out.skills.length >= maxSkills) {
+      reject('skill', `超过每个会话范围 ${maxSkills} 个的上限`);
       continue;
     }
     const result = validateSkillItem(item, ctx);
@@ -179,6 +194,7 @@ function validateMemoryItem(
     if (!text) return { error: '新增条目缺少内容' };
     let target = item.target;
     if (target !== 'chat' && target !== 'profile' && target !== 'note') return { error: '未知的 target' };
+    if (ctx.external && target !== 'note') return { error: '外部库学到的知识只写入笔记（target note）' };
     let note: string | undefined;
     if (target === 'note') {
       note = typeof item.note === 'string' ? item.note.trim() : '';
@@ -208,6 +224,7 @@ function validateMemoryItem(
     };
   }
   if (action === 'merge' || action === 'conflict' || action === 'stale') {
+    if (ctx.external) return { error: '外部库学习不做合并 / 冲突 / 过时标记' };
     if (!Array.isArray(item.ids) || item.ids.length === 0 || item.ids.length > 10) return { error: 'ids 缺失或过多' };
     const ids: MemoryFlag['ids'] = [];
     for (const id of item.ids) {
@@ -252,13 +269,18 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
     body = `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n${body}`;
   }
   if (parseSkillHeader(name, body).name !== name) return { error: 'skill 正文的 name 与提案不一致' };
+  if (ctx.requireArgumentHint && !hasArgumentHint(body)) return { error: 'skill 的 frontmatter 缺少 argument-hint 参数说明' };
   const secret = findSecret(`${body}\n${description}\n${reason}`);
   if (secret) return { error: `skill 疑似包含凭证（${secret}）` };
   const existing = ctx.skills.find((skill) => skill.name === name);
   if (action === 'create' && existing) return { error: `已有同名 skill ${name}，应作为更新提出` };
+  if (action === 'create' && ctx.reservedSkillNames?.has(name)) return { error: `本机已装有同名技能 ${name}，不再新建` };
   if (action === 'update') {
     if (!existing) return { error: `没有名为 ${name} 的 skill 可更新` };
     if (!existing.source) return { error: `${name} 是本 profile 自带的 skill，不在共享库里，课堂精练不改它` };
+    if (ctx.external && existing.source !== ctx.external.ownLibrary) {
+      return { error: `${name} 来自 skill 库 ${existing.source}，不是自己的库，课前学习只更新自己的 skill` };
+    }
   }
   return {
     scopeId: ctx.scopeId,
@@ -271,6 +293,11 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
     ...(action === 'update' && existing?.source ? { source: existing.source } : {}),
     hash: hashOf(['skill', action, name, createHash('sha256').update(body).digest('hex')]),
   };
+}
+
+/** The SKILL.md frontmatter has a non-empty `argument-hint`. */
+export function hasArgumentHint(body: string): boolean {
+  return Boolean(skillFrontmatterValue(body.replace(/\r\n/g, '\n'), 'argument-hint'));
 }
 
 function resolveSources(

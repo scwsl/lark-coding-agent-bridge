@@ -7,6 +7,8 @@ export interface KnowledgeContext {
   chatMemory?: string[];
   /** Index only — the agent reads a skill's body itself when it needs it. */
   skills?: SkillRef[];
+  /** Topic notes (课堂精练), index only: `external/…` came from other bots' libraries. */
+  notes?: Array<{ name: string; path: string }>;
   /** Set when notes were dropped to stay inside the budget. */
   truncated?: boolean;
 }
@@ -35,6 +37,9 @@ const MAX_SKILLS = 80;
  */
 const MAX_DESCRIPTION_CHARS = 240;
 const SKILL_INDEX_MAX_CHARS = 16_000;
+/** 课前学习 writes what it learned from other bots under `notes/external/`; every chat may read it. */
+const EXTERNAL_NOTES_SCOPE = 'external';
+const MAX_NOTES = 60;
 
 /**
  * Assemble what the agent should know before answering, or `undefined` when
@@ -50,12 +55,14 @@ export async function buildKnowledgeContext(
   // A topic (`oc_xxx:omt_yyy`) also sees its group's notes (`oc_xxx`), so a
   // topic group can keep one shared memory instead of one per topic.
   const groupId = input.scopeId.includes(':') ? input.scopeId.split(':')[0] : undefined;
-  const [profile, group, topic, skills] = await Promise.all([
+  const [profile, group, topic, skills, notes] = await Promise.all([
     input.store.listMemories({ kind: 'profile' }),
     groupId ? input.store.listMemories({ kind: 'chat', scopeId: groupId }) : Promise.resolve([]),
     input.store.listMemories({ kind: 'chat', scopeId: input.scopeId }),
     input.store.listSkills(),
+    input.store.listNotes([EXTERNAL_NOTES_SCOPE, ...(groupId ? [groupId] : []), input.scopeId]).catch(() => []),
   ]);
+  const keptNotes = notes.slice(0, MAX_NOTES);
   const chat = [...group, ...topic];
 
   const budgeted = applyBudget(profile, chat, input.maxChars ?? DEFAULT_MAX_CHARS);
@@ -63,7 +70,8 @@ export async function buildKnowledgeContext(
   if (
     budgeted.profile.length === 0 &&
     budgeted.chat.length === 0 &&
-    trimmedSkills.length === 0
+    trimmedSkills.length === 0 &&
+    keptNotes.length === 0
   ) {
     return undefined;
   }
@@ -72,7 +80,8 @@ export async function buildKnowledgeContext(
     ...(budgeted.profile.length > 0 ? { profileMemory: budgeted.profile } : {}),
     ...(budgeted.chat.length > 0 ? { chatMemory: budgeted.chat } : {}),
     ...(trimmedSkills.length > 0 ? { skills: trimmedSkills } : {}),
-    ...(budgeted.truncated || skills.length > trimmedSkills.length ? { truncated: true } : {}),
+    ...(keptNotes.length > 0 ? { notes: keptNotes } : {}),
+    ...(budgeted.truncated || skills.length > trimmedSkills.length || notes.length > keptNotes.length ? { truncated: true } : {}),
   };
 }
 

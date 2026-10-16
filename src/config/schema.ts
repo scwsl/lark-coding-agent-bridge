@@ -262,6 +262,48 @@ export interface DreamTuning {
   maxAutoFailures?: number;
   /** Skip automatic runs once any quota window of the agent account is this full (percent). Default 80. */
   maxQuotaPercent?: number;
+  /** Which window {@link maxQuotaPercent} looks at: `any` — the fullest (default) — or `week`, the weekly one only. */
+  quotaWindow?: 'any' | 'week';
+  /**
+   * 每日模式: 自动整理 starts at this local time (`HH:MM`, in {@link timezone})
+   * every day instead of waiting for material to pile up. The allowed hours
+   * become the three hours from it ({@link window} is ignored), and the
+   * interval, material and review-backlog gates are skipped; the others hold.
+   */
+  dailyAt?: string;
+  /**
+   * `pr` (default): every target gets a Draft PR for review. `push`: the batch
+   * is committed straight onto the default branch and pushed, each repository
+   * keeping a `CHANGELOG.md` of what every batch changed — for a profile whose
+   * owner chose to let it learn without review.
+   */
+  publish?: 'pr' | 'push';
+  /**
+   * 课前学习: repositories (other bots' knowledge / skill libraries) studied at
+   * the start of every run, only what changed since the last run. Read-only:
+   * never written to. What is worth keeping lands in this profile's own
+   * knowledge repo (notes) and skill library.
+   */
+  externalLibraries?: DreamExternalLibraryConfig[];
+  /** Every skill a run writes must declare `argument-hint` in its frontmatter; own skills without one get it added. */
+  requireArgumentHint?: boolean;
+  /**
+   * Skill directories the agent CLI loads by itself (`~/.claude/skills`…):
+   * listed by name to 课前学习 so it does not create a library copy of a
+   * skill the profile already has.
+   */
+  localSkillDirs?: string[];
+  /** Chat (`oc_…`) or user (`ou_…`) told the outcome of every automatic run. Absent: automatic runs stay silent. */
+  notifyChat?: string;
+}
+
+export interface DreamExternalLibraryConfig {
+  /** Slug: letters, digits, `.`, `_`, `-`. */
+  name: string;
+  /** Git URL, cloned read-only. */
+  url: string;
+  /** Branch to follow; absent: the remote's default branch. */
+  ref?: string;
 }
 
 export interface DreamAutoSettings {
@@ -276,6 +318,9 @@ export interface DreamAutoSettings {
   maxOpenPrs: number;
   maxAutoFailures: number;
   maxQuotaPercent: number;
+  quotaWindow: 'any' | 'week';
+  /** 每日模式: start time, minutes after local midnight; {@link window} is then derived from it. */
+  daily?: { at: number; text: string };
 }
 
 export interface DreamSettings {
@@ -285,8 +330,16 @@ export interface DreamSettings {
   minIdleMinutes: number;
   skillLibrary?: string;
   scopes?: string[];
+  publish: 'pr' | 'push';
+  external: DreamExternalLibraryConfig[];
+  requireArgumentHint: boolean;
+  localSkillDirs: string[];
+  notifyChat?: string;
   auto: DreamAutoSettings;
 }
+
+/** 每日模式 runs may start within this many minutes of {@link DreamAutoSettings.daily}. */
+export const DREAM_DAILY_WINDOW_MINUTES = 180;
 
 export const DREAM_AUTO_DEFAULTS: DreamAutoSettings = {
   window: { start: 60, end: 420, text: '01:00-07:00' },
@@ -298,6 +351,7 @@ export const DREAM_AUTO_DEFAULTS: DreamAutoSettings = {
   maxOpenPrs: 1,
   maxAutoFailures: 3,
   maxQuotaPercent: 80,
+  quotaWindow: 'any',
 };
 
 export const DREAM_DEFAULTS: DreamSettings = {
@@ -305,6 +359,10 @@ export const DREAM_DEFAULTS: DreamSettings = {
   maxInputChars: 120_000,
   maxRunMinutes: 20,
   minIdleMinutes: 30,
+  publish: 'pr',
+  external: [],
+  requireArgumentHint: false,
+  localSkillDirs: [],
   auto: DREAM_AUTO_DEFAULTS,
 };
 
@@ -533,6 +591,8 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
   const scopes = Array.isArray(raw.scopes)
     ? raw.scopes.filter((scope): scope is string => typeof scope === 'string' && scope.trim() !== '').map((scope) => scope.trim())
     : [];
+  const daily = typeof raw.dailyAt === 'string' ? parseDreamClock(raw.dailyAt) : undefined;
+  const notifyChat = typeof raw.notifyChat === 'string' && /^o[cu]_[\w-]+$/.test(raw.notifyChat.trim()) ? raw.notifyChat.trim() : '';
   return {
     maxSessions: pick(raw.maxSessions, 1, 200, DREAM_DEFAULTS.maxSessions),
     maxInputChars: pick(raw.maxInputChars, 10_000, 1_000_000, DREAM_DEFAULTS.maxInputChars),
@@ -540,8 +600,18 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     minIdleMinutes: pick(raw.minIdleMinutes, 0, 7 * 24 * 60, DREAM_DEFAULTS.minIdleMinutes),
     ...(library ? { skillLibrary: library } : {}),
     ...(scopes.length > 0 ? { scopes } : {}),
+    publish: raw.publish === 'push' ? 'push' : 'pr',
+    external: resolveExternalLibraries(raw.externalLibraries),
+    requireArgumentHint: raw.requireArgumentHint === true,
+    localSkillDirs: Array.isArray(raw.localSkillDirs)
+      ? raw.localSkillDirs.filter((dir): dir is string => typeof dir === 'string' && /^(?:~\/|\/)/.test(dir.trim())).map((dir) => dir.trim())
+      : [],
+    ...(notifyChat ? { notifyChat } : {}),
     auto: {
-      window: (typeof raw.window === 'string' ? parseDreamWindow(raw.window) : undefined) ?? DREAM_AUTO_DEFAULTS.window,
+      window:
+        (daily ? dailyWindow(daily) : undefined) ??
+        (typeof raw.window === 'string' ? parseDreamWindow(raw.window) : undefined) ??
+        DREAM_AUTO_DEFAULTS.window,
       timezone: typeof raw.timezone === 'string' && isTimeZone(raw.timezone.trim()) ? raw.timezone.trim() : DREAM_AUTO_DEFAULTS.timezone,
       minScopes: pick(raw.minScopes, 1, 200, DREAM_AUTO_DEFAULTS.minScopes),
       minInputChars: pick(raw.minInputChars, 1_000, 1_000_000, DREAM_AUTO_DEFAULTS.minInputChars),
@@ -550,8 +620,47 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
       maxOpenPrs: pick(raw.maxOpenPrs, 1, 20, DREAM_AUTO_DEFAULTS.maxOpenPrs),
       maxAutoFailures: pick(raw.maxAutoFailures, 1, 20, DREAM_AUTO_DEFAULTS.maxAutoFailures),
       maxQuotaPercent: pick(raw.maxQuotaPercent, 10, 100, DREAM_AUTO_DEFAULTS.maxQuotaPercent),
+      quotaWindow: raw.quotaWindow === 'week' ? 'week' : 'any',
+      ...(daily ? { daily } : {}),
     },
   };
+}
+
+/** `HH:MM` → minutes after midnight. */
+export function parseDreamClock(text: string): { at: number; text: string } | undefined {
+  const match = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(text);
+  if (!match) return undefined;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return undefined;
+  return { at: hours * 60 + minutes, text: `${String(hours).padStart(2, '0')}:${match[2]}` };
+}
+
+function dailyWindow(daily: { at: number }): DreamAutoSettings['window'] | undefined {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const clock = (minutes: number) => `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+  return parseDreamWindow(`${clock(daily.at)}-${clock((daily.at + DREAM_DAILY_WINDOW_MINUTES) % 1440)}`);
+}
+
+const EXTERNAL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Well-formed entries only, first of each name; the URL and ref are checked again before any git call. */
+function resolveExternalLibraries(raw: unknown): DreamExternalLibraryConfig[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DreamExternalLibraryConfig[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const { name, url, ref } = item as Partial<DreamExternalLibraryConfig>;
+    if (typeof name !== 'string' || !EXTERNAL_NAME_RE.test(name.trim())) continue;
+    if (typeof url !== 'string' || !url.trim() || /\s/.test(url.trim())) continue;
+    if (out.some((entry) => entry.name === name.trim())) continue;
+    out.push({
+      name: name.trim(),
+      url: url.trim(),
+      ...(typeof ref === 'string' && ref.trim() ? { ref: ref.trim() } : {}),
+    });
+  }
+  return out;
 }
 
 /** `HH:MM-HH:MM` → minutes after midnight; a window that ends where it starts is refused. */

@@ -1,9 +1,11 @@
 import type { DreamAutoSettings } from '../config/schema';
 
 /**
- * When 自动整理 may start a run. Not a daily clock: a run needs enough new
- * material, enough time since the last completed run, the previous batch
- * reviewed, the allowed hours and an idle profile. This file holds the pure
+ * When 自动整理 may start a run. By default not a daily clock: a run needs
+ * enough new material, enough time since the last completed run, the previous
+ * batch reviewed, the allowed hours and an idle profile. 每日模式
+ * (`dreamTuning.dailyAt`) is the exception: once a day from that time, with
+ * only the idle, quota and failure gates left. This file holds the pure
  * parts — the clock and the cheap gates; the service adds the ones that need
  * I/O (profile activity, transcripts, open PRs, quota).
  */
@@ -114,7 +116,8 @@ export function cheapDreamGate(input: {
       };
     }
   }
-  if (ledger.lastCompletedAt !== undefined) {
+  // 每日模式: one run per day is the window's own rule (window-used above).
+  if (ledger.lastCompletedAt !== undefined && !auto.daily) {
     const days = (now - ledger.lastCompletedAt) / DAY_MS;
     if (days < auto.minIntervalDays) {
       return { block: 'interval', reason: `距上次整理 ${formatDays(days)}/${auto.minIntervalDays} 天` };
@@ -144,6 +147,17 @@ export function materialGate(input: {
     ok: false,
     reason: `材料不足（${material.scopes}/${auto.minScopes} 个会话范围，${formatChars(material.chars)}/${formatChars(auto.minInputChars)} 字）`,
   };
+}
+
+/**
+ * Milliseconds until the next 每日模式 start (`at`, minutes after local
+ * midnight in `timezone`). Never 0: inside the start minute itself, the next
+ * one is a day away — so a timer re-armed right after firing does not fire again.
+ */
+export function msUntilDaily(now: number, at: number, timezone: string): number {
+  const { minutes } = localClock(now, timezone);
+  const delta = (at - minutes + 1440) % 1440 || 1440;
+  return delta * 60_000 - (now % 60_000);
 }
 
 export function formatDays(days: number): string {
