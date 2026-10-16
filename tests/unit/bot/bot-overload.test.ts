@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BotOverloadGuard, isBotOnlyBatch, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { BotOverloadGuard, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -27,6 +27,8 @@ describe('resolveBotOverload', () => {
       sessionPercent: 80,
       sessionGraceHours: 1,
       cooldownMinutes: 10,
+      exceptChats: [],
+      exceptBots: [],
     });
   });
 });
@@ -66,6 +68,34 @@ describe('planBotOverload', () => {
       overload: true,
       windows: [{ kind: 'week' }],
     });
+  });
+});
+
+describe('every group', () => {
+  it('applies to any group chat with "*"', async () => {
+    const all = resolveBotOverload({ preferences: { botOverload: { chats: ['*', 'oc_x'] } } })!;
+    expect(all.chats).toEqual(['*']);
+    const guard = new BotOverloadGuard({
+      profileConfig: () => createDefaultProfileConfig({ agentKind: 'claude', accounts: { app: { id: 'a', secret: 's', tenant: 'feishu' } } }),
+      scratchDir: '/tmp/unused',
+      readQuota: async () => reading([90, 'Oct 20 at 9am (Asia/Shanghai)'], [10, 'Oct 17 at 1am (Asia/Shanghai)']),
+      now: () => NOW,
+    });
+    expect(await guard.decide(all, 'oc_anything')).toMatchObject({ overload: true, card: true });
+  });
+});
+
+describe('白名单', () => {
+  it('exempts listed chats and listed bots, by open_id or app id', () => {
+    const listed = resolveBotOverload({
+      preferences: { botOverload: { chats: ['*'], exceptChats: ['oc_vip', 'bad'], exceptBots: ['cli_cc', 'ou_shawn', 'x'] } },
+    })!;
+    expect(listed.exceptChats).toEqual(['oc_vip']);
+    expect(listed.exceptBots).toEqual(['cli_cc', 'ou_shawn']);
+    expect(isOverloadExempt(listed, 'oc_vip', ['cli_other'])).toBe(true);
+    expect(isOverloadExempt(listed, 'oc_group', ['ou_x', 'cli_cc'])).toBe(true);
+    expect(isOverloadExempt(listed, 'oc_group', ['ou_shawn'])).toBe(true);
+    expect(isOverloadExempt(listed, 'oc_group', ['cli_other', 'ou_other'])).toBe(false);
   });
 });
 

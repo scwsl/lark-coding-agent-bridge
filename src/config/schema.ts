@@ -236,7 +236,7 @@ export interface AppPreferences {
 }
 
 export interface BotOverloadConfig {
-  /** Group chats (`oc_…`) the rule applies to. Empty: off. */
+  /** Group chats (`oc_…`) the rule applies to; `"*"`: every group and topic chat. Empty: off. */
   chats?: string[];
   /** Weekly window used above this (percent) … Default 80. */
   weekPercent?: number;
@@ -248,34 +248,52 @@ export interface BotOverloadConfig {
   sessionGraceHours?: number;
   /** At most one overload card per chat this often; the rest are dropped silently. Default 10. */
   cooldownMinutes?: number;
+  /** 白名单: chats (`oc_…`) never covered, even with `"*"`. */
+  exceptChats?: string[];
+  /** 白名单: bots (open_id `ou_…` or app id `cli_…`) whose messages are always answered. */
+  exceptBots?: string[];
 }
 
 export interface BotOverloadSettings {
+  /** Listed chats; `['*']` means every group. */
   chats: string[];
   weekPercent: number;
   weekGraceHours: number;
   sessionPercent: number;
   sessionGraceHours: number;
   cooldownMinutes: number;
+  exceptChats: string[];
+  exceptBots: string[];
 }
 
 /** 过载保护 settings, or `undefined` when no chat is listed. Out-of-range values fall back to the defaults. */
 export function resolveBotOverload(cfg: Pick<AppConfig, 'preferences'>): BotOverloadSettings | undefined {
   const raw = cfg.preferences?.botOverload;
   const chats = Array.isArray(raw?.chats)
-    ? raw.chats.filter((chat): chat is string => typeof chat === 'string' && /^oc_[\w-]+$/.test(chat.trim())).map((chat) => chat.trim())
+    ? raw.chats
+        .filter((chat): chat is string => typeof chat === 'string' && (/^oc_[\w-]+$/.test(chat.trim()) || chat.trim() === '*'))
+        .map((chat) => chat.trim())
     : [];
   if (chats.length === 0) return undefined;
+  const all = chats.includes('*');
   const pick = (value: unknown, min: number, max: number, fallback: number): number =>
     typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : fallback;
   return {
-    chats,
+    chats: all ? ['*'] : chats,
     weekPercent: pick(raw?.weekPercent, 1, 100, 80),
     weekGraceHours: pick(raw?.weekGraceHours, 0, 168, 6),
     sessionPercent: pick(raw?.sessionPercent, 1, 100, 80),
     sessionGraceHours: pick(raw?.sessionGraceHours, 0, 5, 1),
     cooldownMinutes: pick(raw?.cooldownMinutes, 0, 24 * 60, 10),
+    exceptChats: ids(raw?.exceptChats, /^oc_[\w-]+$/),
+    exceptBots: ids(raw?.exceptBots, /^(?:ou|cli)_[\w-]+$/),
   };
+}
+
+function ids(raw: unknown, shape: RegExp): string[] {
+  return Array.isArray(raw)
+    ? raw.filter((id): id is string => typeof id === 'string' && shape.test(id.trim())).map((id) => id.trim())
+    : [];
 }
 
 export interface DreamTuning {

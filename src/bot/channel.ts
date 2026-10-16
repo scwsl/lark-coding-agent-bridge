@@ -62,7 +62,7 @@ import {
 import { resolveAppSecret } from '../config/secret-resolver';
 import { tmpdir } from 'node:os';
 import { overloadCard } from '../card/templates';
-import { BotOverloadGuard, isBotOnlyBatch } from './bot-overload';
+import { BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
 import { log, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -1365,7 +1365,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   // 过载保护: other bots' questions wait while the quota is tight; humans never do.
   const overload = resolveBotOverload(controls.cfg);
-  if (overload && deps.botOverload && mode !== 'p2p' && isBotOnlyBatch(batch, senderTypeOf)) {
+  if (
+    overload &&
+    deps.botOverload &&
+    mode !== 'p2p' &&
+    isBotOnlyBatch(batch, senderTypeOf) &&
+    !isOverloadExempt(overload, chatId, batch.flatMap(senderIdsOf))
+  ) {
     const decision = await deps.botOverload.decide(overload, chatId);
     if (decision.overload) {
       log.info('overload', decision.card ? 'card' : 'dropped', {
@@ -2992,6 +2998,13 @@ function senderTypeOf(msg: NormalizedMessage): 'user' | 'bot' | undefined {
   if (senderType === 'user') return 'user';
   if (senderType === 'app' || senderType === 'bot') return 'bot';
   return undefined;
+}
+
+/** Every id the sender is known by: the normalized one and the raw open_id / app_id. */
+function senderIdsOf(msg: NormalizedMessage): string[] {
+  const raw = msg.raw as { sender?: { sender_id?: { open_id?: unknown; app_id?: unknown; union_id?: unknown } } } | undefined;
+  const ids = raw?.sender?.sender_id;
+  return [msg.senderId, ids?.open_id, ids?.app_id, ids?.union_id].filter((id): id is string => typeof id === 'string' && id !== '');
 }
 
 /** The people (never bots — an @ would wake them) whose messages make up a batch. */

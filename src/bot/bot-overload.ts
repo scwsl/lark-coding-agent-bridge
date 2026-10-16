@@ -4,7 +4,7 @@ import type { ProfileConfig } from '../config/profile-schema';
 import type { BotOverloadSettings } from '../config/schema';
 
 /**
- * 过载保护: in the group chats listed in `preferences.botOverload`, other
+ * 过载保护: in the group chats listed in `preferences.botOverload` (`*`: all), other
  * bots' questions are not answered while the agent account's quota is tight —
  * the bot posts an overload card instead and starts no run, so what is left
  * goes to the humans. A window counts as tight when it is used above its limit
@@ -48,6 +48,12 @@ export function isBotOnlyBatch<T>(batch: readonly T[], senderType: (msg: T) => '
   return batch.length > 0 && batch.every((msg) => senderType(msg) === 'bot');
 }
 
+/** 白名单: a whitelisted chat, or a batch with a message from a whitelisted bot, is always answered. */
+export function isOverloadExempt(settings: BotOverloadSettings, chatId: string, senderIds: readonly string[]): boolean {
+  if (settings.exceptChats.includes(chatId)) return true;
+  return senderIds.some((id) => settings.exceptBots.includes(id));
+}
+
 const QUOTA_TTL_MS = 5 * 60_000;
 
 /**
@@ -77,7 +83,7 @@ export class BotOverloadGuard {
     settings: BotOverloadSettings,
     chatId: string,
   ): Promise<{ overload: false } | { overload: true; card: boolean; windows: OverloadWindow[] }> {
-    if (!settings.chats.includes(chatId)) return { overload: false };
+    if (!settings.chats.includes('*') && !settings.chats.includes(chatId)) return { overload: false };
     const now = this.now();
     const decision = planBotOverload(settings, await this.quota(now), now);
     if (!decision.overload) return decision;
