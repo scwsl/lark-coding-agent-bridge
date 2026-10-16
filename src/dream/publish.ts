@@ -266,6 +266,22 @@ export async function pushDirect(
   return { commit: await headCommit() };
 }
 
+/**
+ * Fast-forward a local clone of `url` (`git pull --ff-only`). Skipped — not
+ * an error — when `dir` is not a clone of that repository; a clone with local
+ * changes or diverged history is left alone and reported.
+ */
+export async function pullLocalClone(dir: string, url: string): Promise<{ pulled: boolean } | { error: string }> {
+  const origin = await git(dir, ['remote', 'get-url', 'origin']);
+  if (!origin.ok || canonicalUrl(origin.stdout) !== canonicalUrl(url)) return { pulled: false };
+  const pulled = await git(dir, ['pull', '-q', '--ff-only', '--no-rebase'], { timeoutMs: PUSH_TIMEOUT_MS });
+  return pulled.ok ? { pulled: true } : { error: `本地克隆 ${dir} 没能快进：${gitFailure(pulled)}` };
+}
+
+function canonicalUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '').replace(/\.git$/, '').toLowerCase();
+}
+
 /** The host's own git identity when it has one; a machine without any still commits. */
 async function identityArgs(dir: string): Promise<string[]> {
   const named = (await git(dir, ['config', 'user.name'])).ok && (await git(dir, ['config', 'user.email'])).ok;

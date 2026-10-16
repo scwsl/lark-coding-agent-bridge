@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
@@ -52,6 +53,7 @@ import {
   prepareCheckout,
   pullRequestDiff,
   pullRequestMergeInfo,
+  pullLocalClone,
   pullRequestState,
   pushDirect,
   pushDraft,
@@ -1384,6 +1386,14 @@ export class DreamService {
     }
     const done = this.saveTarget(id, { ...target, phase: 'published', commit: pushed.commit, error: undefined });
     log.info('dream', 'pushed-direct', { batch: id, repo: target.repo });
+    const url = this.repoTargets(await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined)).find(
+      (item) => item.repo === target.repo,
+    )?.url;
+    for (const raw of url ? resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).localClones : []) {
+      const dir = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
+      const pulled = await pullLocalClone(dir, url!);
+      if ('error' in pulled) log.warn('dream', 'local-clone-pull-failed', { batch: id, error: pulled.error });
+    }
     await this.deps.afterPublish?.(target.repo).catch((err: unknown) => log.fail('dream', err, { step: 'after-publish', repo: target.repo }));
     return done;
   }

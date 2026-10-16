@@ -272,7 +272,11 @@ const LEARNED = JSON.stringify({
 
 describe('课堂精练 每日模式 with 课前学习 and publish: push', { timeout: TIMEOUT }, () => {
   it('learns from the external library, fixes own skills, pushes to main with changelogs and tells the owner', async () => {
-    const h = await harness({ answer: () => LEARNED });
+    const clone = join(root, 'local-occam');
+    const unrelated = join(root, 'local-other');
+    const h = await harness({ answer: () => LEARNED, tuning: { localClones: [clone, unrelated, join(root, 'missing')] } });
+    expect((await git(root, ['clone', '-q', h.skillsRemote, clone])).ok).toBe(true);
+    expect((await git(root, ['clone', '-q', h.externalRemote, unrelated])).ok).toBe(true);
 
     const check = await h.service.checkAuto();
     // No conversations at all, five open PRs and a full 5-hour window: 每日模式 with push and the weekly window still starts.
@@ -309,6 +313,9 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(skillsLog).toContain('更新技能 `deploy`');
 
     expect(h.published).toEqual(['knowledge', 'skills:occam']);
+    // The local clone of the skill library is fast-forwarded; a clone of another repository is left alone.
+    expect(await readFile(join(clone, 'skills', 'status-panel', 'SKILL.md'), 'utf8')).toContain('argument-hint');
+    expect((await git(unrelated, ['log', '--oneline'])).stdout.trim().split('\n')).toHaveLength(1);
     expect(h.told).toHaveLength(1);
     expect(h.told[0]).toMatchObject({ chat: 'ou_owner' });
     expect(h.told[0]!.text).toContain('课前学习 cc：读了 2 个文件');

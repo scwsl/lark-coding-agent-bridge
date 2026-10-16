@@ -299,6 +299,13 @@ export interface DreamTuning {
    * skill the profile already has.
    */
   localSkillDirs?: string[];
+  /**
+   * Local clones of the target repositories that something else reads from
+   * (`~/.claude/skills/<name>` linked into a clone of the skill library…):
+   * after `publish: push` reaches a repository, a clone here whose `origin` is
+   * that repository is fast-forwarded (`git pull --ff-only`).
+   */
+  localClones?: string[];
   /** Chat (`oc_…`) or user (`ou_…`) told the outcome of every automatic run. Absent: automatic runs stay silent. */
   notifyChat?: string;
 }
@@ -342,6 +349,7 @@ export interface DreamSettings {
   external: DreamExternalLibraryConfig[];
   requireArgumentHint: boolean;
   localSkillDirs: string[];
+  localClones: string[];
   notifyChat?: string;
   auto: DreamAutoSettings;
 }
@@ -371,6 +379,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   external: [],
   requireArgumentHint: false,
   localSkillDirs: [],
+  localClones: [],
   auto: DREAM_AUTO_DEFAULTS,
 };
 
@@ -612,9 +621,8 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     publish: raw.publish === 'push' ? 'push' : 'pr',
     external: resolveExternalLibraries(raw.externalLibraries),
     requireArgumentHint: raw.requireArgumentHint === true,
-    localSkillDirs: Array.isArray(raw.localSkillDirs)
-      ? raw.localSkillDirs.filter((dir): dir is string => typeof dir === 'string' && /^(?:~\/|\/)/.test(dir.trim())).map((dir) => dir.trim())
-      : [],
+    localSkillDirs: absoluteDirs(raw.localSkillDirs),
+    localClones: absoluteDirs(raw.localClones),
     ...(notifyChat ? { notifyChat } : {}),
     auto: {
       window:
@@ -650,6 +658,13 @@ function dailyWindow(daily: { at: number }): DreamAutoSettings['window'] | undef
   const pad = (n: number) => String(n).padStart(2, '0');
   const clock = (minutes: number) => `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
   return parseDreamWindow(`${clock(daily.at)}-${clock((daily.at + DREAM_DAILY_WINDOW_MINUTES) % 1440)}`);
+}
+
+/** Absolute (or `~/`) directories only. */
+function absoluteDirs(raw: unknown): string[] {
+  return Array.isArray(raw)
+    ? raw.filter((dir): dir is string => typeof dir === 'string' && /^(?:~\/|\/)/.test(dir.trim())).map((dir) => dir.trim())
+    : [];
 }
 
 const EXTERNAL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
