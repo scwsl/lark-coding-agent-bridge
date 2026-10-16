@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BotOverloadGuard, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -146,5 +146,35 @@ describe('overloadCard', () => {
     expect(text).toContain('人类同事的消息照常回复');
     expect(text).not.toContain('<at');
     expect(card).toMatchObject({ schema: '2.0', header: { template: 'red' } });
+  });
+});
+
+describe('overload card mentions', () => {
+  it('@s every listed human at the top and counts the rest', () => {
+    const text = JSON.stringify(
+      overloadCard({ windows: [{ label: '本周', usedPercent: 90, limit: 80 }], cooldownMinutes: 10, mention: ['ou_a', 'ou_b'], more: 3 }),
+    );
+    expect(text).toContain('<at id=ou_a></at> <at id=ou_b></at> 等 5 人');
+    expect(text).toContain('只 @ 人，不 @ 任何 bot');
+  });
+
+  it('lists a group’s humans across pages, once an hour, and nobody when the read fails', async () => {
+    let now = 0;
+    const calls: Array<string | undefined> = [];
+    const humans = new ChatHumans(async (chatId, token) => {
+      calls.push(token);
+      if (chatId === 'oc_broken') throw new Error('no permission');
+      return token
+        ? { items: [{ id: 'ou_c', type: 'user' }, { id: 'cli_bot' }] }
+        : { items: [{ id: 'ou_a', type: 'user' }, { id: 'ou_b', type: 'user' }], next: 'p2' };
+    }, () => now);
+    expect(await humans.list('oc_g', ['ou_b'])).toEqual(['ou_a', 'ou_c']);
+    now += 30 * 60_000;
+    expect(await humans.list('oc_g')).toEqual(['ou_a', 'ou_b', 'ou_c']);
+    expect(calls).toEqual([undefined, 'p2']);
+    now += 31 * 60_000;
+    await humans.list('oc_g');
+    expect(calls).toHaveLength(4);
+    expect(await humans.list('oc_broken')).toEqual([]);
   });
 });
