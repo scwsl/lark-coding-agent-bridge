@@ -858,15 +858,13 @@ export interface OverloadCardWindow {
  * 过载保护's answer to another bot's question while the quota is tight —
  * a sibling of the watchdog's 「低血糖晕厥」 card: same one-glance header,
  * then the gauge, when it gets better, and that humans are still served.
- * Mentions the group's humans only: an @ to a bot would wake it and start a loop.
+ * Mentions the asking bots' owners only (bot ↔ owner table): an @ to a bot would wake it and start a loop.
  */
 export function overloadCard(input: {
   windows: readonly OverloadCardWindow[];
   cooldownMinutes: number;
-  /** People (`ou_…`) to @ at the top — the group's humans, never a bot. */
-  mention?: readonly string[];
-  /** Humans left out of {@link mention} because there were too many. */
-  more?: number;
+  /** Owners (`ou_…`) of the bots that asked, @-ed at the top — never a bot. */
+  owners?: readonly string[];
 }): object {
   const pad = (n: number) => String(n).padStart(2, '0');
   const time = (at: number) => {
@@ -894,14 +892,10 @@ export function overloadCard(input: {
       padding: '16px 16px 20px 16px',
       vertical_spacing: '10px',
       elements: [
-        ...(input.mention && input.mention.length > 0
-          ? [
-              {
-                tag: 'markdown',
-                content: `${input.mention.map((id) => `<at id=${id}></at>`).join(' ')}${input.more ? ` 等 ${input.mention.length + input.more} 人` : ''}`,
-              },
-            ]
-          : []),
+        {
+          tag: 'markdown',
+          content: `${(input.owners ?? []).map((id) => `<at id=${id}></at> `).join('')}等 ALL`,
+        },
         {
           tag: 'column_set',
           columns: [
@@ -940,7 +934,7 @@ export function overloadCard(input: {
         },
         {
           tag: 'markdown',
-          content: `<font color='grey'>额度留给人类同事 · 同一个群 ${input.cooldownMinutes} 分钟内只发一张 · 只 @ 人，不 @ 任何 bot</font>`,
+          content: `<font color='grey'>额度留给人类同事 · 同一个群 ${input.cooldownMinutes} 分钟内只发一张 · 只 @ bot 的主人，不 @ 任何 bot</font>`,
           text_size: 'notation',
         },
       ],

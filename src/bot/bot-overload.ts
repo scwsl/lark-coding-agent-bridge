@@ -48,6 +48,16 @@ export function isBotOnlyBatch<T>(batch: readonly T[], senderType: (msg: T) => '
   return batch.length > 0 && batch.every((msg) => senderType(msg) === 'bot');
 }
 
+/** The owners (open_ids, in order, no repeats) of the bots behind these sender ids, from the bot ↔ owner table. */
+export function botOwnersOf(settings: BotOverloadSettings, senderIds: readonly string[]): string[] {
+  const owners: string[] = [];
+  for (const id of senderIds) {
+    const owner = settings.botOwners.find((entry) => entry.ids.includes(id))?.owner;
+    if (owner && !owners.includes(owner)) owners.push(owner);
+  }
+  return owners;
+}
+
 /** 白名单: a whitelisted chat, or a batch with a message from a whitelisted bot, is always answered. */
 export function isOverloadExempt(settings: BotOverloadSettings, chatId: string, senderIds: readonly string[]): boolean {
   if (settings.exceptChats.includes(chatId)) return true;
@@ -118,60 +128,3 @@ export class BotOverloadGuard {
 }
 
 export type { QuotaWindow };
-
-const MEMBERS_TTL_MS = 60 * 60_000;
-/** More than this and the card names the first ones only — a wall of mentions helps nobody. */
-export const MAX_OVERLOAD_MENTIONS = 10;
-
-/**
- * Up to `max` of `people`, picked at random each time — a big group should not
- * hear about every overload from the same few. Order of the pick is random too.
- */
-export function pickMentions(people: readonly string[], max: number, random: () => number = Math.random): string[] {
-  const pool = [...people];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
-  }
-  return pool.slice(0, Math.max(0, max));
-}
-
-/**
- * The people of a group, for the overload card's mentions. The member list
- * API only returns users — bots are never in it — so no bot is woken up.
- * Cached per chat for an hour; a failed read yields nobody.
- */
-export class ChatHumans {
-  private readonly cache = new Map<string, { at: number; ids: string[] }>();
-
-  constructor(
-    private readonly fetchPage: (
-      chatId: string,
-      pageToken?: string,
-    ) => Promise<{ items: Array<{ id?: string; type?: string }>; next?: string }>,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  async list(chatId: string, exclude: readonly string[] = []): Promise<string[]> {
-    const hit = this.cache.get(chatId);
-    let ids = hit && this.now() - hit.at < MEMBERS_TTL_MS ? hit.ids : undefined;
-    if (!ids) {
-      ids = [];
-      try {
-        let token: string | undefined;
-        let pages = 0;
-        do {
-          const page = await this.fetchPage(chatId, token);
-          for (const item of page.items) {
-            if (item.id?.startsWith('ou_') && (item.type === undefined || item.type === 'user') && !ids.includes(item.id)) ids.push(item.id);
-          }
-          token = page.next;
-        } while (token && ++pages < 10);
-        this.cache.set(chatId, { at: this.now(), ids });
-      } catch {
-        return [];
-      }
-    }
-    return ids.filter((id) => !exclude.includes(id));
-  }
-}

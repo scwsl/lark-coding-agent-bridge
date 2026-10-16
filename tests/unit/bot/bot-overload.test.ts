@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, pickMentions, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -29,6 +29,7 @@ describe('resolveBotOverload', () => {
       cooldownMinutes: 10,
       exceptChats: [],
       exceptBots: [],
+      botOwners: [],
     });
   });
 });
@@ -149,47 +150,37 @@ describe('overloadCard', () => {
   });
 });
 
-describe('overload card mentions', () => {
-  it('@s at most 10 people, picked at random each time', () => {
-    expect(MAX_OVERLOAD_MENTIONS).toBe(10);
-    const people = Array.from({ length: 25 }, (_, i) => `ou_${i}`);
-    let seed = 1;
-    const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
-    const first = pickMentions(people, 10, random);
-    const second = pickMentions(people, 10, random);
-    expect(first).toHaveLength(10);
-    expect(new Set(first).size).toBe(10);
-    expect(first.every((id) => people.includes(id))).toBe(true);
-    expect(second).not.toEqual(first);
-    expect(pickMentions(['ou_a', 'ou_b'], 10)).toHaveLength(2);
-    expect(pickMentions([], 10)).toEqual([]);
+describe('bot ↔ owner table', () => {
+  const table = resolveBotOverload({
+    preferences: {
+      botOverload: {
+        chats: ['*'],
+        botOwners: [
+          { name: 'CC', ids: ['cli_cc', 'ou_cc'], owner: 'ou_lishuang', ownerName: '李爽' },
+          { name: 'Poki', ids: ['ou_poki'], owner: 'ou_lishuang' },
+          { name: 'SAMAI', ids: ['ou_samai'], owner: 'ou_yangshan' },
+          { name: 'bad', ids: ['nope'], owner: 'ou_x' },
+          { name: 'no owner', ids: ['ou_y'], owner: 'x' },
+        ],
+      },
+    },
+  })!;
+
+  it('keeps well-formed entries only', () => {
+    expect(table.botOwners.map((entry) => entry.name)).toEqual(['CC', 'Poki', 'SAMAI']);
   });
 
-  it('@s every listed human at the top and counts the rest', () => {
+  it('finds the owners of the asking bots by any of their ids, once each', () => {
+    expect(botOwnersOf(table, ['cli_cc', 'ou_poki', 'ou_samai', 'ou_cc'])).toEqual(['ou_lishuang', 'ou_yangshan']);
+    expect(botOwnersOf(table, ['ou_unknown'])).toEqual([]);
+  });
+
+  it('@s the owners, then 等 ALL, and never a bot', () => {
     const text = JSON.stringify(
-      overloadCard({ windows: [{ label: '本周', usedPercent: 90, limit: 80 }], cooldownMinutes: 10, mention: ['ou_a', 'ou_b'], more: 3 }),
+      overloadCard({ windows: [{ label: '本周', usedPercent: 90, limit: 80 }], cooldownMinutes: 10, owners: ['ou_lishuang', 'ou_yangshan'] }),
     );
-    expect(text).toContain('<at id=ou_a></at> <at id=ou_b></at> 等 5 人');
-    expect(text).toContain('只 @ 人，不 @ 任何 bot');
-  });
-
-  it('lists a group’s humans across pages, once an hour, and nobody when the read fails', async () => {
-    let now = 0;
-    const calls: Array<string | undefined> = [];
-    const humans = new ChatHumans(async (chatId, token) => {
-      calls.push(token);
-      if (chatId === 'oc_broken') throw new Error('no permission');
-      return token
-        ? { items: [{ id: 'ou_c', type: 'user' }, { id: 'cli_bot' }] }
-        : { items: [{ id: 'ou_a', type: 'user' }, { id: 'ou_b', type: 'user' }], next: 'p2' };
-    }, () => now);
-    expect(await humans.list('oc_g', ['ou_b'])).toEqual(['ou_a', 'ou_c']);
-    now += 30 * 60_000;
-    expect(await humans.list('oc_g')).toEqual(['ou_a', 'ou_b', 'ou_c']);
-    expect(calls).toEqual([undefined, 'p2']);
-    now += 31 * 60_000;
-    await humans.list('oc_g');
-    expect(calls).toHaveLength(4);
-    expect(await humans.list('oc_broken')).toEqual([]);
+    expect(text).toContain('<at id=ou_lishuang></at> <at id=ou_yangshan></at> 等 ALL');
+    expect(text).toContain('只 @ bot 的主人，不 @ 任何 bot');
+    expect(JSON.stringify(overloadCard({ windows: [], cooldownMinutes: 10 }))).toContain('"content":"等 ALL"');
   });
 });

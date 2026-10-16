@@ -252,6 +252,18 @@ export interface BotOverloadConfig {
   exceptChats?: string[];
   /** 白名单: bots (open_id `ou_…` or app id `cli_…`) whose messages are always answered. */
   exceptBots?: string[];
+  /** Bot ↔ owner table: the overload card @s the owner of the bot that asked. */
+  botOwners?: BotOwnerEntry[];
+}
+
+export interface BotOwnerEntry {
+  /** Display name, for people reading the config. */
+  name?: string;
+  /** Every id the bot is known by: open_id `ou_…`, app id `cli_…`. */
+  ids: string[];
+  /** The owner's open_id. */
+  owner: string;
+  ownerName?: string;
 }
 
 export interface BotOverloadSettings {
@@ -264,6 +276,7 @@ export interface BotOverloadSettings {
   cooldownMinutes: number;
   exceptChats: string[];
   exceptBots: string[];
+  botOwners: BotOwnerEntry[];
 }
 
 /** 过载保护 settings, or `undefined` when no chat is listed. Out-of-range values fall back to the defaults. */
@@ -287,6 +300,19 @@ export function resolveBotOverload(cfg: Pick<AppConfig, 'preferences'>): BotOver
     cooldownMinutes: pick(raw?.cooldownMinutes, 0, 24 * 60, 10),
     exceptChats: ids(raw?.exceptChats, /^oc_[\w-]+$/),
     exceptBots: ids(raw?.exceptBots, /^(?:ou|cli)_[\w-]+$/),
+    botOwners: (Array.isArray(raw?.botOwners) ? raw.botOwners : []).flatMap((entry): BotOwnerEntry[] => {
+      if (!entry || typeof entry !== 'object' || typeof entry.owner !== 'string' || !/^ou_[\w-]+$/.test(entry.owner.trim())) return [];
+      const botIds = ids(entry.ids, /^(?:ou|cli)_[\w-]+$/);
+      if (botIds.length === 0) return [];
+      return [
+        {
+          ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+          ids: botIds,
+          owner: entry.owner.trim(),
+          ...(typeof entry.ownerName === 'string' ? { ownerName: entry.ownerName } : {}),
+        },
+      ];
+    }),
   };
 }
 

@@ -62,7 +62,7 @@ import {
 import { resolveAppSecret } from '../config/secret-resolver';
 import { tmpdir } from 'node:os';
 import { overloadCard } from '../card/templates';
-import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, pickMentions } from './bot-overload';
+import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
 import { log, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -521,20 +521,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     scratchDir: join(deps.appPaths?.profileDir ?? tmpdir(), 'quota-scratch'),
     ...(deps.appPaths?.profileDir ? { profileDir: deps.appPaths.profileDir } : {}),
   });
-  // The overload card @s a group's humans; the member list API never returns bots.
-  const chatHumans = new ChatHumans(async (chatId, pageToken) => {
-    const res = await channel.rawClient.im.v1.chatMembers.get({
-      path: { chat_id: chatId },
-      params: { member_id_type: 'open_id', page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
-    });
-    return {
-      items: (res?.data?.items ?? []).map((item) => ({
-        ...(item.member_id ? { id: item.member_id } : {}),
-        ...(item.member_id_type ? { type: item.member_id_type === 'open_id' ? 'user' : item.member_id_type } : {}),
-      })),
-      ...(res?.data?.has_more && res.data.page_token ? { next: res.data.page_token } : {}),
-    };
-  });
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
@@ -582,7 +568,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           runs,
           autoResumer,
           botOverload,
-          chatHumans,
           ...(knowledge ? { knowledge } : {}),
         });
       } catch (err) {
@@ -1346,7 +1331,6 @@ interface RunBatchDeps {
   runs?: RunRegistry;
   knowledge?: KnowledgeStore;
   botOverload?: BotOverloadGuard;
-  chatHumans?: ChatHumans;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -1397,10 +1381,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         windows: decision.windows.map((w) => `${w.kind}:${w.usedPercent}%`).join(','),
       });
       if (decision.card) {
-        const humans = (await deps.chatHumans?.list(chatId)) ?? [];
         const card = overloadCard({
-          mention: pickMentions(humans, MAX_OVERLOAD_MENTIONS),
-          more: Math.max(0, humans.length - MAX_OVERLOAD_MENTIONS),
+          owners: botOwnersOf(overload, batch.flatMap(senderIdsOf)),
           windows: decision.windows.map((w) => ({
             ...w,
             ...(w.resetAt !== undefined
