@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { BotOverloadGuard, ChatHumans, isBotOnlyBatch, isOverloadExempt, MAX_OVERLOAD_MENTIONS, planBotOverload } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -150,6 +150,10 @@ describe('overloadCard', () => {
 });
 
 describe('overload card mentions', () => {
+  it('@s at most 10 people', () => {
+    expect(MAX_OVERLOAD_MENTIONS).toBe(10);
+  });
+
   it('@s every listed human at the top and counts the rest', () => {
     const text = JSON.stringify(
       overloadCard({ windows: [{ label: '本周', usedPercent: 90, limit: 80 }], cooldownMinutes: 10, mention: ['ou_a', 'ou_b'], more: 3 }),

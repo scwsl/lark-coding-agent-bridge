@@ -121,7 +121,7 @@ export type { QuotaWindow };
 
 const MEMBERS_TTL_MS = 60 * 60_000;
 /** More than this and the card names the first ones only — a wall of mentions helps nobody. */
-export const MAX_OVERLOAD_MENTIONS = 50;
+export const MAX_OVERLOAD_MENTIONS = 10;
 
 /**
  * The people of a group, for the overload card's mentions. The member list
