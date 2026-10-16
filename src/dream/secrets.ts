@@ -1,5 +1,5 @@
 /**
- * Credential shapes 梦境整理 refuses to put into a draft, and masks out of the
+ * Credential shapes 课堂精练 refuses to put into a draft, and masks out of the
  * transcript excerpts it hands the agent. Deliberately broad: a false positive
  * costs one dropped proposal, a miss puts a secret into a Git history.
  */

@@ -390,7 +390,7 @@ export class RunExecutor {
 
   /**
    * Close `scopeId`'s process now if it is only being kept idle for a next
-   * turn — for one-shot internal runs (梦境整理) that will never have one.
+   * turn — for one-shot internal runs (课堂精练) that will never have one.
    */
   async closeIdleScope(scopeId: string): Promise<void> {
     const live = this.live.get(scopeId);

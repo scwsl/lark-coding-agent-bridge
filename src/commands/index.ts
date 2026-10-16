@@ -226,7 +226,7 @@ export interface Controls {
   pendingRotations?: Pick<PendingRotationStore, 'get'>;
   /** Code blocks behind finished cards' 「复制代码」 buttons (see /copycode). */
   codeSnippets?: Pick<CodeSnippetStore, 'get' | 'put'>;
-  /** 梦境整理 backing `/dream` and the console's dream panel. Late-bound by startChannel. */
+  /** 课堂精练 backing `/dream` and the console's dream panel. Late-bound by startChannel. */
   dream?: DreamService;
 }
 
@@ -1781,18 +1781,18 @@ const AUDIT_EVENT_LABELS: Record<string, string> = {
 };
 
 /**
- * `/dream` — 梦境整理. Admin-only and DM-only: a run reads every chat's
+ * `/dream` — 课堂精练. Admin-only and DM-only: a run reads every chat's
  * conversations, and its drafts and diffs can carry any of them. The chat only
  * ever sees counts and PR links; `diff` is the one view of draft content.
  */
 async function handleDream(args: string, ctx: CommandContext): Promise<void> {
   if (ctx.chatMode !== 'p2p') {
-    await reply(ctx, '梦境整理涉及所有会话的内容，请私聊 bot 发送 `/dream`。');
+    await reply(ctx, '课堂精练涉及所有会话的内容，请私聊 bot 发送 `/dream`。');
     return;
   }
   const dream = ctx.controls.dream;
   if (!dream) {
-    await reply(ctx, '当前 bridge 没有启用梦境整理（缺少 profile 数据目录或知识库）。');
+    await reply(ctx, '当前 bridge 没有启用课堂精练（缺少 profile 数据目录或知识库）。');
     return;
   }
   const [sub = '', ...rest] = args.trim().split(/\s+/);
@@ -1810,7 +1810,7 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
         ctx,
         'error' in started
           ? `❌ ${started.error}`
-          : `🌙 已开始整理，批次 \`${started.run.id}\`。读取已结束的会话、生成草稿并开 Draft PR，完成后在这里回复结果；\`/dream cancel\` 可以取消。`,
+          : `📚 已开始整理，批次 \`${started.run.id}\`。读取已结束的会话、生成草稿并开 Draft PR，完成后在这里回复结果；\`/dream cancel\` 可以取消。`,
       );
       return;
     }
@@ -1839,14 +1839,14 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
       const body = result.parts
         .map((part) => `**${part.label}**\n${fence}diff\n${clipDiff(part.diff, 6000).replaceAll(fence, "'''")}\n${fence}`)
         .join('\n\n');
-      await reply(ctx, `**🌙 批次 \`${result.id}\` 的差异**\n\n${body}`);
+      await reply(ctx, `**📚 批次 \`${result.id}\` 的差异**\n\n${body}`);
       return;
     }
     default:
       await reply(
         ctx,
         [
-          '**🌙 梦境整理**',
+          '**📚 课堂精练**',
           '',
           '`/dream` — 状态：开关、目标仓库、上次结果、待审核 PR 数',
           '`/dream run` — 立即整理：读取已结束的会话，生成记忆 / 笔记 / skill 草稿并开 Draft PR',
@@ -1855,7 +1855,7 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
           '`/dream diff [批次]` — 查看某个批次的差异（默认最近一次）',
           '`/dream revert <批次>` — 撤销一个已合并的批次（开一个撤销用的 Draft PR）',
           '',
-          '整理结果只以 Draft PR 的形式出现，审核合并后才生效；「梦境整理」「自动整理」两个开关在 `/config` 里。',
+          '整理结果只以 Draft PR 的形式出现，审核合并后才生效；「课堂精练」「自动整理」两个开关在 `/config` 里。',
           '自动整理不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且没有别的任务时才跑，用户消息一来就让路。',
         ].join('\n'),
       );
@@ -3649,7 +3649,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     rawSmartSession === 'on' ? true : rawSmartSession === 'off' ? false : getSmartSession(ctx.controls.cfg) !== undefined;
   const rawCleanup = String(fv.auto_worktree_cleanup ?? '').trim();
   const autoWorktreeCleanup = rawCleanup === 'on' ? true : rawCleanup === 'off' ? false : getWorktreeCleanupIdleDays(ctx.controls.cfg) !== undefined;
-  // 梦境整理 switch. Empty / unexpected keeps current.
+  // 课堂精练 switch. Empty / unexpected keeps current.
   const rawDream = String(fv.dream ?? '').trim();
   const dream = rawDream === 'on' ? true : rawDream === 'off' ? false : getDream(ctx.controls.cfg) !== undefined;
   const rawDreamAuto = String(fv.dream_auto ?? '').trim();

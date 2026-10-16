@@ -131,7 +131,7 @@ export class SessionCatalog {
   /**
    * Hear about every conversation {@link upsertActive} records. The catalog
    * keeps only the latest conversation per identity, so a consumer that needs
-   * the ones replaced since (梦境整理) has to note them as they come.
+   * the ones replaced since (课堂精练) has to note them as they come.
    */
   onUpsert(listener: (entry: SessionCatalogEntry) => void): () => void {
     this.listeners.add(listener);

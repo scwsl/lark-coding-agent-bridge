@@ -6,7 +6,7 @@ import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
 
 /**
- * 梦境整理 across profiles: CC and Poki can share one knowledge repo and one
+ * 课堂精练 across profiles: CC and Poki can share one knowledge repo and one
  * skill library. A run holds a host-wide lock per target repository —
  * identified by its normalised remote, not by any local path — so two bots
  * never read, draft and publish against the same repository at once. A dead

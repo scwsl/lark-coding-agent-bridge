@@ -4,7 +4,7 @@ import type { DreamSettings } from '../config/schema';
 import type { DreamSessionRecord } from './state';
 
 /**
- * Which conversations a 梦境整理 run reads, and how much of each.
+ * Which conversations a 课堂精练 run reads, and how much of each.
  *
  * Input is only what the bridge itself recorded — conversations it ran (the
  * session catalog, mirrored into {@link DreamSessionRecord}) — read through

@@ -70,7 +70,7 @@ import { measureNewInput, selectDreamInputs, type DreamScopeInput } from './sele
 import { DreamStateStore, sessionKey, type DreamRun, type DreamSessionRecord, type DreamTarget } from './state';
 
 /**
- * 梦境整理: the bridge reads the conversations it ran since last time, has the
+ * 课堂精练: the bridge reads the conversations it ran since last time, has the
  * agent draft memory / note / skill proposals per scope in a read-only run,
  * validates them, and opens Draft PRs against the knowledge repo (its
  * `origin`) and the profile's own skill library (from `skills.libraries`).
@@ -265,7 +265,7 @@ export class DreamService {
    * automatic runs pass none.
    */
   async start(actor: DreamActor, onFinish?: (run: DreamRun) => void, options: DreamStartOptions = {}): Promise<DreamStartResult> {
-    if (!this.enabled()) return { error: '梦境整理没有打开（/config 里打开「梦境整理」）。', code: 'off' };
+    if (!this.enabled()) return { error: '课堂精练没有打开（/config 里打开「课堂精练」）。', code: 'off' };
     const trigger = options.trigger ?? 'manual';
     if (trigger === 'auto' && !this.autoEnabled()) return { error: '自动整理没有打开。', code: 'off' };
     const already = this.busy();
@@ -444,7 +444,7 @@ export class DreamService {
     const now = this.now();
     const settings = getDreamAuto(this.deps.appConfig());
     if (!settings) {
-      return this.noteCheck({ at: now, block: 'off', reason: this.enabled() ? '自动整理没有打开' : '梦境整理没有打开' });
+      return this.noteCheck({ at: now, block: 'off', reason: this.enabled() ? '自动整理没有打开' : '课堂精练没有打开' });
     }
     const auto = settings.auto;
     if (this.current || this.starting) return this.noteCheck({ at: now, block: 'running', reason: '已经有一轮整理在进行' });
@@ -472,7 +472,7 @@ export class DreamService {
       return this.noteCheck({
         at: now,
         block: 'backlog',
-        reason: `待审积压：还有 ${openPrs} 个梦境 Draft PR 没合并或关闭（上限 ${auto.maxOpenPrs}），暂停自动整理`,
+        reason: `待审积压：还有 ${openPrs} 个课堂精练 Draft PR 没合并或关闭（上限 ${auto.maxOpenPrs}），暂停自动整理`,
         material: gate.material,
         openPrs,
       });
@@ -574,7 +574,7 @@ export class DreamService {
 
   /** Still allowed to take effect: the switch — and for an automatic run, 自动整理 — is on. */
   private switchedOff(run: DreamRun): string | undefined {
-    if (!this.enabled()) return '梦境整理已关闭';
+    if (!this.enabled()) return '课堂精练已关闭';
     if (run.trigger === 'auto' && !this.autoEnabled()) return '自动整理已关闭';
     return undefined;
   }
@@ -597,7 +597,7 @@ export class DreamService {
     const signal = current.abort.signal;
     const stopped = (rest: string) => this.finish(run.id, 'cancelled', `${current.stopped ?? '已取消'}，${rest}`);
     const configured = getDream(this.deps.appConfig());
-    if (!configured) return this.finish(run.id, 'cancelled', '梦境整理已关闭');
+    if (!configured) return this.finish(run.id, 'cancelled', '课堂精练已关闭');
     const settings = scaleBudget(configured, budget);
     this.state.updateRun(run.id, { status: 'running' });
     await mkdir(this.deps.workDir, { recursive: true, mode: 0o700 });
@@ -1079,7 +1079,7 @@ export class DreamService {
       const pr = await openDraftPullRequest(dir, {
         branch: current.branch,
         base: current.base ?? 'main',
-        title: current.title ?? `梦境整理 ${id}`,
+        title: current.title ?? `课堂精练 ${id}`,
         body: current.body ?? '',
       });
       if ('error' in pr) return this.saveTarget(id, { ...current, error: pr.error });
@@ -1134,7 +1134,7 @@ export class DreamService {
       branch,
     );
     if ('error' in prepared) return { note: prepared.error };
-    const title = `撤销梦境整理 ${id}（${label}）`;
+    const title = `撤销课堂精练 ${id}（${label}）`;
     const reverted = await revertDraft(dir, info.mergeCommit, title, this.hooksDir());
     if ('error' in reverted) return { note: reverted.error };
     const access = await checkPullRequestAccess(dir);
@@ -1146,9 +1146,9 @@ export class DreamService {
       base: prepared.base,
       title,
       body: [
-        `撤销梦境整理批次 \`${id}\` 合并进 ${label} 的内容（原 PR：${target.prUrl}）。`,
+        `撤销课堂精练批次 \`${id}\` 合并进 ${label} 的内容（原 PR：${target.prUrl}）。`,
         '',
-        `由 profile \`${this.deps.profile}\` 的 \`/dream revert\` 生成。和其他梦境 PR 一样，合并这个 PR 才生效。`,
+        `由 profile \`${this.deps.profile}\` 的 \`/dream revert\` 生成。和其他课堂精练 PR 一样，合并这个 PR 才生效。`,
       ].join('\n'),
     });
     if ('error' in pr) return { note: pr.error };
@@ -1241,7 +1241,7 @@ function scaleBudget(settings: DreamSettings, budget: number): DreamSettings {
 }
 
 /**
- * The status of a profile's 梦境整理 from its state file and config. The
+ * The status of a profile's 课堂精练 from its state file and config. The
  * service passes its own running batch; a viewer in another process (the web
  * console looking at a daemon-run profile) takes the stored one.
  */

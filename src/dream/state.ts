@@ -5,7 +5,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import type { DreamAutoCheck, DreamAutoLedger } from './schedule';
 
 /**
- * Local bookkeeping of 梦境整理 — never knowledge itself. What was proposed
+ * Local bookkeeping of 课堂精练 — never knowledge itself. What was proposed
  * lives in the target repositories' Draft PRs; this file only remembers which
  * conversations were already read, which runs happened and where their PRs
  * are, so a run is incremental and a half-finished publish can be resumed.

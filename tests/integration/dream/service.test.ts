@@ -501,7 +501,7 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect(await showFile(h.knowledgeRemote, branch, 'chats/oc_team.md')).not.toContain('一条事实');
     expect(await showFile(h.knowledgeRemote, 'main', 'chats/oc_team.md')).toContain('一条事实');
     const message = await git(h.knowledgeRemote, ['log', '-1', '--format=%B', branch]);
-    expect(message.stdout).toContain(`撤销梦境整理 ${run.id}`);
+    expect(message.stdout).toContain(`撤销课堂精练 ${run.id}`);
     expect(message.stdout).not.toMatch(/Co-Authored-By|Generated with/i);
     expect(await h.service.revert(run.id)).toMatchObject({ results: [{ note: expect.stringContaining('已经开过') }] });
     expect(await h.service.revert('nope')).toMatchObject({ error: expect.stringContaining('没有批次') });

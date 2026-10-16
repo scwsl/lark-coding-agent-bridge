@@ -34,21 +34,21 @@ export function sessionLegend(input: DreamSessionInput): SessionLegend {
 
 const INTRO = (batchId: string, profile: string) =>
   [
-    `梦境整理批次 \`${batchId}\` · profile \`${profile}\``,
+    `课堂精练批次 \`${batchId}\` · profile \`${profile}\``,
     '',
-    '由 lark-channel-bridge 的梦境整理根据已结束的会话生成，是待审核的草稿：合并后才经现有同步生效。不需要的条目直接在这个 PR 里删改；整批不要就关闭 PR，同样的候选不会再提。撤销已合并的内容用 revert。',
+    '由 lark-channel-bridge 的课堂精练根据已结束的会话生成，是待审核的草稿：合并后才经现有同步生效。不需要的条目直接在这个 PR 里删改；整批不要就关闭 PR，同样的候选不会再提。撤销已合并的内容用 revert。',
   ].join('\n');
 
 export function knowledgePrTitle(batchId: string, count: number): string {
-  return `梦境整理 ${batchId}：记忆与笔记提案（${count} 条）`;
+  return `课堂精练 ${batchId}：记忆与笔记提案（${count} 条）`;
 }
 
 export function skillsPrTitle(batchId: string, count: number): string {
-  return `梦境整理 ${batchId}：skill 提案（${count} 个）`;
+  return `课堂精练 ${batchId}：skill 提案（${count} 个）`;
 }
 
 export function commitMessage(batchId: string, summary: string): string {
-  return `dream: 梦境整理 ${batchId}\n\n${summary}\n`;
+  return `dream: 课堂精练 ${batchId}\n\n${summary}\n`;
 }
 
 export function knowledgePrBody(input: {

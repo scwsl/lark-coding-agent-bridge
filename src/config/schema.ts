@@ -212,7 +212,7 @@ export interface AppPreferences {
   /** Thresholds behind {@link smartSession}; config-file only. See {@link getSmartSession}. */
   smartSessionTuning?: SmartSessionTuning;
   /**
-   * 梦境整理. When on, an admin's `/dream run` turns ended conversations into
+   * 课堂精练. When on, an admin's `/dream run` turns ended conversations into
    * reviewable Draft PRs against the knowledge repo and the profile's own skill
    * library. Never merges. Independent of {@link smartSession}. Default off.
    */
@@ -507,7 +507,7 @@ export function getSmartSession(cfg: AppConfig): SmartSessionSettings | undefine
 }
 
 /**
- * Resolved 梦境整理 limits, or `undefined` when the switch is off.
+ * Resolved 课堂精练 limits, or `undefined` when the switch is off.
  * Out-of-range values fall back to the defaults.
  */
 export function getDream(cfg: AppConfig): DreamSettings | undefined {

@@ -260,7 +260,7 @@ async function route(
     return;
   }
 
-  // --- 梦境整理 (/dream) ---
+  // --- 课堂精练 (/dream) ---
   if (path === '/api/dream' && g) {
     sendJson(res, 200, await dreamView(await resolveTargetState(deps, url)));
     return;

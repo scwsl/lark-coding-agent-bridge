@@ -142,7 +142,7 @@ describe('ui server (supervisor-backed)', () => {
     expect((await json(await post(url, handle.token, { smartSession: false }))).smartSession).toBe(false);
     expect((await loadRootConfig(configPath))!.profiles[profile]!.preferences?.smartSession).toBe(false);
   });
-  it('shows 梦境整理 status and runs it only for a profile this process hosts', async () => {
+  it('shows 课堂精练 status and runs it only for a profile this process hosts', async () => {
     // offline profile: read from its state file, nothing written back, no actions
     await writeFile(
       join(rootDir, 'profiles', 'work', 'dream-state.json'),

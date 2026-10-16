@@ -7,7 +7,7 @@ import { ApiError } from './api';
 import type { ProfileTarget } from './knowledge';
 
 /**
- * The console's 梦境整理 panel: the same status `/dream` shows — 自动整理's
+ * The console's 课堂精练 panel: the same status `/dream` shows — 自动整理's
  * last check included — plus run / cancel / revert for a profile this process
  * hosts. A profile run by its own daemon is shown from its state file, read
  * without writing anything back; actions for it go through Feishu (`/dream`

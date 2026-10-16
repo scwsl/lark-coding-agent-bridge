@@ -88,7 +88,7 @@ describe('dream publishing', { timeout: TIMEOUT }, () => {
     expect(draft.duplicates.map((d) => d.text)).toEqual(['回复用中文']);
     expect(await readFile(join(dir, 'MEMORY.md'), 'utf8')).toMatch(/- \[abc123\] 回复用中文\n- \[[0-9a-f]{6}\] 部署前先跑 ci\n$/);
 
-    const committed = await commitDraft(dir, draft.files, 'dream: 梦境整理 b1\n', join(root, 'hooks'));
+    const committed = await commitDraft(dir, draft.files, 'dream: 课堂精练 b1\n', join(root, 'hooks'));
     expect(committed).toHaveProperty('commit');
     expect(await checkPullRequestAccess(dir)).toEqual({ ok: true });
     expect(await pushDraft(dir, 'dream/b1', join(root, 'hooks'))).toEqual({ ok: true });

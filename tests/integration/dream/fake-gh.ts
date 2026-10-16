@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 
 /**
- * A stand-in `gh` on PATH for 梦境整理's publishing: answers the handful of
+ * A stand-in `gh` on PATH for 课堂精练's publishing: answers the handful of
  * calls it makes and logs each one. `permission` is what `repo view` reports;
  * `FAKE_GH_PR_VIEW` (JSON) replaces what `pr view` reports, `FAKE_GH_PR_URL`
  * the URL `pr create` prints.

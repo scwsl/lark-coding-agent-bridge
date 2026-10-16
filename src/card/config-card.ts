@@ -26,7 +26,7 @@ export interface ConfigFormOpts {
   /** 会话智能压缩 on/off. Optional so callers predating the switch render it as off. */
   smartSession?: boolean;
   autoWorktreeCleanup?: boolean;
-  /** 梦境整理 on/off. Optional so callers predating the switch render it as off. */
+  /** 课堂精练 on/off. Optional so callers predating the switch render it as off. */
   dream?: boolean;
   /** 自动整理 on/off (only acts with {@link dream} on). */
   dreamAuto?: boolean;
@@ -440,7 +440,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               {
                 tag: 'markdown',
                 content:
-                  '**梦境整理**\n<font color="grey">开=管理员可用 /dream run 把已结束的会话整理成记忆 / 笔记 / skill 草稿，以 Draft PR 提交到知识库和自有 skill 库，审核合并后才生效；不推送日报</font>',
+                  '**课堂精练**\n<font color="grey">开=管理员可用 /dream run 把已结束的会话整理成记忆 / 笔记 / skill 草稿，以 Draft PR 提交到知识库和自有 skill 库，审核合并后才生效；不推送日报</font>',
               },
               {
                 tag: 'select_static',
@@ -454,7 +454,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               {
                 tag: 'markdown',
                 content:
-                  '**自动整理**\n<font color="grey">需先开梦境整理。不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且 bot 空闲时才自己整理一轮，有用户消息就让路；条件在配置文件 dreamTuning 里调</font>',
+                  '**自动整理**\n<font color="grey">需先开课堂精练。不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且 bot 空闲时才自己整理一轮，有用户消息就让路；条件在配置文件 dreamTuning 里调</font>',
               },
               {
                 tag: 'select_static',
@@ -588,8 +588,8 @@ export function configSavedCard(opts: ConfigFormOpts): object {
           ['非管理员审批', opts.approvalsEnabled ? '开' : '关'],
           ['会话智能压缩', opts.smartSession ? '开' : '关'],
           ['Worktree 自动清理', opts.autoWorktreeCleanup ? '开' : '关'],
-          ['梦境整理', opts.dream ? '开' : '关'],
-          ['自动整理', opts.dreamAuto ? (opts.dream ? '开' : '开（梦境整理关着，不生效）') : '关'],
+          ['课堂精练', opts.dream ? '开' : '关'],
+          ['自动整理', opts.dreamAuto ? (opts.dream ? '开' : '开（课堂精练关着，不生效）') : '关'],
           [
             'lark-cli 身份策略',
             opts.mode === 'team'

@@ -777,7 +777,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   autoResumer.start();
   controls.autoResumer = autoResumer;
 
-  // 梦境整理: runs when an admin asks (`/dream run`, Web console) or, with
+  // 课堂精练: runs when an admin asks (`/dream run`, Web console) or, with
   // 自动整理 on, when its gates pass — never while the profile has anything
   // else to do. Notes the conversations the catalog records while the switch
   // is on, so a later run can still read the ones a newer conversation replaced.
@@ -1205,7 +1205,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  // User tasks come first: an automatic 梦境整理 still drafting stops here.
+  // User tasks come first: an automatic 课堂精练 still drafting stops here.
   deps.controls.dream?.preempt('有新的用户消息');
 
   if (

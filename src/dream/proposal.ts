@@ -258,7 +258,7 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
   if (action === 'create' && existing) return { error: `已有同名 skill ${name}，应作为更新提出` };
   if (action === 'update') {
     if (!existing) return { error: `没有名为 ${name} 的 skill 可更新` };
-    if (!existing.source) return { error: `${name} 是本 profile 自带的 skill，不在共享库里，梦境整理不改它` };
+    if (!existing.source) return { error: `${name} 是本 profile 自带的 skill，不在共享库里，课堂精练不改它` };
   }
   return {
     scopeId: ctx.scopeId,

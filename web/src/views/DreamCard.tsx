@@ -36,7 +36,7 @@ function when(at: number): string {
 }
 
 /**
- * 梦境整理 (`/dream`): the bot reads finished conversations and opens Draft PRs
+ * 课堂精练 (`/dream`): the bot reads finished conversations and opens Draft PRs
  * with memory / note / skill proposals. The switches are in 基本设置; this card
  * shows where drafts go, why 自动整理 did or did not run, how recent runs
  * went, and runs / reverts one on demand.
@@ -86,7 +86,7 @@ export function DreamCard({ profile, refreshKey }: { profile: string; refreshKey
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between">
-        <CardTitle>梦境整理</CardTitle>
+        <CardTitle>课堂精练</CardTitle>
         {view?.live && view.enabled && (
           running ? (
             <Button variant="outline" size="sm" disabled={busy} onClick={() => act("cancel")}>取消整理</Button>

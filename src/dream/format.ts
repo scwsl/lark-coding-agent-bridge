@@ -6,7 +6,7 @@ import type { DreamRun, DreamTarget } from './state';
 
 const STATUS_LABEL: Record<DreamRun['status'], string> = {
   queued: '⏳ 排队中',
-  running: '🌙 整理中',
+  running: '📚 整理中',
   deferred: '⏸ 已延后',
   succeeded: '✅ 完成',
   failed: '❌ 失败',
@@ -24,7 +24,7 @@ const PHASE_LABEL: Record<DreamTarget['phase'], string> = {
 export function formatDreamStatus(view: DreamStatusView): string {
   const { settings } = view;
   const lines = [
-    `**🌙 梦境整理**：${view.enabled ? '已开启' : '未开启（`/config` 里打开）'}`,
+    `**📚 课堂精练**：${view.enabled ? '已开启' : '未开启（`/config` 里打开）'}`,
     '',
     `- 整理用 agent：${view.agent}（只读运行，独立会话）`,
     `- 知识库：${view.targets.knowledge.url ? `\`${view.targets.knowledge.url}\`` : `⚠️ ${view.targets.knowledge.problem}`}`,
@@ -48,7 +48,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
 }
 
 export function formatDreamRun(run: DreamRun): string {
-  const lines = [`**🌙 梦境整理 ${STATUS_LABEL[run.status]}** · 批次 \`${run.id}\``];
+  const lines = [`**📚 课堂精练 ${STATUS_LABEL[run.status]}** · 批次 \`${run.id}\``];
   if (run.note) lines.push('', run.note);
   for (const target of run.targets) lines.push(`- ${targetLine(target)}`);
   if (run.deferred.length > 0) {
@@ -62,8 +62,8 @@ export function formatDreamRun(run: DreamRun): string {
 export function formatDreamPrs(
   entries: ReadonlyArray<{ run: DreamRun; target: DreamTarget; state?: string }>,
 ): string {
-  if (entries.length === 0) return '还没有梦境整理开出的 PR。';
-  const lines = ['**🌙 梦境整理的 PR**', ''];
+  if (entries.length === 0) return '还没有课堂精练开出的 PR。';
+  const lines = ['**📚 课堂精练的 PR**', ''];
   for (const { run, target, state } of entries) {
     lines.push(`- \`${run.id}\` ${target.label}：[#${target.prNumber ?? '?'}](${target.prUrl})${state ? ` · ${state}` : ''}`);
   }
@@ -71,7 +71,7 @@ export function formatDreamPrs(
 }
 
 export function formatDreamRevert(result: DreamRevertResult): string {
-  const lines = [`**🌙 撤销批次 \`${result.id}\`**`, ''];
+  const lines = [`**📚 撤销批次 \`${result.id}\`**`, ''];
   for (const item of result.results) {
     lines.push(`- ${item.label}：${item.note}${item.prUrl ? `（[撤销 PR](${item.prUrl})）` : ''}`);
   }

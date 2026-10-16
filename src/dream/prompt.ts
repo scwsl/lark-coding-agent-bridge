@@ -18,7 +18,7 @@ export interface DreamScopePrompt {
   refs: Map<string, DreamSourceRef>;
 }
 
-const INSTRUCTIONS = `你在做「梦境整理」：把下面这一个会话范围里已经结束的对话，整理成待管理员审核的长期记忆与 skill 候选。整理结果会被做成 Draft PR，合并前不生效。
+const INSTRUCTIONS = `你在做「课堂精练」：把下面这一个会话范围里已经结束的对话，整理成待管理员审核的长期记忆与 skill 候选。整理结果会被做成 Draft PR，合并前不生效。
 
 只输出一个 JSON 对象，不要输出任何其他文字，不要调用任何工具，不要读写文件。
 
