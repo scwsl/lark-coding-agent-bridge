@@ -894,7 +894,8 @@ export function overloadCard(input: {
       elements: [
         {
           tag: 'markdown',
-          content: `${(input.owners ?? []).map((id) => `<at id=${id}></at> `).join('')}等 ALL`,
+          // A plain "@ALL" label, not <at id=all>: a real @所有人 would page the whole group and could wake its bots.
+          content: `${(input.owners ?? []).map((id) => `<at id=${id}></at> `).join('')}@ALL`,
         },
         {
           tag: 'column_set',

@@ -175,12 +175,13 @@ describe('bot ↔ owner table', () => {
     expect(botOwnersOf(table, ['ou_unknown'])).toEqual([]);
   });
 
-  it('@s the owners, then 等 ALL, and never a bot', () => {
+  it('@s the owners, then a plain @ALL label, and never a bot', () => {
     const text = JSON.stringify(
       overloadCard({ windows: [{ label: '本周', usedPercent: 90, limit: 80 }], cooldownMinutes: 10, owners: ['ou_lishuang', 'ou_yangshan'] }),
     );
-    expect(text).toContain('<at id=ou_lishuang></at> <at id=ou_yangshan></at> 等 ALL');
+    expect(text).toContain('<at id=ou_lishuang></at> <at id=ou_yangshan></at> @ALL');
+    expect(text).not.toContain('<at id=all>');
     expect(text).toContain('只 @ bot 的主人，不 @ 任何 bot');
-    expect(JSON.stringify(overloadCard({ windows: [], cooldownMinutes: 10 }))).toContain('"content":"等 ALL"');
+    expect(JSON.stringify(overloadCard({ windows: [], cooldownMinutes: 10 }))).toContain('"content":"@ALL"');
   });
 });
