@@ -64,12 +64,14 @@ describe('run registry keeps what an interrupted task needs to resume', () => {
       const after = new RunRegistry(file, process.pid);
       await after.load();
       const [orphan] = after.takeOrphans();
+      // takeOrphans persists in the background: let that write land before the directory goes.
+      await after.flush();
       expect(orphan).toMatchObject({
         ledger: '/tmp/l.md',
         resumeAs: { senderId: 'ou_owner', chatType: 'p2p', locale: 'zh' },
       });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
     }
   });
 });
