@@ -132,7 +132,7 @@ describe('markdown stream startup failures', () => {
       // at all and there is no late failure to log.
       events: [
         [
-          { type: 'text', delta: 'progress update' },
+          { type: 'text', delta: '进度更新' },
           {
             type: 'error',
             message: 'codex exited with code 1: Error loading config.toml',
@@ -181,7 +181,7 @@ describe('markdown stream startup failures', () => {
     const visibleProgress: string[] = [];
     const h = await createHarness({
       events: [
-        { type: 'text', delta: 'progress update' },
+        { type: 'text', delta: '进度更新' },
         { type: 'final_text', content: 'FINAL_SENTINEL' },
         { type: 'done', terminationReason: 'normal' },
       ],
@@ -201,7 +201,7 @@ describe('markdown stream startup failures', () => {
     await h.channel.handlers.message?.(message('om_final', '跑一下'));
     await waitFor(() => h.channel.sent.length === 1);
 
-    expect(visibleProgress.some((markdown) => markdown.includes('progress update'))).toBe(true);
+    expect(visibleProgress.some((markdown) => markdown.includes('进度更新'))).toBe(true);
     expect(h.channel.sent).toHaveLength(1);
     expect(lastMarkdown(h.channel)).toContain('FINAL_SENTINEL');
     expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_final' });
@@ -488,7 +488,7 @@ describe('markdown stream startup failures', () => {
     const fail = vi.spyOn(log, 'fail').mockImplementation(() => {});
     const h = await createHarness({
       events: [
-        { type: 'text', delta: 'progress update' },
+        { type: 'text', delta: '进度更新' },
         { type: 'final_text', content: 'FINAL_AFTER_STREAM_FAILURE' },
         { type: 'done', terminationReason: 'normal' },
       ],
@@ -721,7 +721,7 @@ describe('markdown stream startup failures', () => {
     const h = await createHarness({
       messageReply: 'card',
       events: [
-        { type: 'text', delta: 'progress update' },
+        { type: 'text', delta: '进度更新' },
         { type: 'final_text', content: 'FINAL_SENTINEL' },
         { type: 'done', terminationReason: 'normal' },
       ],
@@ -744,14 +744,14 @@ describe('markdown stream startup failures', () => {
     // Intermediate agent messages stream as progress; the final answer never
     // leaks into the progress card (it is held back for the dedicated reply).
     const progressJson = JSON.stringify(progressCards);
-    expect(progressJson).toContain('progress update');
+    expect(progressJson).toContain('进度更新');
     expect(progressJson).not.toContain('FINAL_SENTINEL');
 
     // The terminal answer arrives as exactly one non-streaming card send.
     expect(h.channel.sent).toHaveLength(1);
     const finalJson = JSON.stringify(h.channel.sent[0]?.content);
     expect(finalJson).toContain('FINAL_SENTINEL');
-    expect(finalJson).not.toContain('progress update');
+    expect(finalJson).not.toContain('进度更新');
     expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_card_final' });
 
     // Card mode gets both reactions now: Typing as an instant ack (the card's

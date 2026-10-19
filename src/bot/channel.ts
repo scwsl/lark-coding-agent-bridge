@@ -31,6 +31,7 @@ import { CallbackNonceStore } from '../card/callback-store';
 import { CodeSnippetStore } from '../card/code-snippets';
 import { fitCardToBudget, fullText } from '../card/card-budget';
 import { detectLocale, runStrings, type Locale } from '../card/i18n';
+import { withoutOffLocaleProgress } from '../card/progress-language';
 import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
@@ -1799,11 +1800,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // So is a trailing `[[NEW_SESSION…]]`, read from `lastRawState` (the answer as
   // the agent wrote it) once the run is over.
   let lastRawState: RunState | undefined;
+  // The bridge's own words on the reply follow the caller's language, the
+  // same rule the agent gets for its answer (see detectLocale).
+  const locale = detectLocale(batch.map((m) => m.content));
   const filterForPrefs = (raw: RunState): RunState => {
     lastRawState = raw;
     // Group members can't open the owner's ledger path: hide the line there.
     const shown = mode === 'p2p' ? raw : withoutLedgerLines(raw);
-    const state = withAutoResume(stripControlMarkers(shown));
+    // English progress notes in a Chinese conversation: hidden, see the helper.
+    const state = withAutoResume(stripControlMarkers(withoutOffLocaleProgress(shown, locale)));
     if (getShowToolCalls(controls.cfg)) return state;
     return {
       ...state,
@@ -1811,9 +1816,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       reasoning: { content: '', active: false },
     };
   };
-  // The bridge's own words on the reply follow the caller's language, the
-  // same rule the agent gets for its answer (see detectLocale).
-  const locale = detectLocale(batch.map((m) => m.content));
   const cardRenderOptions: RunCardRenderOptions = {
     locale,
     meta: {
