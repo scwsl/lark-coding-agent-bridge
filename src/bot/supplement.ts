@@ -2,25 +2,32 @@ import type { SupplementTarget } from './active-runs';
 
 /**
  * Leading markers that mean "add this to the task that is running" rather
- * than "here is a new question": 补充 / 追加 / + / /+.
+ * than "here is a new question": 补充 / 追加 / +, each also accepted with a
+ * leading slash (/补充, /追加, /+) since that is how people type commands.
  */
-const SUPPLEMENT_PREFIX_RE = /^\s*(?:补充|追加|\/\+|\+)/;
+const SUPPLEMENT_PREFIX_RE = /^\s*\/?(?:补充|追加|\+)/;
 
-const SUPPLEMENT_PREFIX_TRIM_RE = /^(?:补充|追加|\/\+|\+)[\s:：,，]*/;
+const SUPPLEMENT_PREFIX_TRIM_RE = /^\/?(?:补充|追加|\+)[\s:：,，]*/;
 
 const PREVIEW_MAX = 60;
 
-export type SupplementSignal = 'quote' | 'prefix';
+export type SupplementSignal = 'quote' | 'prefix' | 'topic';
 
 /**
  * Only explicit signals count: guessing wrong in the "supplement" direction
  * mixes a new question into someone's running task, while guessing wrong the
  * other way merely queues it for the next run — so no signal means queue.
+ *
+ * A topic (thread) is itself an explicit signal: it is opened for one task,
+ * its messages hang off the topic root rather than quoting the run, and the
+ * run is scoped to that topic — so a follow-up posted in the same topic while
+ * the run is going is folded in without needing a quote or prefix.
  */
 export function supplementSignal(
   content: string,
   quotedMessageId: string | undefined,
   target: SupplementTarget,
+  inTopic = false,
 ): SupplementSignal | undefined {
   if (
     quotedMessageId &&
@@ -29,6 +36,7 @@ export function supplementSignal(
     return 'quote';
   }
   if (SUPPLEMENT_PREFIX_RE.test(content)) return 'prefix';
+  if (inTopic) return 'topic';
   return undefined;
 }
 

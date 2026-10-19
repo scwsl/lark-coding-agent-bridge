@@ -16,7 +16,15 @@ function target(): SupplementTarget {
 }
 
 describe('supplementSignal', () => {
-  it.each(['补充：再看下 EUR', '追加一个条件', '+ 顺便导出 CSV', '/+ 用 staging', '  补充 前导空格'])(
+  it.each([
+    '补充：再看下 EUR',
+    '追加一个条件',
+    '+ 顺便导出 CSV',
+    '/+ 用 staging',
+    '  补充 前导空格',
+    '/补充 是主机全局记忆',
+    '/追加 再加一列',
+  ])(
     'treats %j as a supplement by prefix',
     (content) => {
       expect(supplementSignal(content, undefined, target())).toBe('prefix');
@@ -26,6 +34,16 @@ describe('supplementSignal', () => {
   it('treats a quote-reply to the triggering message or the run reply as a supplement', () => {
     expect(supplementSignal('这个也看下', 'om_origin', target())).toBe('quote');
     expect(supplementSignal('这个也看下', 'om_card', target())).toBe('quote');
+  });
+
+  it('treats any message in the same topic as a supplement', () => {
+    expect(supplementSignal('是主机全局记忆', undefined, target(), true)).toBe('topic');
+    expect(supplementSignal('看下这条', 'om_unrelated', target(), true)).toBe('topic');
+  });
+
+  it('still reports the stronger signal first inside a topic', () => {
+    expect(supplementSignal('这个也看下', 'om_origin', target(), true)).toBe('quote');
+    expect(supplementSignal('/补充 换成 EUR', undefined, target(), true)).toBe('prefix');
   });
 
   it('queues everything else as a new question', () => {
@@ -47,6 +65,7 @@ describe('supplementPreview', () => {
   it('drops the prefix, flattens whitespace and truncates long text', () => {
     expect(supplementPreview('补充：\n  换成 EUR', 0)).toBe('换成 EUR');
     expect(supplementPreview('/+ 用 staging', 0)).toBe('用 staging');
+    expect(supplementPreview('/补充 是主机全局记忆', 0)).toBe('是主机全局记忆');
     expect(supplementPreview('这个也看下', 0)).toBe('这个也看下');
     expect(supplementPreview('补'.repeat(80), 0)).toBe(`${'补'.repeat(60)}…`);
   });
