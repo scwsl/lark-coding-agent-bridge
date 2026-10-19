@@ -7,7 +7,7 @@ import { describeGhFailure, findPullRequestForBranch } from '../git/pr';
 import { maskUrlCredentials } from '../knowledge/libraries';
 import { defaultMemoryHeader, parseMemoryEntries, parseSkillHeader, sanitizeScopeId } from '../knowledge/store';
 import { isPlausibleGitUrl } from '../knowledge/sync';
-import { normalizeText, type MemoryAddition, type SkillProposal } from './proposal';
+import { normalizeText, skillDirName, type MemoryAddition, type SkillProposal } from './proposal';
 
 /**
  * The deterministic publishing half of 课堂精练: a fresh checkout of the target
@@ -169,7 +169,7 @@ export async function writeSkillDraft(
   if (await isFile(join(base, 'SKILL.md'))) return rejectAll('这个库本身就是单个 skill，不能往里加别的 skill');
 
   for (const proposal of proposals) {
-    let dirName = proposal.name;
+    let dirName = skillDirName(proposal.name);
     if (proposal.action === 'update') {
       const found = await findSkillDir(base, proposal.name);
       if (!found) {

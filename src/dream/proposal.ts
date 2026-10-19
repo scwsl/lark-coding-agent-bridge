@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isSafeSkillName, parseSkillHeader, skillFrontmatterValue, type MemoryEntry, type SkillSummary } from '../knowledge/store';
+import { parseSkillHeader, skillFrontmatterValue, type MemoryEntry, type SkillSummary } from '../knowledge/store';
 import type { DreamSourceRef } from './prompt';
 import { findSecret } from './secrets';
 
@@ -115,6 +115,8 @@ export interface ValidateContext {
   external?: { ownLibrary?: string };
   /** Names a new skill may not take: skills the agent CLI already loads from elsewhere. */
   reservedSkillNames?: ReadonlySet<string>;
+  /** Non-empty: a new skill must be named `<project>:<skill>` with one of these projects. */
+  skillProjects?: Readonly<Record<string, string>>;
   /** Caps for this one call; default {@link MAX_MEMORY_PER_SCOPE} / {@link MAX_SKILLS_PER_SCOPE}. */
   maxMemory?: number;
   maxSkills?: number;
@@ -258,7 +260,17 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
   const action = item.action;
   if (action !== 'create' && action !== 'update') return { error: '未知的 skill action' };
   const name = typeof item.name === 'string' ? item.name.trim() : '';
-  if (!isSafeSkillName(name) || !/^[a-z0-9][a-z0-9-]*$/.test(name)) return { error: 'skill 名称不合法' };
+  if (!isValidSkillName(name)) return { error: 'skill 名称不合法' };
+  const projects = Object.keys(ctx.skillProjects ?? {});
+  if (action === 'create' && projects.length > 0) {
+    const project = name.includes(':') ? name.slice(0, name.indexOf(':')) : '';
+    if (!projects.includes(project)) return { error: `skill 名称要写成「项目:技能」，项目只能是 ${projects.join(' / ')}` };
+    const short = skillShortName(name);
+    const taken = [...ctx.skills.map((skill) => skill.name), ...(ctx.reservedSkillNames ?? [])].find(
+      (other) => other !== name && (other === short || skillShortName(other) === short),
+    );
+    if (taken) return { error: `简称 ${short} 和已有技能 ${taken} 重名` };
+  }
   const reason = cleanLine(item.reason, MAX_REASON);
   if (!reason) return { error: '缺少整理理由' };
   const description = cleanLine(item.description, MAX_DESCRIPTION);
@@ -293,6 +305,21 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
     ...(action === 'update' && existing?.source ? { source: existing.source } : {}),
     hash: hashOf(['skill', action, name, createHash('sha256').update(body).digest('hex')]),
   };
+}
+
+/** `kebab-name`, or `project:kebab-name` once skills are grouped by project. */
+export function isValidSkillName(name: string): boolean {
+  return name.length <= 64 && /^[a-z0-9][a-z0-9-]*(:[a-z0-9][a-z0-9-]*)?$/.test(name);
+}
+
+/** What the user types for a skill: the part after `project:`, or the whole name. */
+export function skillShortName(name: string): string {
+  return name.slice(name.indexOf(':') + 1);
+}
+
+/** The directory a skill lives in: the colon of `project:skill` cannot be part of a path. */
+export function skillDirName(name: string): string {
+  return name.replace(':', '-');
 }
 
 /** The SKILL.md frontmatter has a non-empty `argument-hint`. */

@@ -36,6 +36,9 @@ export function formatDreamStatus(view: DreamStatusView): string {
       ? `- 发布方式：直接提交到默认分支并推送，每批写进仓库的 CHANGELOG.md${settings.skillUpdates === 'pr' ? '；修改已有技能改开 Draft PR，审核合并后生效' : ''}${view.pendingDrafts > 0 ? `；待重推 ${view.pendingDrafts} 个` : ''}`
       : `- 已开 Draft PR：${view.openedPrs} 个（\`/practice prs\` 看审核状态）${view.pendingDrafts > 0 ? `；待重试草稿 ${view.pendingDrafts} 个` : ''}`,
     ...(settings.requireArgumentHint ? ['- 技能要求：每个 skill 必须写 `argument-hint` 参数说明'] : []),
+    ...(Object.keys(settings.skillProjects).length > 0
+      ? [`- 技能命名：项目:技能（项目 ${Object.keys(settings.skillProjects).join(' / ')}），简称不得重名`]
+      : []),
     ...externalLines(view),
   ];
   if (view.lastSucceededAt) lines.push(`- 上次完成：${formatTime(view.lastSucceededAt)}`);

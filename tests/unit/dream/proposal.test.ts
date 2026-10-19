@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDreamScopePrompt } from '../../../src/dream/prompt.js';
+import { buildDreamScopePrompt, buildExternalLearningPrompt } from '../../../src/dream/prompt.js';
 import { parseDreamOutput, validateDreamProposals, type ValidateContext } from '../../../src/dream/proposal.js';
 import type { DreamScopeInput } from '../../../src/dream/select.js';
 
@@ -182,5 +182,83 @@ describe('validateDreamProposals', () => {
       ctx(),
     );
     expect(many.skills).toHaveLength(3);
+  });
+});
+
+describe('project-scoped skill names', () => {
+  const projects = { antelope: '新平台 Antelope', occam: 'bot 自身' };
+  const skill = (patch: Record<string, unknown>) => ({
+    action: 'create',
+    name: 'antelope:release-check',
+    description: '发版前检查',
+    body: '## 步骤\n1. 跑 ci',
+    reason: '成功做过两次',
+    sources: ['S1#1'],
+    ...patch,
+  });
+
+  it('requires project:skill for new skills, a known project and a free short name', () => {
+    const out = validateDreamProposals(
+      {
+        memory: [],
+        skills: [
+          skill({}),
+          skill({ name: 'release-check' }),
+          skill({ name: 'misc:release-check' }),
+          skill({ name: 'occam:deploy' }),
+          skill({ name: 'occam:tcpdump' }),
+          skill({ name: 'antelope:Bad' }),
+        ],
+      },
+      ctx({
+        skillProjects: projects,
+        skills: [
+          { name: 'deploy', description: 'deploy steps', path: '/x/deploy/SKILL.md', source: 'team-lib' },
+          { name: 'antelope:tcpdump', description: '抓包', path: '/x/antelope-tcpdump/SKILL.md', source: 'team-lib' },
+        ],
+      }),
+    );
+    expect(out.skills.map((item) => item.name)).toEqual(['antelope:release-check']);
+    expect(out.skills[0]!.body).toMatch(/^---\nname: antelope:release-check\n/);
+    expect(out.rejected.map((item) => item.reason)).toEqual([
+      expect.stringContaining('项目:技能'),
+      expect.stringContaining('项目:技能'),
+      '简称 deploy 和已有技能 deploy 重名',
+      '简称 tcpdump 和已有技能 antelope:tcpdump 重名',
+      'skill 名称不合法',
+    ]);
+  });
+
+  it('still updates a project-named skill and keeps kebab names when no project is configured', () => {
+    const library = [{ name: 'antelope:tcpdump', description: '抓包', path: '/x/antelope-tcpdump/SKILL.md', source: 'team-lib' }];
+    const update = validateDreamProposals(
+      { memory: [], skills: [skill({ action: 'update', name: 'antelope:tcpdump', body: '---\nname: antelope:tcpdump\ndescription: d\n---\nnew' })] },
+      ctx({ skills: library }),
+    );
+    expect(update.skills[0]).toMatchObject({ action: 'update', name: 'antelope:tcpdump', source: 'team-lib' });
+    const plain = validateDreamProposals({ memory: [], skills: [skill({ name: 'release-check' })] }, ctx());
+    expect(plain.skills).toHaveLength(1);
+  });
+
+  it('tells the model the naming rule only when projects are configured', () => {
+    const base = { scope, profileMemory: [], chatMemory: [], skills: [], isAdmin: () => false };
+    const named = buildDreamScopePrompt({ ...base, skillProjects: projects }).prompt;
+    expect(named).toContain('「项目:技能」');
+    expect(named).toContain('antelope（新平台 Antelope）');
+    expect(named).toContain('"name":"项目:技能"');
+    expect(named).not.toMatch(/\{\{(SKILL_NAMING|NAME_FORMAT)\}\}/);
+    const plain = buildDreamScopePrompt(base).prompt;
+    expect(plain).toContain('"name":"kebab-case-name"');
+    expect(plain).not.toContain('「项目:技能」');
+    const learning = buildExternalLearningPrompt({
+      materials: [],
+      profileMemory: [],
+      skills: [],
+      ownSkills: [],
+      localSkills: [],
+      skillProjects: projects,
+    }).prompt;
+    expect(learning).toContain('从外部 skill 改写来的');
+    expect(learning).not.toMatch(/\{\{(SKILL_NAMING|NAME_FORMAT)\}\}/);
   });
 });

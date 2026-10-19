@@ -802,6 +802,7 @@ export class DreamService {
         remainingMs: remaining,
         signal,
         requireArgumentHint: settings.requireArgumentHint,
+        skillProjects: settings.skillProjects,
       });
       if (signal.aborted) return stopped('游标未移动');
       if ('error' in outcome) {
@@ -906,6 +907,7 @@ export class DreamService {
       remainingMs: number;
       signal: AbortSignal;
       requireArgumentHint: boolean;
+      skillProjects: Readonly<Record<string, string>>;
     },
   ): Promise<ReturnType<typeof validateDreamProposals> | { error: string }> {
     const built = buildDreamScopePrompt({
@@ -915,6 +917,7 @@ export class DreamService {
       skills: ctx.skills,
       isAdmin: this.deps.isAdmin,
       requireArgumentHint: ctx.requireArgumentHint,
+      skillProjects: ctx.skillProjects,
     });
     const answer = await this.runAgent(`dream:${batch}:${ordinal + 1}`, built.prompt, ctx.actor, ctx.remainingMs, ctx.signal);
     if ('error' in answer) return answer;
@@ -928,6 +931,7 @@ export class DreamService {
       skills: ctx.skills,
       isPublished: (hash) => this.state.isPublished(hash),
       requireArgumentHint: ctx.requireArgumentHint,
+      skillProjects: ctx.skillProjects,
     });
   }
 
@@ -998,6 +1002,7 @@ export class DreamService {
       ownSkills,
       localSkills,
       requireArgumentHint: settings.requireArgumentHint,
+      skillProjects: settings.skillProjects,
     });
     const answer = await this.runAgent(`dream:${batch}:learn`, built.prompt, ctx.actor, ctx.deadline - this.now(), ctx.signal);
     const failed = (error: string): LearningOutcome => ({ ...outcome, cursors: {}, error: `课前学习没做成（${error}），外部库游标未移动` });
@@ -1013,6 +1018,7 @@ export class DreamService {
       skills: ctx.skills,
       isPublished: (hash) => this.state.isPublished(hash),
       requireArgumentHint: settings.requireArgumentHint,
+      skillProjects: settings.skillProjects,
       external: { ...(ownLibrary ? { ownLibrary } : {}) },
       reservedSkillNames: new Set(localSkills.map((skill) => skill.name).filter((name) => !ownNames.has(name))),
       maxMemory: MAX_LEARNING_MEMORY,

@@ -148,6 +148,21 @@ describe('dream publishing', { timeout: TIMEOUT }, () => {
     ]);
   });
 
+  it('writes a project:skill name to the project-skill directory and updates it by name', async () => {
+    const remote = await remoteWith('projects', {
+      'skills/antelope-tcpdump/SKILL.md': '---\nname: antelope:tcpdump\ndescription: old\n---\nold\n',
+    });
+    const dir = join(root, 'projects-co');
+    await prepareCheckout({ repo: 'skills:team', label: 'team', url: remote }, dir, 'dream/b5');
+    const draft = await writeSkillDraft(dir, { name: 'team', url: remote }, [
+      skill({ name: 'antelope:release-check', body: '---\nname: antelope:release-check\ndescription: x\n---\nbody\n' }),
+      skill({ action: 'update', name: 'antelope:tcpdump', body: '---\nname: antelope:tcpdump\ndescription: new\n---\nnew\n' }),
+    ]);
+    expect(draft.files.sort()).toEqual(['skills/antelope-release-check/SKILL.md', 'skills/antelope-tcpdump/SKILL.md']);
+    expect(await readFile(join(dir, 'skills', 'antelope-tcpdump', 'SKILL.md'), 'utf8')).toContain('new');
+    expect(draft.rejected).toEqual([]);
+  });
+
   it('refuses a single-skill repository and symlinked targets', async () => {
     const single = await remoteWith('single', { 'SKILL.md': '---\nname: one\ndescription: x\n---\n' });
     const dir = join(root, 'single-co');

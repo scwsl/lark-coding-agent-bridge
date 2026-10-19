@@ -395,6 +395,14 @@ export interface DreamTuning {
   /** Every skill a run writes must declare `argument-hint` in its frontmatter; own skills without one get it added. */
   requireArgumentHint?: boolean;
   /**
+   * Skills are named `<project>:<skill>`; keys are the allowed projects, values
+   * say what each covers (shown to the model so it can pick one). A new skill
+   * must use one of them, lives in directory `<project>-<skill>`, and its short
+   * name (after the colon) must not clash with any skill already loaded.
+   * Absent or empty: plain kebab-case names as before.
+   */
+  skillProjects?: Record<string, string>;
+  /**
    * Skill directories the agent CLI loads by itself (`~/.claude/skills`…):
    * listed by name to 课前学习 so it does not create a library copy of a
    * skill the profile already has.
@@ -450,6 +458,8 @@ export interface DreamSettings {
   skillUpdates: 'pr' | 'push';
   external: DreamExternalLibraryConfig[];
   requireArgumentHint: boolean;
+  /** Empty: plain kebab-case skill names. See {@link DreamTuning.skillProjects}. */
+  skillProjects: Record<string, string>;
   localSkillDirs: string[];
   localClones: string[];
   notifyChat?: string;
@@ -481,6 +491,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   skillUpdates: 'pr',
   external: [],
   requireArgumentHint: false,
+  skillProjects: {},
   localSkillDirs: [],
   localClones: [],
   auto: DREAM_AUTO_DEFAULTS,
@@ -702,6 +713,16 @@ export function getDreamAuto(cfg: AppConfig): DreamSettings | undefined {
   return getDream(cfg);
 }
 
+/** Projects a skill name may start with: kebab-case keys, each with a non-empty description. */
+function resolveSkillProjects(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key, text]) => /^[a-z0-9][a-z0-9-]*$/.test(key) && typeof text === 'string' && text.trim() !== '')
+      .map(([key, text]) => [key, (text as string).trim()]),
+  );
+}
+
 /** {@link getDream}'s limits whether or not the switch is on — for status displays. */
 export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSettings {
   const raw = tuning ?? {};
@@ -725,6 +746,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     skillUpdates: raw.skillUpdates === 'pr' || raw.skillUpdates === 'push' ? raw.skillUpdates : raw.publish === 'push' ? 'push' : 'pr',
     external: resolveExternalLibraries(raw.externalLibraries),
     requireArgumentHint: raw.requireArgumentHint === true,
+    skillProjects: resolveSkillProjects(raw.skillProjects),
     localSkillDirs: absoluteDirs(raw.localSkillDirs),
     localClones: absoluteDirs(raw.localClones),
     ...(notifyChat ? { notifyChat } : {}),
