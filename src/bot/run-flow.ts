@@ -53,6 +53,8 @@ export interface StartRunFlowInput {
   stopGraceMs?: number;
   /** Limits for a run the bot owner didn't start (see ownerOnlyGuard). */
   guard?: RunGuard;
+  /** Working directory pinned by the chat (`access.restrictedChats`); wins over `/cd`. */
+  cwd?: string;
   /** 会话智能压缩: see AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
   /**
@@ -108,7 +110,7 @@ export interface RecordRunSessionEventInput {
 
 export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFlowResult> {
   const requestedCwd =
-    input.workspaces.cwdFor(input.scopeId) ?? input.profileConfig.workspaces.default ?? '';
+    input.cwd ?? input.workspaces.cwdFor(input.scopeId) ?? input.profileConfig.workspaces.default ?? '';
   const workspace = await resolveWorkingDirectory(requestedCwd);
   if (!workspace.ok) {
     return {

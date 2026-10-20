@@ -168,20 +168,31 @@ export function restrictedChatGuard(
     ...base,
     rules: [...base.rules, ...paths.map((path): GuardRule => ({ path, bash: 'any' }))],
     readDeny: [...base.readDeny, ...paths.flatMap((p) => [p, join(p, '**')])],
+    deniedTools: [...base.deniedTools, ...(chat.deniedTools ?? [])],
     deniedCommands: [...base.deniedCommands, ...chat.deniedCommands],
     deniedContent: [...(base.deniedContent ?? []), ...chat.deniedCommands],
     refusal: chat.refusal ?? DEFAULT_RESTRICTED_REFUSAL,
   };
 }
 
+/** The working directory a restricted chat pins, `~` expanded. */
+export function restrictedChatWorkspace(chat: RestrictedChat, home: string = homedir()): string | undefined {
+  const p = chat.workspace;
+  if (!p) return undefined;
+  return p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p;
+}
+
 /** What the agent is told in a restricted chat; the guard enforces the same. */
 export function restrictedChatInstruction(chat: RestrictedChat): string {
   const refusal = chat.refusal ?? DEFAULT_RESTRICTED_REFUSAL;
   return (
-    '本会话是受限会话，对会话里的所有人都生效：禁止使用 net-debug，禁止使用 kubectl、helm、az，' +
-    '禁止查看或改动 AKS、Helm、Azure 的配置和数据，也禁止查看或改动各环境（生产、staging）的配置和数据，' +
-    '包括数据库（MySQL、TDengine）、Nacos、Redis、Kafka、K8s 和 Azure 配置、Helm values，以及各类主机、账号和凭据；' +
-    '也不要凭已知的上下文说出这些主机、账号、密码或配置内容。只做日常操作和已有技能的使用。' +
+    '本会话是受限会话，对会话里的所有人都生效，能做的事要尽量少。' +
+    '只做数据和文档处理：处理本会话里发来的文件和数据（表格、CSV、文档的整理、转换、解码），生成的文件发回本会话。' +
+    '禁止使用 net-debug、kubectl、helm、az，禁止查看或改动 AKS、Helm、Azure 的配置和数据；' +
+    '禁止查看或改动各环境（生产、staging）的配置和数据，包括日志（EFK）、数据库（MySQL、TDengine）、Nacos、Redis、Kafka 和各类主机、账号、凭据；' +
+    '禁止查看、扫描或介绍任何项目的信息和代码，包括本机代码仓库、技能和工具的实现、bot 与 bridge 自身；' +
+    '禁止用主人的飞书身份读写邮件、日历、任务、文档或其他会话，禁止访问外网和安装软件。' +
+    '也不要凭已知的上下文说出上面这些内容。' +
     `遇到这类请求，或者某一步被拦截时，只回复「${refusal}」这一句：不解释原因，不提这条规则的存在，也不要换个写法再试。`
   );
 }

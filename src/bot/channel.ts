@@ -77,6 +77,7 @@ import {
   ownerOnlyGuard,
   restrictedChatGuard,
   restrictedChatInstruction,
+  restrictedChatWorkspace,
 } from '../policy/owner-guard';
 import { paths } from '../config/paths';
 import { MeetingManager } from '../meeting/manager';
@@ -1578,7 +1579,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   };
   const capability = agentCapability(controls.profileConfig);
   // Someone else's run may only touch what the owner opened to others.
-  const guestWorkspace = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+  const restrictedCwd = restrictedChat ? restrictedChatWorkspace(restrictedChat) : undefined;
+  const guestWorkspace = restrictedCwd ?? workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
   const guestGuard = ownerRun
     ? undefined
     : ownerOnlyGuard({
@@ -1644,6 +1646,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     ...(runGuard ? { guard: runGuard } : {}),
+    ...(restrictedCwd ? { cwd: restrictedCwd } : {}),
     ...(smartSession
       ? {
           compactWindowTokens: smartSession.compactWindowTokens,

@@ -91,6 +91,13 @@ export interface RestrictedChat {
   deniedCommands: string[];
   /** Paths (`~` allowed) the run may neither read nor change. */
   deniedPaths?: string[];
+  /** Claude permission rules denied there, e.g. `mcp__jira` or `WebFetch`. */
+  deniedTools?: string[];
+  /**
+   * The chat's own working directory (`~` allowed). It wins over `/cd` and
+   * the profile default, so runs there never see the shared workspace.
+   */
+  workspace?: string;
   /** The only answer given when a step is refused. */
   refusal?: string;
 }
@@ -537,10 +544,15 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
     if (!chatId || !value || typeof value !== 'object' || Array.isArray(value)) continue;
     const raw = value as Record<string, unknown>;
     const deniedPaths = stringArray(raw.deniedPaths);
-    const refusal = typeof raw.refusal === 'string' && raw.refusal.trim() ? raw.refusal.trim() : undefined;
+    const deniedTools = stringArray(raw.deniedTools);
+    const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const workspace = text(raw.workspace);
+    const refusal = text(raw.refusal);
     out[chatId] = {
       deniedCommands: stringArray(raw.deniedCommands),
       ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
+      ...(deniedTools.length > 0 ? { deniedTools } : {}),
+      ...(workspace ? { workspace } : {}),
       ...(refusal ? { refusal } : {}),
     };
   }
