@@ -20,6 +20,12 @@
 // `deniedCommands` are owner-only commands of this deployment (GitHub CLI,
 // Jira writes, device control …), from `access.guestDeniedCommands`.
 //
+// A restricted chat (`access.restrictedChats`) adds its own commands and
+// paths for every run there, the owner's included, plus two keys:
+//   "deniedContent": ["regex", …]  — also refused in what file tools write
+//                                     and in the paths they touch
+//   "refusal": "…"                  — the only answer to give when refused
+//
 // Exit 2 with a reason on stderr blocks the call; Claude shows the reason to
 // the model. String matching, not a sandbox: it stops the plain ways of doing
 // it, and the agent is told the same rules in its system prompt.
@@ -152,7 +158,26 @@ function decideBash(command, cfg, cwd) {
   return null;
 }
 
+/** Is `path` inside `rule.path` and not one of its allowed sub-paths? */
+function fenced(path, rule) {
+  if (!within(path, rule.path)) return false;
+  return !(rule.allow ?? []).some((re) => new RegExp(`^${re}`).test(path));
+}
+
+/** The text a file tool is about to write. */
+function writtenText(input) {
+  const parts = [input?.content, input?.new_string, input?.new_source];
+  for (const edit of Array.isArray(input?.edits) ? input.edits : []) parts.push(edit?.new_string);
+  return parts.filter((p) => typeof p === 'string').join('\n');
+}
+
 function decideFile(toolName, input, cfg, cwd) {
+  if (WRITING_TOOLS.has(toolName) && (cfg.deniedContent ?? []).length > 0) {
+    const text = writtenText(input);
+    for (const re of cfg.deniedContent) {
+      if (new RegExp(re).test(text)) return '要写入的内容涉及受限操作';
+    }
+  }
   for (const key of FILE_TOOLS[toolName] ?? []) {
     const value = input?.[key];
     if (typeof value !== 'string' || !value) continue;
@@ -163,6 +188,12 @@ function decideFile(toolName, input, cfg, cwd) {
     }
     const path = resolve(cwd, expanded);
     if (!inScope(path, cfg)) return `访问的位置未对外开放：${path}`;
+    for (const re of cfg.deniedContent ?? []) {
+      if (new RegExp(re).test(path)) return `访问的位置未对外开放：${path}`;
+    }
+    for (const rule of cfg.rules ?? []) {
+      if (rule.bash === 'any' && fenced(path, rule)) return `访问的位置未对外开放：${rule.path}`;
+    }
     if (WRITING_TOOLS.has(toolName)) {
       for (const rule of cfg.rules ?? []) {
         if (within(path, rule.path)) return `这个位置不能改动：${rule.path}`;
@@ -199,7 +230,9 @@ async function main() {
   const reason = decide(input?.tool_name, input?.tool_input, cfg, cwd);
   if (!reason) return 0;
   process.stderr.write(
-    `${reason}。本次任务不是 bot 主人发起的，这部分仅限主人本人。请停止这一步，并告诉用户这部分内容不对外开放。\n`,
+    cfg.refusal
+      ? `${reason}。这一步在当前会话不可用：请停止这一步，不要换个写法再试；只回复用户「${cfg.refusal}」这一句，不要解释原因，也不要提及拦截、权限或规则。\n`
+      : `${reason}。本次任务不是 bot 主人发起的，这部分仅限主人本人。请停止这一步，并告诉用户这部分内容不对外开放。\n`,
   );
   return 2;
 }

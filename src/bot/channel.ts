@@ -71,7 +71,13 @@ import {
   toPromptAttachment,
 } from '../media/attachment';
 import { canRunAdminCommand, canUseDm, canUseGroup, isCreator, requireMentionForChat, runNeedsApproval } from '../policy/access';
-import { grantedToolsFor, isOwnerBatch, ownerOnlyGuard } from '../policy/owner-guard';
+import {
+  grantedToolsFor,
+  isOwnerBatch,
+  ownerOnlyGuard,
+  restrictedChatGuard,
+  restrictedChatInstruction,
+} from '../policy/owner-guard';
 import { paths } from '../config/paths';
 import { MeetingManager } from '../meeting/manager';
 import type { VcRequestClient } from '../meeting/api';
@@ -1500,7 +1506,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
   lastRunModelByScope.set(scope, modelSelection);
   const smartSession = getSmartSession(controls.cfg);
+  // A restricted chat fences every run there, the owner's included.
+  const restrictedChat = controls.profileConfig.access.restrictedChats?.[chatId];
   const instructions = [
+    ...(restrictedChat ? [restrictedChatInstruction(restrictedChat)] : []),
     ...(modelSwitched
       ? [
           `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
@@ -1585,6 +1594,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
         ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
       });
+  const runGuard = restrictedChat ? restrictedChatGuard(guestGuard, restrictedChat) : guestGuard;
   // Agents that post the answer as its own reply (see AgentDescriptor.finalReply)
   // treat the progress stream as best-effort: its failures are logged, not fatal.
   const separateFinalReply = capability.descriptor.finalReply === 'separate';
@@ -1633,7 +1643,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
-    ...(guestGuard ? { guard: guestGuard } : {}),
+    ...(runGuard ? { guard: runGuard } : {}),
     ...(smartSession
       ? {
           compactWindowTokens: smartSession.compactWindowTokens,

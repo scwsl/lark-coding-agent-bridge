@@ -8,6 +8,8 @@ import {
   grantedToolsFor,
   isOwnerBatch,
   ownerOnlyGuard,
+  restrictedChatGuard,
+  restrictedChatInstruction,
 } from '../../../src/policy/owner-guard';
 
 const HOME = '/Users/someone';
@@ -290,3 +292,88 @@ describe('guest tool grants', () => {
     expect(res.status).toBe(0);
   });
 });
+
+describe('restricted chats', () => {
+  const chat = {
+    deniedCommands: [
+      '(^|[\\s;|&(/])(kubectl|helm)(\\s|$)',
+      '(^|[\\s;|&(/])az(\\s|$)',
+      'net-debug',
+      '\\bpymysql\\b',
+      'mysql\\.database\\.azure\\.com',
+      '\\b(application|bootstrap)-[\\w.-]*\\.ya?ml\\b',
+    ],
+    deniedPaths: ['~/.kube'],
+  };
+  const run = (g: ReturnType<typeof restrictedChatGuard>, toolName: string, toolInput: Record<string, unknown>) => {
+    const res = spawnSync(process.execPath, [g.hookScript], {
+      input: JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: WORKSPACE }),
+      env: { ...process.env, ...claudeGuardArgs(g).env },
+      encoding: 'utf8',
+    });
+    return { code: res.status, stderr: res.stderr };
+  };
+  const owner = restrictedChatGuard(undefined, chat, { home: HOME, root: ROOT });
+  const guest = restrictedChatGuard(guard, chat);
+
+  it.each([
+    ['kubectl', 'kubectl --context prod-aus -n default get pod net-debug'],
+    ['helm', 'cd /tmp && helm list -A'],
+    ['the Azure CLI', 'az account show'],
+    ['a database script', "python3 - <<'EOF'\nimport pymysql\nEOF"],
+    ['a database host', 'curl prod-sea.mysql.database.azure.com:3306'],
+    ['the kube config', 'cat ~/.kube/config'],
+  ])('refuses %s for the owner too, with only the fixed answer', (_label, command) => {
+    const res = run(owner, 'Bash', { command });
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('只回复用户「这是一个危险操作，暂时不支持」这一句');
+    expect(res.stderr).not.toContain('不是 bot 主人发起');
+  });
+
+  it('keeps everyday work open for the owner, home included', () => {
+    expect(run(owner, 'Bash', { command: 'python3 ~/.occam/tasks/x/decrypt.py in.csv out.xlsx' }).code).toBe(0);
+    expect(run(owner, 'Bash', { command: 'lark-cli im +messages-send --chat-id oc_x --file a.xlsx' }).code).toBe(0);
+    expect(run(owner, 'Read', { file_path: `${HOME}/Desktop/notes.md` }).code).toBe(0);
+  });
+
+  it('fences the denied paths for file tools and in the Claude flags', () => {
+    expect(run(owner, 'Read', { file_path: `${HOME}/.kube/config` }).code).toBe(2);
+    expect(run(owner, 'Grep', { path: `${HOME}/.kube`, pattern: 'server' }).code).toBe(2);
+    const { args } = claudeGuardArgs(owner);
+    expect(args).toContain(`Read(/${HOME}/.kube/**)`);
+    expect(args).toContain(`Edit(/${HOME}/.kube)`);
+  });
+
+  it('refuses file tools on paths matching a denied pattern', () => {
+    const conf = `${OPEN}/antelope/global/src/main/resources/bootstrap-prod.yml`;
+    expect(run(owner, 'Read', { file_path: conf }).code).toBe(2);
+    expect(run(owner, 'Bash', { command: `cat ${conf}` }).code).toBe(2);
+    expect(run(owner, 'Read', { file_path: `${OPEN}/antelope/global/src/main/java/App.java` }).code).toBe(0);
+  });
+
+  it('refuses writing a file that carries a denied command', () => {
+    expect(run(owner, 'Write', { file_path: `${WORKSPACE}/q.py`, content: 'import pymysql\n' }).code).toBe(2);
+    expect(
+      run(owner, 'MultiEdit', { file_path: `${WORKSPACE}/q.sh`, edits: [{ old_string: 'a', new_string: 'kubectl get pods' }] }).code,
+    ).toBe(2);
+    expect(run(owner, 'Write', { file_path: `${WORKSPACE}/ok.py`, content: 'import openpyxl\n' }).code).toBe(0);
+  });
+
+  it('adds to a guest guard without loosening it', () => {
+    expect(run(guest, 'Bash', { command: 'gh pr create --fill' }).code).toBe(2);
+    expect(run(guest, 'Bash', { command: 'kubectl get ns' }).code).toBe(2);
+    expect(run(guest, 'Read', { file_path: `${HOME}/Documents/private.txt` }).code).toBe(2);
+    expect(run(guest, 'Read', { file_path: `${OPEN}/antelope/README.md` }).code).toBe(0);
+    expect(run(guest, 'Bash', { command: 'kubectl get ns' }).stderr).toContain('这是一个危险操作，暂时不支持');
+  });
+
+  it('honours a custom answer and tells the agent the same rules', () => {
+    const custom = restrictedChatGuard(undefined, { ...chat, refusal: '暂不支持' }, { home: HOME, root: ROOT });
+    expect(run(custom, 'Bash', { command: 'kubectl get ns' }).stderr).toContain('「暂不支持」');
+    const text = restrictedChatInstruction(chat);
+    expect(text).toContain('net-debug');
+    expect(text).toContain('「这是一个危险操作，暂时不支持」');
+    expect(text).toContain('不提这条规则的存在');
+  });
+});
+

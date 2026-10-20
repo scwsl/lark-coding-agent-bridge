@@ -73,6 +73,26 @@ export interface ProfileAccess {
    * only when every sender in its batch has it. Omitted when empty.
    */
   guestToolGrants?: Record<string, string[]>;
+  /**
+   * Chats where every run — the owner's included — is fenced harder, keyed by
+   * chat_id: no cluster, cloud or database access and no environment configs
+   * or data, only everyday work and skills. A refused step gets one fixed
+   * answer and the rules behind it stay unexplained. Omitted when empty.
+   */
+  restrictedChats?: Record<string, RestrictedChat>;
+}
+
+/** Extra limits for every run in one chat (`access.restrictedChats`). */
+export interface RestrictedChat {
+  /**
+   * Regexes for refused shell commands. They are also checked against what a
+   * run writes into files, so a script cannot carry the command past the guard.
+   */
+  deniedCommands: string[];
+  /** Paths (`~` allowed) the run may neither read nor change. */
+  deniedPaths?: string[];
+  /** The only answer given when a step is refused. */
+  refusal?: string;
 }
 
 export interface SandboxConfig {
@@ -490,6 +510,7 @@ function normalizeAccess(
   const guestDeniedTools = stringArray(access?.guestDeniedTools);
   const guestDeniedCommands = stringArray(access?.guestDeniedCommands);
   const guestToolGrants = normalizeChatUserMap(access?.guestToolGrants);
+  const restrictedChats = normalizeRestrictedChats(access?.restrictedChats);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -504,7 +525,26 @@ function normalizeAccess(
     ...(guestDeniedTools.length > 0 ? { guestDeniedTools } : {}),
     ...(guestDeniedCommands.length > 0 ? { guestDeniedCommands } : {}),
     ...(Object.keys(guestToolGrants).length > 0 ? { guestToolGrants } : {}),
+    ...(Object.keys(restrictedChats).length > 0 ? { restrictedChats } : {}),
   };
+}
+
+/** Keep chats with a usable rule set; drop malformed entries. */
+function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, RestrictedChat> = {};
+  for (const [chatId, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!chatId || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const raw = value as Record<string, unknown>;
+    const deniedPaths = stringArray(raw.deniedPaths);
+    const refusal = typeof raw.refusal === 'string' && raw.refusal.trim() ? raw.refusal.trim() : undefined;
+    out[chatId] = {
+      deniedCommands: stringArray(raw.deniedCommands),
+      ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
+      ...(refusal ? { refusal } : {}),
+    };
+  }
+  return out;
 }
 
 /** Keep only string→boolean entries; drop anything malformed. */
