@@ -154,6 +154,7 @@ import {
   supplementPreview,
   supplementSignal,
 } from './supplement';
+import { mediaPlaceholders } from './media-placeholders';
 import { planLongRunNotice, sendLongRunNotice, type LongRunRequester } from './long-run-notice';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -1717,7 +1718,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     chatId,
     originMessageId: lastMsg.messageId,
     ...(threadId ? { threadId } : {}),
-    promptPreview: lastMsg.content ?? '',
+    promptPreview: mediaPlaceholders(lastMsg.content ?? ''),
     chatType: mode === 'p2p' ? 'p2p' : 'group',
     ...(chatName ? { chatName } : {}),
     actorId: firstMsg.senderId,
@@ -3220,7 +3221,7 @@ async function sendExpiredPendingNotice(channel: LarkChannel, record: PendingRec
   const last = record.messages[record.messages.length - 1];
   const first = record.messages[0];
   if (!last || !first) return;
-  const preview = first.content.replace(/\s+/g, ' ').trim().slice(0, 40);
+  const preview = mediaPlaceholders(first.content).replace(/\s+/g, ' ').trim().slice(0, 40);
   const text =
     `bridge 重启前，这里有 ${record.messages.length} 条消息还在排队、没来得及处理` +
     `${preview ? `（最早一条：「${preview}」）` : ''}。` +

@@ -70,6 +70,15 @@ describe('supplementPreview', () => {
     expect(supplementPreview('补'.repeat(80), 0)).toBe(`${'补'.repeat(60)}…`);
   });
 
+  it('shows images and files as numbered placeholders instead of raw keys', () => {
+    expect(
+      supplementPreview('补充：索引相关的，指给我 ![image](img_v3_0216m_9c921048-3999-48b2-9d94-829f) 还有 ![image](img_v3_x)', 1),
+    ).toBe('索引相关的，指给我 [图 1] 还有 [图 2]');
+    expect(supplementPreview('看这个 <file key="file_v3_abc" name="a.xlsx"/> 和 [image]', 1)).toBe(
+      '看这个 [文件 1] 和 [图 1]',
+    );
+  });
+
   it('describes attachment-only messages', () => {
     expect(supplementPreview('', 2)).toBe('（2 个附件）');
     expect(supplementPreview('补充', 1)).toBe('（1 个附件）');

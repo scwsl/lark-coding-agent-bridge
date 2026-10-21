@@ -1,4 +1,5 @@
 import type { SupplementTarget } from './active-runs';
+import { mediaPlaceholders } from './media-placeholders';
 
 /**
  * Leading markers that mean "add this to the task that is running" rather
@@ -55,7 +56,7 @@ export function maySupplement(
 
 /** One-line preview for the card's "收到补充" marker (prefix dropped — the marker says it). */
 export function supplementPreview(content: string, attachmentCount: number): string {
-  const text = content
+  const text = mediaPlaceholders(content)
     .replace(/\s+/g, ' ')
     .trim()
     .replace(SUPPLEMENT_PREFIX_TRIM_RE, '');
