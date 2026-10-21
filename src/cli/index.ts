@@ -2,7 +2,14 @@ import { runMonitor } from './commands/monitor';
 import { Command } from 'commander';
 import pkg from '../../package.json';
 import { formatAgentPreflightDiagnostic, getAgentPreflightDiagnostic } from '../agent/preflight';
-import { runClaudeAccountAdd, runClaudeAccountList, runClaudeAccountRemove, runClaudeAccountSet } from './commands/claude-account';
+import {
+  runClaudeAccountAdd,
+  runClaudeAccountLines,
+  runClaudeAccountList,
+  runClaudeAccountOrder,
+  runClaudeAccountRemove,
+  runClaudeAccountSet,
+} from './commands/claude-account';
 import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
@@ -287,24 +294,47 @@ claudeAccount
   .command('add <id>')
   .description('Add an account from a `claude setup-token` token (prompted without echo, or piped on stdin)')
   .option('--label <name>', 'name shown as the reply card Sponsor')
-  .option('--reserve <percent>', "share of the account the bot leaves alone (switch away at 100 - percent)")
+  .option('--five-hour <percent>', "this account's 5-hour window switch line")
+  .option('--weekly <percent>', "this account's weekly window switch line")
   .option('--token-stdin', 'read the token from stdin')
   .option('--no-verify', 'save without a test request')
   .option('--profile <name>', 'profile name (defaults to active profile)')
   .action(
-    async (id: string, opts: { label?: string; reserve?: string; tokenStdin?: boolean; verify?: boolean; profile?: string }) => {
+    async (
+      id: string,
+      opts: { label?: string; fiveHour?: string; weekly?: string; tokenStdin?: boolean; verify?: boolean; profile?: string },
+    ) => {
       await runClaudeAccountAdd(id, opts);
     },
   );
 
 claudeAccount
   .command('set <id>')
-  .description("Change an account's name or reserve (0 removes the reserve) without re-entering its token")
+  .description("Change an account's name or switch lines (0 follows the default) without re-entering its token")
   .option('--label <name>', 'name shown as the reply card Sponsor')
-  .option('--reserve <percent>', 'share of the account the bot leaves alone; 0 for none')
+  .option('--five-hour <percent>', '5-hour window switch line; 0 for the default')
+  .option('--weekly <percent>', 'weekly window switch line; 0 for the default')
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .action(async (id: string, opts: { label?: string; reserve?: string; profile?: string }) => {
+  .action(async (id: string, opts: { label?: string; fiveHour?: string; weekly?: string; profile?: string }) => {
     await runClaudeAccountSet(id, opts);
+  });
+
+claudeAccount
+  .command('lines')
+  .description('Default switch lines for accounts without their own')
+  .option('--five-hour <percent>', '5-hour window switch line')
+  .option('--weekly <percent>', 'weekly window switch line')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (opts: { fiveHour?: string; weekly?: string; profile?: string }) => {
+    await runClaudeAccountLines(opts);
+  });
+
+claudeAccount
+  .command('order <ids...>')
+  .description('Preference order: the accounts named go first, in that order (the first is the main account)')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (ids: string[], opts: { profile?: string }) => {
+    await runClaudeAccountOrder(ids, { profile: opts.profile });
   });
 
 claudeAccount

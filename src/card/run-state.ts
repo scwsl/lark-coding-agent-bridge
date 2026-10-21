@@ -151,10 +151,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       // the refusal that caused it — the task goes on, it is not paused.
       const note: Block = {
         kind: 'text',
-        content:
-          evt.reserveLine !== undefined
-            ? `🔄 **账户 ${evt.switchedFrom} 已用到预留线（${evt.reserveLine}%），已切换到 ${evt.label} 继续**\n\n`
-            : `🔄 **账户 ${evt.switchedFrom} 额度用尽，已切换到 ${evt.label} 继续**\n\n`,
+        content: `🔄 **账户 ${evt.switchedFrom} ${evt.reason ?? '额度用尽'}，已切换到 ${evt.label} 继续**\n\n`,
         streaming: false,
       };
       const { limit: _limit, ...rest } = state;

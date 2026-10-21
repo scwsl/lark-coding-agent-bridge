@@ -6,8 +6,11 @@ import {
   ClaudeAccountPool,
   deleteAccount,
   isValidAccountId,
+  reorderAccounts,
   saveAccount,
   updateAccount,
+  updateDefaultLines,
+  type SwitchLines,
 } from '../../agent/claude/accounts';
 import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
 import { promptPassword } from '../prompt';
@@ -29,7 +32,10 @@ export async function runClaudeAccountList(opts: AccountCliOptions = {}): Promis
   const appPaths = await resolveSecretProfilePaths(opts);
   const pool = new ClaudeAccountPool({ paths: claudeAccountsPaths(appPaths.profileDir) });
   await pool.refresh();
-  console.log(`# profile ${appPaths.profile} 的 Claude 账户（按优先顺序；切换阈值 ${pool.switchAtPercent}%）\n`);
+  const lines = pool.defaultLines;
+  console.log(
+    `# profile ${appPaths.profile} 的 Claude 账户（按优先顺序；默认切换线 5 小时 ${lines.five_hour}% · 本周 ${lines.seven_day}%）\n`,
+  );
   for (const line of accountsReport(pool, await claudeAccountName())) console.log(line.replace(/\*\*/g, ''));
   if (!pool.multi) {
     console.log('\n只有 CLI 自己的登录。添加备用账户：先用备用账户执行 `claude setup-token`，再运行');
@@ -39,9 +45,9 @@ export async function runClaudeAccountList(opts: AccountCliOptions = {}): Promis
 
 export async function runClaudeAccountAdd(
   id: string,
-  opts: AccountCliOptions & { label?: string; reserve?: string; tokenStdin?: boolean; verify?: boolean },
+  opts: AccountCliOptions & LineOptions & { label?: string; tokenStdin?: boolean; verify?: boolean },
 ): Promise<void> {
-  const reservePercent = parseReserve(opts.reserve);
+  const lines = parseLineOptions(opts, true);
   if (!isValidAccountId(id) || id === 'default') {
     console.error('✗ 账号 id 只能用字母、数字、- 和 _（最长 32 位），且不能是 default');
     process.exit(1);
@@ -72,7 +78,7 @@ export async function runClaudeAccountAdd(
   const config = await saveAccount(claudeAccountsPaths(appPaths.profileDir), {
     id,
     ...(opts.label ? { label: opts.label } : {}),
-    ...(reservePercent !== undefined ? { reservePercent } : {}),
+    ...(lines ? { lines } : {}),
     token,
   });
   console.log(`✓ 已保存账户 ${id}（令牌加密存在 profile ${appPaths.profile} 的 keystore）`);
@@ -80,33 +86,68 @@ export async function runClaudeAccountAdd(
   console.log('  运行中的 bridge 会在下一次运行前自动读取，不用重启。');
 }
 
+interface LineOptions {
+  /** 5-hour window line, `98` / `98%`. */
+  fiveHour?: string;
+  /** Weekly window line. */
+  weekly?: string;
+}
+
 export async function runClaudeAccountSet(
   id: string,
-  opts: AccountCliOptions & { label?: string; reserve?: string },
+  opts: AccountCliOptions & LineOptions & { label?: string },
 ): Promise<void> {
-  const reservePercent = parseReserve(opts.reserve);
-  if (opts.label === undefined && reservePercent === undefined) {
-    console.error('✗ 至少给一项：--label <名字> 或 --reserve <百分比>（0 表示不预留）');
+  const lines = parseLineOptions(opts, true);
+  if (opts.label === undefined && !lines) {
+    console.error('✗ 至少给一项：--label <名字>、--five-hour <百分比>、--weekly <百分比>（0 表示跟默认）');
     process.exit(1);
   }
   const appPaths = await resolveSecretProfilePaths(opts);
   await updateAccount(claudeAccountsPaths(appPaths.profileDir), id, {
     ...(opts.label !== undefined ? { label: opts.label } : {}),
-    ...(reservePercent !== undefined ? { reservePercent } : {}),
+    ...(lines ? { lines } : {}),
   });
-  console.log(`✓ 已更新账户 ${id}，运行中的 bridge 下一次运行前生效`);
+  console.log(`✓ 已更新账户 ${id}，运行中的 bridge 下一次运行前生效\n`);
   await runClaudeAccountList(opts);
 }
 
-/** `--reserve 20` / `20%` → 20; absent → undefined; anything else exits. */
-function parseReserve(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = Number(raw.trim().replace(/%$/, ''));
-  if (!Number.isInteger(value) || value < 0 || value > 99) {
-    console.error(`✗ --reserve 要是 0–99 的整数（0 表示不预留）：${raw}`);
+/** The profile's default lines, for accounts without their own. */
+export async function runClaudeAccountLines(opts: AccountCliOptions & LineOptions): Promise<void> {
+  const lines = parseLineOptions(opts, false);
+  if (!lines) {
+    console.error('✗ 至少给一项：--five-hour <百分比>、--weekly <百分比>');
     process.exit(1);
   }
-  return value;
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await updateDefaultLines(claudeAccountsPaths(appPaths.profileDir), lines);
+  console.log('✓ 已更新默认切换线，运行中的 bridge 下一次运行前生效\n');
+  await runClaudeAccountList(opts);
+}
+
+/** Preference order: the accounts named come first, in this order. */
+export async function runClaudeAccountOrder(ids: string[], opts: AccountCliOptions = {}): Promise<void> {
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await reorderAccounts(claudeAccountsPaths(appPaths.profileDir), ids);
+  console.log('✓ 已调整顺序，运行中的 bridge 下一次运行前生效\n');
+  await runClaudeAccountList(opts);
+}
+
+/** `--five-hour 98` / `--weekly 90%`; `0` (when allowed) drops an account's own line. Anything else exits. */
+function parseLineOptions(opts: LineOptions, allowZero: boolean): Partial<SwitchLines> | undefined {
+  const lines: Partial<SwitchLines> = {};
+  for (const [kind, raw] of [
+    ['five_hour', opts.fiveHour],
+    ['seven_day', opts.weekly],
+  ] as const) {
+    if (raw === undefined) continue;
+    const value = Number(raw.trim().replace(/%$/, ''));
+    if (!Number.isInteger(value) || value > 100 || value < (allowZero ? 0 : 1)) {
+      console.error(`✗ 切换线要是 ${allowZero ? '0' : '1'}–100 的整数${allowZero ? '（0 表示跟默认）' : ''}：${raw}`);
+      process.exit(1);
+    }
+    lines[kind] = value;
+  }
+  return Object.keys(lines).length > 0 ? lines : undefined;
 }
 
 export async function runClaudeAccountRemove(id: string, opts: AccountCliOptions = {}): Promise<void> {

@@ -6,6 +6,8 @@ import { failoverPrompt, runWithAccountFailover, SWITCH_LINE_PROMPT } from '../.
 import {
   accountsReport,
   accountSecretId,
+  reorderAccounts,
+  updateDefaultLines,
   claudeAccountsPaths,
   ClaudeAccountPool,
   deleteAccount,
@@ -71,7 +73,7 @@ describe('Claude account list', () => {
     const config = parseAccountsConfig(
       JSON.stringify({ accounts: [{ id: 'b', label: ' Bee ' }, { id: 'bad id' }, { id: 'b' }, 7], switchAtPercent: 400 }),
     );
-    expect(config).toEqual({ switchAtPercent: 98, accounts: [{ id: 'default' }, { id: 'b', label: 'Bee' }] });
+    expect(config).toEqual({ lines: { five_hour: 98, seven_day: 98 }, accounts: [{ id: 'default' }, { id: 'b', label: 'Bee' }] });
     expect(parseAccountsConfig('not json').accounts).toEqual([{ id: 'default' }]);
   });
 
@@ -121,7 +123,7 @@ describe('ClaudeAccountPool', () => {
 
     // A refusal message carries no reset of its own: the earlier one stands.
     pool.observe('b', limit({ blocked: true }));
-    expect(pool.availableAt('b')).toBe(NOW + 2 * HOUR);
+    expect(pool.refusedUntil('b')).toBe(NOW + 2 * HOUR);
 
     now = NOW + HOUR + 1;
     expect(pool.pick()?.id).toBe('default');
@@ -176,9 +178,10 @@ describe('ClaudeAccountPool', () => {
     const { pool } = await poolWith(['b']);
     pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR, windows: [{ kind: 'five_hour', usedPercent: 100, resetsAt: NOW + HOUR }] }));
     const lines = accountsReport(pool, 'scwsl.wang', NOW);
-    expect(lines[0]).toContain('**scwsl.wang**（default）：5 小时窗口 100%');
+    expect(lines[0]).toContain('**scwsl.wang**（主账户，default；切换线 5h 98% · 周 98%）：5 小时窗口 100%');
     expect(lines[0]).toContain('额度用尽');
-    expect(lines[1]).toContain('▶ **b-name**（b）：还没有运行记录');
+    expect(lines[1]).toContain('▶ **b-name**（备用 1，b；');
+    expect(lines[1]).toContain('还没有运行记录');
   });
 });
 
@@ -274,7 +277,7 @@ describe('account failover', () => {
     expect(events.filter((e) => e.type === 'rate_limit')).toEqual([]);
     expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
     expect(events).toContainEqual({ type: 'account', label: 'b-name', switchedFrom: 'scwsl.wang' });
-    expect(pool.availableAt('default')).toBe(NOW + HOUR);
+    expect(pool.refusedUntil('default')).toBe(NOW + HOUR);
     expect(stops).toEqual([]);
 
     const state = events.reduce(reduce, initialState);
@@ -344,7 +347,7 @@ describe('account failover', () => {
     const events = await collect(run);
     expect(spawned).toEqual(['default']);
     expect(events.map((e) => e.type)).toEqual(['account', 'text', 'done', 'rate_limit', 'done']);
-    expect(pool.availableAt('default')).toBe(NOW + HOUR);
+    expect(pool.refusedUntil('default')).toBe(NOW + HOUR);
   });
 
   it('does not switch a run that was stopped', async () => {
@@ -408,14 +411,11 @@ describe('quota across accounts', () => {
   });
 });
 
-/** A pool over `entries` (after `default`), tokens `tok-<id>`. */
-async function poolOf(entries: Array<{ id: string; reservePercent?: number }>) {
+/** A pool over `accounts` in that order (`default` included where listed), tokens `tok-<id>`. */
+async function poolInOrder(accounts: Array<Record<string, unknown>>, lines?: Record<string, number>) {
   const dir = await tmp();
   const paths = claudeAccountsPaths(dir);
-  await writeFile(
-    paths.configFile,
-    JSON.stringify({ accounts: [{ id: 'default' }, ...entries.map((e) => ({ ...e, label: e.id === 'mia' ? 'Mia' : e.id }))] }),
-  );
+  await writeFile(paths.configFile, JSON.stringify({ ...(lines ? { lines } : {}), accounts }));
   const pool = new ClaudeAccountPool({
     paths,
     now: () => NOW,
@@ -427,83 +427,128 @@ async function poolOf(entries: Array<{ id: string; reservePercent?: number }>) {
 }
 
 const fiveHour = (usedPercent: number) => limit({ windows: [{ kind: 'five_hour', usedPercent, resetsAt: NOW + HOUR }] });
+const weekly = (usedPercent: number) => limit({ windows: [{ kind: 'seven_day', usedPercent, resetsAt: NOW + 48 * HOUR }] });
 
-describe('account reserve', () => {
-  it('moves off an account at 100 - reserve and never falls back onto it', async () => {
-    const { pool } = await poolOf([{ id: 'mia', reservePercent: 20 }]);
-    expect(pool.limitOf('mia')).toBe(80);
-    expect(pool.limitOf('default')).toBe(98);
-    pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
-    pool.observe('mia', fiveHour(79));
-    expect(pool.pick()?.id).toBe('mia');
-    pool.observe('mia', fiveHour(80));
-    // Mia is past her line: the refused main account is tried again rather than her reserve.
-    expect(pool.pick()?.id).toBe('default');
-    expect(pool.pickRunnable()).toBeUndefined();
-    expect(pool.pick(new Set(['default']))).toBeUndefined();
+/** shilong.wang (main) → yu.ou (the CLI login) → Mia; 5h 98 / week 90, Mia's 5h at 80. */
+const ROSTER = [
+  { id: 'backup', label: 'shilong.wang' },
+  { id: 'default' },
+  { id: 'backup2', label: 'Mia', lines: { five_hour: 80 } },
+];
+
+describe('switch lines and rounds', () => {
+  it('reads per-window lines, per account or the profile default', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    expect(pool.lineOf('backup', 'five_hour')).toBe(98);
+    expect(pool.lineOf('backup2', 'five_hour')).toBe(80);
+    expect(pool.lineOf('backup2', 'seven_day')).toBe(90);
+    expect(pool.accounts().map((a) => a.id)).toEqual(['backup', 'default', 'backup2']);
   });
 
-  it('is set, changed and removed without touching the token', async () => {
+  it('uses accounts below their lines in order, then each in order until refused, then the soonest reset', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    expect(pool.pick()?.id).toBe('backup');
+    pool.observe('backup', fiveHour(98));
+    expect(pool.pick()?.id).toBe('default');
+    pool.observe('default', weekly(90));
+    expect(pool.pick()?.id).toBe('backup2');
+    pool.observe('backup2', fiveHour(80));
+    // Everyone is past a line: start over from the main account and use it up.
+    expect(pool.pickReady()).toBeUndefined();
+    expect(pool.pick()?.id).toBe('backup');
+    pool.observe('backup', limit({ blocked: true, resetsAt: NOW + 3 * HOUR }));
+    expect(pool.pick()?.id).toBe('default');
+    pool.observe('default', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
+    expect(pool.pick()?.id).toBe('backup2');
+    pool.observe('backup2', limit({ blocked: true, resetsAt: NOW + 4 * HOUR }));
+    // All refused: the soonest reset.
+    expect(pool.pickRunnable()).toBeUndefined();
+    expect(pool.nextRunnableAt()).toBe(NOW + 2 * HOUR);
+    expect(pool.pick()?.id).toBe('default');
+  });
+
+  it('reads the older single threshold and reserve settings', async () => {
+    const { pool } = await poolInOrder([{ id: 'default' }, { id: 'mia', reservePercent: 20 }], undefined);
+    expect(pool.lineOf('mia', 'five_hour')).toBe(80);
+    expect(pool.lineOf('mia', 'seven_day')).toBe(80);
+    expect(parseAccountsConfig(JSON.stringify({ switchAtPercent: 95 })).lines).toEqual({ five_hour: 95, seven_day: 95 });
+  });
+
+  it('sets lines, defaults and order without touching tokens', async () => {
     const dir = await tmp();
     const paths = claudeAccountsPaths(dir);
-    await saveAccount(paths, { id: 'backup2', token: 'tok', reservePercent: 20 });
-    expect(readAccountsConfig(paths).accounts[1]).toEqual({ id: 'backup2', reservePercent: 20 });
-    await updateAccount(paths, 'backup2', { label: 'Mia', reservePercent: 30 });
-    expect(readAccountsConfig(paths).accounts[1]).toEqual({ id: 'backup2', label: 'Mia', reservePercent: 30 });
-    await updateAccount(paths, 'backup2', { reservePercent: 0 });
-    expect(readAccountsConfig(paths).accounts[1]).toEqual({ id: 'backup2', label: 'Mia' });
-    await expect(updateAccount(paths, 'backup2', { reservePercent: 100 })).rejects.toThrow();
-    await expect(updateAccount(paths, 'nobody', { label: 'x' })).rejects.toThrow();
-    expect(await getSecret(accountSecretId('backup2'), paths.keystore)).toBe('tok');
+    await saveAccount(paths, { id: 'backup', token: 'tok-a', label: 'shilong.wang' });
+    await saveAccount(paths, { id: 'backup2', token: 'tok-b', lines: { five_hour: 80 } });
+    await updateDefaultLines(paths, { five_hour: 98, seven_day: 90 });
+    await updateAccount(paths, 'backup2', { label: 'Mia', lines: { seven_day: 85 } });
+    await reorderAccounts(paths, ['backup', 'default']);
+    let config = readAccountsConfig(paths);
+    expect(config.lines).toEqual({ five_hour: 98, seven_day: 90 });
+    expect(config.accounts).toEqual([
+      { id: 'backup', label: 'shilong.wang' },
+      { id: 'default' },
+      { id: 'backup2', label: 'Mia', lines: { five_hour: 80, seven_day: 85 } },
+    ]);
+    await updateAccount(paths, 'backup2', { lines: { five_hour: 0, seven_day: 0 } });
+    config = readAccountsConfig(paths);
+    expect(config.accounts[2]).toEqual({ id: 'backup2', label: 'Mia' });
+    await expect(updateAccount(paths, 'backup2', { lines: { five_hour: 101 } })).rejects.toThrow();
+    await expect(reorderAccounts(paths, ['nobody'])).rejects.toThrow();
+    expect(await getSecret(accountSecretId('backup2'), paths.keystore)).toBe('tok-b');
   });
 
-  it('shows the reserve in the /usage report', async () => {
-    const { pool } = await poolOf([{ id: 'mia', reservePercent: 20 }]);
-    pool.observe('mia', fiveHour(85));
-    const line = accountsReport(pool, 'yu.ou', NOW)[1]!;
-    expect(line).toContain('**Mia**（mia）（预留 20%，用到 80% 切走）');
-    expect(line).toContain('已到预留线');
+  it('reports roles, lines and who is past a line', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup2', fiveHour(85));
+    const lines = accountsReport(pool, 'yu.ou', NOW);
+    expect(lines[0]).toContain('▶ **shilong.wang**（主账户，backup；切换线 5h 98% · 周 90%）');
+    expect(lines[1]).toContain('**yu.ou**（备用 1，default；');
+    expect(lines[2]).toContain('**Mia**（备用 2，backup2；切换线 5h 80% · 周 90%）：5 小时窗口 85%');
+    expect(lines[2]).toContain('已过5 小时窗口切换线');
   });
 
-  it('a run past the line moves to the next account between steps', async () => {
-    const { pool } = await poolOf([{ id: 'mia', reservePercent: 20 }, { id: 'b' }]);
-    pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
+  it('a run past its line moves to an account below its lines between steps', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', limit({ blocked: true, resetsAt: NOW + HOUR }));
+    pool.observe('default', weekly(95));
+    // Round 1 gives Mia; her report says 85%, and the main account frees up meanwhile.
     const calls: Array<{ account: PickedAccount; opts: AgentRunOptions }> = [];
     const stops: string[] = [];
     const run = runWithAccountFailover(OPTS, {
       pool,
       spawn: (opts, account) => {
         calls.push({ account, opts });
-        return calls.length === 1
-          ? fakeRun(
-              [
-                { type: 'system', sessionId: 's1' },
-                { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
-                fiveHour(85),
-                { type: 'tool_result', id: 't1', output: 'ok', isError: false },
-                { type: 'text', delta: 'must not run on Mia' },
-                { type: 'done', sessionId: 's1', terminationReason: 'normal' },
-              ],
-              stops,
-            )
-          : fakeRun([{ type: 'text', delta: 'finished on b' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+        if (calls.length === 1) {
+          pool.observe('backup', fiveHour(10));
+          return fakeRun(
+            [
+              { type: 'system', sessionId: 's1' },
+              { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+              fiveHour(85),
+              { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+              { type: 'text', delta: 'must not run on Mia' },
+              { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+            ],
+            stops,
+          );
+        }
+        return fakeRun([{ type: 'text', delta: 'finished' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
       },
       labelOf: async (account) => account.label ?? account.id,
     });
     const events = await collect(run);
-    expect(calls.map((c) => c.account.id)).toEqual(['mia', 'b']);
+    expect(calls.map((c) => c.account.id)).toEqual(['backup2', 'backup']);
     expect(calls[1]!.opts).toMatchObject({ sessionId: 's1', prompt: SWITCH_LINE_PROMPT });
     expect(stops).toEqual(['stop']);
     expect(events).not.toContainEqual({ type: 'text', delta: 'must not run on Mia' });
-    expect(events).toContainEqual({ type: 'account', label: 'b', switchedFrom: 'Mia', reserveLine: 80 });
     const card = JSON.stringify(renderCard(events.reduce(reduce, initialState), { meta: { title: 'Occam' } }));
-    expect(card).toContain('已用到预留线（80%），已切换到 b');
-    expect(card).toContain('Sponsor: b');
+    expect(card).toContain('账户 Mia 5 小时窗口用量到了 80% 的切换线，已切换到 shilong.wang 继续');
+    expect(card).toContain('Sponsor: shilong.wang');
   });
 
   it('waits for a quiet point: no switch while a tool or background task is running', async () => {
-    const { pool } = await poolOf([{ id: 'mia', reservePercent: 20 }, { id: 'b' }]);
-    pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', limit({ blocked: true, resetsAt: NOW + HOUR }));
     const spawned: string[] = [];
     const run = runWithAccountFailover(OPTS, {
       pool,
@@ -513,11 +558,11 @@ describe('account reserve', () => {
           ? fakeRun([
               { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
               { type: 'tool_use', id: 't2', name: 'Bash', input: {} },
-              fiveHour(85),
+              fiveHour(99),
               { type: 'background', count: 1 },
               { type: 'tool_result', id: 't1', output: '', isError: false },
               { type: 'tool_result', id: 't2', output: '', isError: false },
-              { type: 'text', delta: 'still on Mia' },
+              { type: 'text', delta: 'still here' },
               { type: 'background', count: 0 },
               { type: 'tool_use', id: 't3', name: 'Read', input: {} },
               { type: 'tool_result', id: 't3', output: '', isError: false },
@@ -529,14 +574,15 @@ describe('account reserve', () => {
       labelOf: async (account) => account.label ?? account.id,
     });
     const events = await collect(run);
-    expect(spawned).toEqual(['mia', 'b']);
-    expect(events).toContainEqual({ type: 'text', delta: 'still on Mia' });
+    expect(spawned).toEqual(['default', 'backup2']);
+    expect(events).toContainEqual({ type: 'text', delta: 'still here' });
     expect(events).not.toContainEqual({ type: 'text', delta: 'not reached' });
   });
 
-  it('pauses rather than spend the reserve when no other account can run', async () => {
-    const { pool } = await poolOf([{ id: 'mia', reservePercent: 20 }]);
-    pool.observe('default', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
+  it('with every account past a line, a run stays put and uses its account up', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('default', weekly(93));
+    pool.observe('backup2', fiveHour(82));
     const spawned: string[] = [];
     const run = runWithAccountFailover(OPTS, {
       pool,
@@ -544,43 +590,36 @@ describe('account reserve', () => {
         spawned.push(account.id);
         return fakeRun([
           { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
-          fiveHour(81),
+          fiveHour(99),
           { type: 'tool_result', id: 't1', output: '', isError: false },
-          { type: 'text', delta: 'not reached' },
+          { type: 'text', delta: 'kept going' },
           { type: 'done', terminationReason: 'normal' },
         ]);
       },
       labelOf: async (account) => account.label ?? account.id,
     });
     const events = await collect(run);
-    expect(spawned).toEqual(['mia']);
-    const state = events.reduce(reduce, initialState);
-    expect(state.terminal).toBe('paused');
-    // Mia's window frees her first (1h), before the main account's refusal ends (2h).
-    expect(state.limit?.resetsAt).toBe(NOW + HOUR);
-    expect(state.limit?.message).toContain('预留线');
+    expect(spawned).toEqual(['backup']);
+    expect(events).toContainEqual({ type: 'text', delta: 'kept going' });
   });
 
-  it('does not start at all when only reserved accounts past their line are left', async () => {
-    const { pool, paths } = await poolOf([{ id: 'mia', reservePercent: 20 }]);
-    await updateAccount(paths, 'default', { reservePercent: 10 });
-    const later = new Date(Date.now() + 5_000);
-    await utimes(paths.configFile, later, later);
-    await pool.refresh();
-    pool.observe('default', fiveHour(95));
-    pool.observe('mia', fiveHour(90));
+  it('a refusal in the second round moves on to the next account that is not refused', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', fiveHour(99));
+    pool.observe('default', weekly(95));
+    pool.observe('backup2', fiveHour(85));
     const spawned: string[] = [];
     const run = runWithAccountFailover(OPTS, {
       pool,
       spawn: (_opts, account) => {
         spawned.push(account.id);
-        return fakeRun([{ type: 'done', terminationReason: 'normal' }]);
+        return spawned.length === 1 ? fakeRun(refused) : fakeRun([{ type: 'done', terminationReason: 'normal' }]);
       },
-      labelOf: async () => 'x',
+      labelOf: async (account) => account.label ?? account.id,
     });
-    const state = (await collect(run)).reduce(reduce, initialState);
-    expect(spawned).toEqual([]);
-    expect(state.terminal).toBe('paused');
-    expect(state.limit?.resetsAt).toBe(NOW + HOUR);
+    const events = await collect(run);
+    expect(spawned).toEqual(['backup', 'default']);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'default', switchedFrom: 'shilong.wang' }));
+    expect(events.reduce(reduce, initialState).terminal).toBe('done');
   });
 });

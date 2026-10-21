@@ -1,6 +1,6 @@
 import { log } from '../../core/logger';
 import type { AgentEvent, AgentRun, AgentRunOptions } from '../types';
-import type { ClaudeAccountPool, PickedAccount } from './accounts';
+import { WINDOW_LABELS, type ClaudeAccountPool, type PickedAccount } from './accounts';
 
 type RateLimitEvent = Extract<AgentEvent, { type: 'rate_limit' }>;
 
@@ -26,11 +26,11 @@ export interface AccountFailoverDeps {
  *   on that account, with a note to pick up where the last one stopped.
  *   Otherwise the held events go out unchanged and the run ends `paused`.
  * - **Past its line**: Claude reports the quota once per message, after the
- *   first request. When that report puts the account at or past its switch
- *   line, the run moves at the next point where no tool call, subagent or
- *   background task is in flight — stopping there loses nothing. An account
- *   with a reserve that has no other account to move to pauses there instead
- *   of eating into the reserve.
+ *   first request. When that report puts the account at or past a switch
+ *   line and another account is still below its lines, the run moves at the
+ *   next point where no tool call, subagent or background task is in flight —
+ *   stopping there loses nothing. With every account past a line it stays
+ *   put: accounts are then used up in order, and only a refusal moves it.
  *
  * A refusal the agent works past (extra usage, a fallback model) is passed
  * through as soon as work resumes. Nothing moves once the user's turn has
@@ -38,7 +38,7 @@ export interface AccountFailoverDeps {
  */
 export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailoverDeps): AgentRun {
   let account = deps.pool.pick();
-  if (!account) return waitingRun(opts, deps.pool);
+  if (!account) throw new Error('no Claude account to run on');
   let current = deps.spawn(opts, account);
   let stopped = false;
   const tried = new Set<string>();
@@ -46,7 +46,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
   async function* events(): AsyncGenerator<AgentEvent> {
     let sessionId = opts.sessionId;
     let switchedFrom: string | undefined;
-    let reserveLine: number | undefined;
+    let reason: string | undefined;
     for (;;) {
       const attempt = current;
       const on = account!;
@@ -60,7 +60,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
           type: 'account',
           label,
           ...(switchedFrom ? { switchedFrom } : {}),
-          ...(switchedFrom && reserveLine !== undefined ? { reserveLine } : {}),
+          ...(switchedFrom && reason ? { reason } : {}),
         };
       }
 
@@ -74,7 +74,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       let pastLine = false;
       const inFlight = new Set<string>();
       let background = 0;
-      let leave: { to: PickedAccount | undefined } | undefined;
+      let leave: PickedAccount | undefined;
 
       for await (const evt of attempt.events) {
         if (evt.type === 'rate_limit') {
@@ -104,37 +104,26 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         if (evt.type === 'tool_result') {
           inFlight.delete(evt.id);
           if (pastLine && !refusal && !stopped && !turnEnded && inFlight.size === 0 && background === 0) {
-            // A reserve is worth moving to any account still allowed to run;
-            // a plain switch line only to one that has room.
-            const exclude = new Set([...tried, on.id]);
-            const to = deps.pool.isReserved(on.id) ? deps.pool.pickRunnable(exclude) : deps.pool.pickReady(exclude);
-            if (to || deps.pool.isReserved(on.id)) {
-              leave = { to };
-              break;
-            }
-            // Nowhere to go and nothing to protect: carry on here.
+            leave = deps.pool.pickReady(new Set([...tried, on.id]));
+            if (leave) break;
+            // Every other account is past a line too: use this one up.
             pastLine = false;
           }
         }
       }
 
       if (leave) {
-        log.info('agent', 'account-leave', { runId: opts.runId, from: on.id, to: leave.to?.id ?? null, reason: 'switch-line' });
+        const line = deps.pool.pastLine(on.id);
+        log.info('agent', 'account-leave', { runId: opts.runId, from: on.id, to: leave.id, window: line?.kind ?? null });
         await attempt.stop();
         if (stopped) {
           yield { type: 'done', ...(sessionId ? { sessionId } : {}), terminationReason: 'interrupted' };
           return;
         }
-        if (!leave.to) {
-          // Only the reserve is left: stop here and wait for an account to free up.
-          yield reserveWait(deps.pool, label);
-          yield { type: 'done', ...(sessionId ? { sessionId } : {}), terminationReason: 'normal' };
-          return;
-        }
         switchedFrom = label;
-        reserveLine = deps.pool.limitOf(on.id);
-        account = leave.to;
-        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave.to);
+        reason = line ? `${WINDOW_LABELS[line.kind]}用量到了 ${line.line}% 的切换线` : '到了切换线';
+        account = leave;
+        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave);
         continue;
       }
 
@@ -142,7 +131,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         yield* held;
         return;
       }
-      const next = stopped || wasInterrupted(held) ? undefined : deps.pool.pickReady(tried);
+      const next = stopped || wasInterrupted(held) ? undefined : deps.pool.pickRunnable(tried);
       if (!next) {
         yield soonestReset(refusal, deps.pool);
         yield* held;
@@ -156,7 +145,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         return;
       }
       switchedFrom = label;
-      reserveLine = undefined;
+      reason = undefined;
       account = next;
       current = deps.spawn(
         { ...opts, ...(sessionId ? { sessionId } : {}), prompt: failoverPrompt(opts.prompt) },
@@ -201,36 +190,6 @@ export const SWITCH_LINE_PROMPT = [
   '请接着完成用户最后一条消息的请求，不要重复已经做完的步骤，也不要提起这次切换。',
 ].join('\n');
 
-/**
- * Every account left is held back by its reserve: nothing runs, the task
- * waits (and is resumed automatically) until one frees up.
- */
-function waitingRun(opts: AgentRunOptions, pool: ClaudeAccountPool): AgentRun {
-  log.info('agent', 'account-wait', { runId: opts.runId, until: pool.nextFreeAt() ?? null });
-  return {
-    runId: opts.runId,
-    events: (async function* (): AsyncGenerator<AgentEvent> {
-      yield reserveWait(pool);
-      yield { type: 'done', ...(opts.sessionId ? { sessionId: opts.sessionId } : {}), terminationReason: 'normal' };
-    })(),
-    stop: async () => {},
-    waitForExit: async () => true,
-  };
-}
-
-function reserveWait(pool: ClaudeAccountPool, from?: string): RateLimitEvent {
-  const resetsAt = pool.nextFreeAt();
-  return {
-    type: 'rate_limit',
-    blocked: true,
-    ...(resetsAt !== undefined ? { resetsAt } : {}),
-    message: from
-      ? `账户 ${from} 已用到预留线，其他账户也没有余量，任务先暂停，等有账户恢复后继续。`
-      : '所有 Claude 账户都已用到上限（含为他人预留的部分），任务先暂停，等有账户恢复后继续。',
-    at: Date.now(),
-  };
-}
-
 function mergeRefusal(prev: RateLimitEvent | undefined, next: RateLimitEvent): RateLimitEvent {
   if (!prev) return next;
   return {
@@ -249,7 +208,7 @@ function mergeRefusal(prev: RateLimitEvent | undefined, next: RateLimitEvent): R
  */
 function soonestReset(refusal: RateLimitEvent, pool: ClaudeAccountPool): RateLimitEvent {
   if (!pool.multi) return refusal;
-  const freeAt = pool.nextFreeAt();
+  const freeAt = pool.nextRunnableAt();
   if (freeAt === undefined) return refusal;
   if (refusal.resetsAt !== undefined && refusal.resetsAt <= freeAt) return refusal;
   return { ...refusal, resetsAt: freeAt };

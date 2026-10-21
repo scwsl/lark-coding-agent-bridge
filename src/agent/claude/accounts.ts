@@ -8,7 +8,7 @@ import type { QuotaReading, QuotaWindow } from '../quota';
 
 /**
  * Several Claude subscription accounts behind one profile, so a run can move
- * to another account when the current one's quota runs out.
+ * to another account when the current one is full.
  *
  * Only the credential differs between accounts: an extra account is a
  * long-lived token from `claude setup-token`, handed to the claude process as
@@ -17,9 +17,17 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  * own, so a conversation carries on across accounts. `default` is the CLI's
  * own login and is always on the list.
  *
+ * Which account a run gets, in rounds:
+ *   1. the first, in the list's order, still below its switch lines (one per
+ *      window: 5-hour and weekly; per account or the profile's default);
+ *   2. once every account is past a line: the first, in order again, that
+ *      has not been refused — accounts are used up one after another;
+ *   3. once every account has been refused: the run waits for the soonest
+ *      reset (it pauses and resumes on its own).
+ *
  * Files in the profile directory:
  *   - `claude-accounts.json`: the list, in order of preference, and the
- *     switch threshold. Re-read whenever it changes, no restart needed.
+ *     switch lines. Re-read whenever it changes, no restart needed.
  *   - `claude-accounts-state.json`: what each account's last run said about
  *     its quota (`rate_limit_event`), and until when a refusal benched it.
  *   - the profile keystore (`secrets.enc`) holds the tokens, as
@@ -27,29 +35,29 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  */
 
 export const DEFAULT_ACCOUNT_ID = 'default';
-export const DEFAULT_SWITCH_AT_PERCENT = 98;
 /** How long a refusal benches an account when the CLI did not say when it resets. */
 const UNKNOWN_RESET_MS = 60 * 60_000;
-/** The windows that limit every model; model-specific weekly windows only count when they refuse. */
-const ACCOUNT_WINDOWS: Record<string, string> = { five_hour: '5 小时窗口', seven_day: '本周' };
 const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+
+/** The windows that limit every model; model-specific weekly windows only count when they refuse. */
+export type WindowKind = 'five_hour' | 'seven_day';
+export const WINDOW_KINDS: readonly WindowKind[] = ['five_hour', 'seven_day'];
+export const WINDOW_LABELS: Record<WindowKind, string> = { five_hour: '5 小时窗口', seven_day: '本周' };
+
+/** Fill (1–100%) per window at which runs move to another account. */
+export type SwitchLines = Record<WindowKind, number>;
+export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
 
 export interface ClaudeAccountEntry {
   id: string;
   /** Shown on the reply card's `Sponsor:` line. The CLI's own login reads its name from `claude auth status`. */
   label?: string;
-  /**
-   * Share of the account (1–99%) the bot must leave alone — e.g. someone
-   * else's own account lent as a backup. Runs leave it once a window reaches
-   * `100 - reservePercent`, and it is never used past that line: with no
-   * other account left the task pauses instead.
-   */
-  reservePercent?: number;
+  /** This account's own lines; a window left out follows the profile's. */
+  lines?: Partial<SwitchLines>;
 }
 
 export interface ClaudeAccountsConfig {
-  /** Move off an account before running once a window is this full (0–100). */
-  switchAtPercent: number;
+  lines: SwitchLines;
   /** Preference order; `default` is always present. */
   accounts: ClaudeAccountEntry[];
 }
@@ -99,43 +107,66 @@ export function isValidAccountId(id: string): boolean {
   return ACCOUNT_ID.test(id);
 }
 
-export function isValidReserve(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 99;
+export function isValidLine(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 100;
 }
 
 export function defaultAccountsConfig(): ClaudeAccountsConfig {
-  return { switchAtPercent: DEFAULT_SWITCH_AT_PERCENT, accounts: [{ id: DEFAULT_ACCOUNT_ID }] };
+  return { lines: { ...DEFAULT_LINES }, accounts: [{ id: DEFAULT_ACCOUNT_ID }] };
 }
 
-/** Tolerant parse: malformed entries are dropped, `default` is added in front when missing. */
+/**
+ * Tolerant parse: malformed entries are dropped, `default` is added in front
+ * when missing. Older files' `switchAtPercent` (one line for both windows) and
+ * `reservePercent` (lines at 100 − reserve) still read.
+ */
 export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const config = defaultAccountsConfig();
-  let raw: { switchAtPercent?: unknown; accounts?: unknown };
+  let raw: { lines?: unknown; switchAtPercent?: unknown; accounts?: unknown };
   try {
     raw = JSON.parse(text) as typeof raw;
   } catch {
     return config;
   }
   if (!raw || typeof raw !== 'object') return config;
-  if (typeof raw.switchAtPercent === 'number' && raw.switchAtPercent > 0 && raw.switchAtPercent <= 100) {
-    config.switchAtPercent = raw.switchAtPercent;
-  }
+  if (isValidLine(raw.switchAtPercent)) config.lines = { five_hour: raw.switchAtPercent, seven_day: raw.switchAtPercent };
+  config.lines = { ...config.lines, ...parseLines(raw.lines) };
   const accounts: ClaudeAccountEntry[] = [];
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
     if (!item || typeof item !== 'object') continue;
-    const { id, label, reservePercent } = item as { id?: unknown; label?: unknown; reservePercent?: unknown };
+    const { id, label, lines, reservePercent } = item as {
+      id?: unknown;
+      label?: unknown;
+      lines?: unknown;
+      reservePercent?: unknown;
+    };
     if (typeof id !== 'string' || !isValidAccountId(id) || seen.has(id)) continue;
     seen.add(id);
+    const legacy =
+      typeof reservePercent === 'number' && isValidLine(100 - reservePercent)
+        ? { five_hour: 100 - reservePercent, seven_day: 100 - reservePercent }
+        : {};
+    const own = { ...legacy, ...parseLines(lines) };
     accounts.push({
       id,
       ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
-      ...(isValidReserve(reservePercent) ? { reservePercent } : {}),
+      ...(Object.keys(own).length > 0 ? { lines: own } : {}),
     });
   }
   if (!seen.has(DEFAULT_ACCOUNT_ID)) accounts.unshift({ id: DEFAULT_ACCOUNT_ID });
   config.accounts = accounts;
   return config;
+}
+
+function parseLines(raw: unknown): Partial<SwitchLines> {
+  if (!raw || typeof raw !== 'object') return {};
+  const lines: Partial<SwitchLines> = {};
+  for (const kind of WINDOW_KINDS) {
+    const value = (raw as Record<string, unknown>)[kind];
+    if (isValidLine(value)) lines[kind] = value;
+  }
+  return lines;
 }
 
 export function readAccountsConfig(paths: ClaudeAccountsPaths): ClaudeAccountsConfig {
@@ -150,31 +181,28 @@ async function writeAccountsConfig(paths: ClaudeAccountsPaths, config: ClaudeAcc
   await writeFileAtomic(paths.configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** Add (or replace the token / label of) an account; new ones go last in the preference order. */
+export interface AccountChanges {
+  label?: string;
+  /** Per window; `0` drops the account's own line (back to the profile's). */
+  lines?: Partial<Record<WindowKind, number>>;
+}
+
+/** Add (or replace the token of) an account; new ones go last in the preference order. */
 export async function saveAccount(
   paths: ClaudeAccountsPaths,
-  account: { id: string; label?: string; token: string; reservePercent?: number },
+  account: { id: string; token: string } & AccountChanges,
 ): Promise<ClaudeAccountsConfig> {
   if (account.id === DEFAULT_ACCOUNT_ID) throw new Error('default 是 CLI 自己的登录，不能存令牌');
   if (!isValidAccountId(account.id)) throw new Error(`账号 id 只能用字母、数字、- 和 _（最长 32 位）：${account.id}`);
-  await setSecret(accountSecretId(account.id), account.token, paths.keystore);
   const config = readAccountsConfig(paths);
   if (!config.accounts.some((a) => a.id === account.id)) config.accounts.push({ id: account.id });
-  applyAccountChanges(config, account.id, {
-    ...(account.label !== undefined ? { label: account.label } : {}),
-    ...(account.reservePercent !== undefined ? { reservePercent: account.reservePercent } : {}),
-  });
+  applyAccountChanges(config, account.id, account);
+  await setSecret(accountSecretId(account.id), account.token, paths.keystore);
   await writeAccountsConfig(paths, config);
   return config;
 }
 
-export interface AccountChanges {
-  label?: string;
-  /** `0` removes the reserve. */
-  reservePercent?: number;
-}
-
-/** Change an account's name or reserve without touching its token. */
+/** Change an account's name or lines without touching its token. */
 export async function updateAccount(
   paths: ClaudeAccountsPaths,
   id: string,
@@ -187,15 +215,51 @@ export async function updateAccount(
   return config;
 }
 
+/** The profile's lines, for every account without its own. */
+export async function updateDefaultLines(
+  paths: ClaudeAccountsPaths,
+  lines: Partial<SwitchLines>,
+): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  for (const kind of WINDOW_KINDS) {
+    const value = lines[kind];
+    if (value === undefined) continue;
+    if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
+    config.lines[kind] = value;
+  }
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
+/** Put the named accounts first, in the order given; the rest keep their order after them. */
+export async function reorderAccounts(paths: ClaudeAccountsPaths, ids: string[]): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  const known = new Set(config.accounts.map((a) => a.id));
+  const unknown = ids.filter((id) => !known.has(id));
+  if (unknown.length > 0) throw new Error(`没有账户：${unknown.join(', ')}`);
+  if (new Set(ids).size !== ids.length) throw new Error('账户重复了');
+  const first = ids.map((id) => config.accounts.find((a) => a.id === id)!);
+  config.accounts = [...first, ...config.accounts.filter((a) => !ids.includes(a.id))];
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
 function applyAccountChanges(config: ClaudeAccountsConfig, id: string, changes: AccountChanges): void {
   const entry = config.accounts.find((a) => a.id === id)!;
   const label = changes.label?.trim();
   if (label) entry.label = label;
-  if (changes.reservePercent !== undefined) {
-    if (changes.reservePercent === 0) delete entry.reservePercent;
-    else if (isValidReserve(changes.reservePercent)) entry.reservePercent = changes.reservePercent;
-    else throw new Error(`预留比例要在 1–99 之间（0 表示不预留）：${changes.reservePercent}`);
+  for (const kind of WINDOW_KINDS) {
+    const value = changes.lines?.[kind];
+    if (value === undefined) continue;
+    if (value === 0) {
+      if (entry.lines) delete entry.lines[kind];
+    } else if (isValidLine(value)) {
+      entry.lines = { ...entry.lines, [kind]: value };
+    } else {
+      throw new Error(`切换线要在 1–100 之间（0 表示跟默认）：${value}`);
+    }
   }
+  if (entry.lines && Object.keys(entry.lines).length === 0) delete entry.lines;
 }
 
 export async function deleteAccount(paths: ClaudeAccountsPaths, id: string): Promise<boolean> {
@@ -257,19 +321,14 @@ export class ClaudeAccountPool {
     this.configStamp = stamp;
   }
 
-  get switchAtPercent(): number {
-    return this.config.switchAtPercent;
+  /** The profile's lines (accounts without their own follow these). */
+  get defaultLines(): SwitchLines {
+    return { ...this.config.lines };
   }
 
-  /** The fill (0–100) at which runs leave the account: its reserve line, else the profile's threshold. */
-  limitOf(id: string): number {
-    const reserve = this.config.accounts.find((a) => a.id === id)?.reservePercent;
-    return reserve !== undefined ? 100 - reserve : this.config.switchAtPercent;
-  }
-
-  /** The account keeps a reserve the bot must never dip into. */
-  isReserved(id: string): boolean {
-    return this.config.accounts.find((a) => a.id === id)?.reservePercent !== undefined;
+  /** The line (1–100) at which runs leave the account in `kind`'s window. */
+  lineOf(id: string, kind: WindowKind): number {
+    return this.config.accounts.find((a) => a.id === id)?.lines?.[kind] ?? this.config.lines[kind];
   }
 
   /** Accounts that can run, in order of preference: the CLI's own login and those with a token. */
@@ -285,73 +344,83 @@ export class ClaudeAccountPool {
   }
 
   /**
-   * The account a new run should use: the first in preference order with room
-   * left — so the main account is back in use as soon as its window resets.
-   * When none has room, the one that frees up first, leaving out accounts
-   * with a reserve: those are never used past their line. Undefined when
-   * only such accounts remain — the run has to wait.
+   * The account a new run should use (see the rounds in the module comment):
+   * below its lines, else not refused, else the one whose refusal ends first —
+   * tried anyway, the refusal may be over (the run pauses if it is not).
    */
   pick(exclude?: ReadonlySet<string>): PickedAccount | undefined {
-    return this.pickRunnable(exclude) ?? this.fallbacks(exclude)[0];
+    const now = this.now();
+    return (
+      this.pickRunnable(exclude) ??
+      this.accounts()
+        .filter((a) => !exclude?.has(a.id))
+        .sort((a, b) => (this.refusedUntil(a.id, now) ?? now) - (this.refusedUntil(b.id, now) ?? now))[0]
+    );
   }
 
-  /**
-   * Like {@link pick}, but never an account that was refused: one with room,
-   * else one without a reserve that is only past its switch line.
-   */
+  /** Round 1, else round 2: never an account that is still refused. */
   pickRunnable(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
-    const ready = this.accounts().find((a) => !exclude?.has(a.id) && this.availableAt(a.id, now) <= now);
-    return ready ?? this.fallbacks(exclude).find((a) => !this.isRefused(a.id, now));
+    return this.pickReady(exclude) ?? this.accounts().find((a) => !exclude?.has(a.id) && !this.isRefused(a.id, now));
   }
 
-  /** Accounts without a reserve, soonest free first. */
-  private fallbacks(exclude?: ReadonlySet<string>): PickedAccount[] {
+  /** Round 1 only: an account below all its lines. */
+  pickReady(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
-    return this.accounts()
-      .filter((a) => !exclude?.has(a.id) && !this.isReserved(a.id))
-      .sort((a, b) => this.availableAt(a.id, now) - this.availableAt(b.id, now));
+    return this.accounts().find((a) => !exclude?.has(a.id) && this.underLinesAt(a.id, now) <= now);
+  }
+
+  /** The account is below all its lines and not refused right now. */
+  hasRoom(id: string): boolean {
+    const now = this.now();
+    return this.underLinesAt(id, now) <= now;
   }
 
   /** A request on the account was refused and its window has not reset yet. */
   isRefused(id: string, now = this.now()): boolean {
+    return this.refusedUntil(id, now) !== undefined;
+  }
+
+  /** When the account's refusal ends; undefined when it is not refused. */
+  refusedUntil(id: string, now = this.now()): number | undefined {
     const until = this.loadState()[id]?.blockedUntil;
-    return until !== undefined && until > now;
+    return until !== undefined && until > now ? until : undefined;
   }
 
-  /** Like {@link pick}, but only an account that has room right now. */
-  pickReady(exclude?: ReadonlySet<string>): PickedAccount | undefined {
-    const now = this.now();
-    return this.accounts().find((a) => !exclude?.has(a.id) && this.availableAt(a.id, now) <= now);
-  }
-
-  /** The account is below its switch line and not refused right now. */
-  hasRoom(id: string): boolean {
-    const now = this.now();
-    return this.availableAt(id, now) <= now;
-  }
-
-  /** When the first account frees up; undefined when one has room now. */
-  nextFreeAt(): number | undefined {
+  /** When the first account stops being refused; undefined when one is not refused now. */
+  nextRunnableAt(): number | undefined {
     const now = this.now();
     let soonest: number | undefined;
     for (const account of this.accounts()) {
-      const at = this.availableAt(account.id, now);
-      if (at <= now) return undefined;
-      soonest = soonest === undefined ? at : Math.min(soonest, at);
+      const until = this.refusedUntil(account.id, now);
+      if (until === undefined) return undefined;
+      soonest = soonest === undefined ? until : Math.min(soonest, until);
     }
     return soonest;
   }
 
-  /** When the account can take work again: now when it has room, else the reset that frees it. */
-  availableAt(id: string, now = this.now()): number {
+  /** The first window the account is at or past its line in, with that line. */
+  pastLine(id: string, now = this.now()): { kind: WindowKind; line: number } | undefined {
+    const state = this.loadState()[id];
+    if (!state) return undefined;
+    for (const kind of WINDOW_KINDS) {
+      const window = state.windows[kind];
+      const line = this.lineOf(id, kind);
+      if (!window || window.usedPercent < line) continue;
+      const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
+      if (until > now) return { kind, line };
+    }
+    return undefined;
+  }
+
+  /** When the account is below all its lines and not refused: now, or the reset that gets it there. */
+  underLinesAt(id: string, now = this.now()): number {
     const state = this.loadState()[id];
     if (!state) return now;
-    let at = now;
-    if (state.blockedUntil !== undefined && state.blockedUntil > now) at = state.blockedUntil;
-    const limit = this.limitOf(id);
-    for (const [kind, window] of Object.entries(state.windows)) {
-      if (!(kind in ACCOUNT_WINDOWS) || window.usedPercent < limit) continue;
+    let at = this.refusedUntil(id, now) ?? now;
+    for (const kind of WINDOW_KINDS) {
+      const window = state.windows[kind];
+      if (!window || window.usedPercent < this.lineOf(id, kind)) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > at) at = until;
     }
@@ -387,30 +456,25 @@ export class ClaudeAccountPool {
     const state = this.loadState()[id];
     if (!state) return undefined;
     const windows: QuotaWindow[] = [];
-    for (const [kind, label] of Object.entries(ACCOUNT_WINDOWS)) {
+    for (const kind of WINDOW_KINDS) {
       const window = state.windows[kind];
       if (!window) continue;
       const reset = window.resetsAt !== undefined && window.resetsAt <= now;
       windows.push({
-        label,
+        label: WINDOW_LABELS[kind],
         usedPercent: reset ? 0 : window.usedPercent,
         ...(window.resetsAt !== undefined && !reset ? { resets: new Date(window.resetsAt).toISOString() } : {}),
       });
     }
-    const blocked = state.blockedUntil !== undefined && state.blockedUntil > now;
+    const blocked = this.isRefused(id, now);
     if (windows.length === 0 && !blocked) return undefined;
     return { windows, ...(blocked ? { blocked: true } : {}) };
   }
 
   /** Each account with its last known quota, for status displays. */
-  status(): Array<{ account: PickedAccount; state?: AccountQuotaState; availableAt: number }> {
-    const now = this.now();
+  status(): Array<{ account: PickedAccount; state?: AccountQuotaState }> {
     const all = this.loadState();
-    return this.accounts().map((account) => ({
-      account,
-      ...(all[account.id] ? { state: all[account.id] } : {}),
-      availableAt: this.availableAt(account.id, now),
-    }));
+    return this.accounts().map((account) => ({ account, ...(all[account.id] ? { state: all[account.id] } : {}) }));
   }
 
   /** Wait for pending state writes (tests, shutdown). */
@@ -462,29 +526,34 @@ export function claudeAccountPool(profileDir: string): ClaudeAccountPool {
 
 /**
  * The accounts as Markdown lines for `/usage` and the CLI: which one new runs
- * go to (▶), how full each is by its last report, and until when a spent one
- * sits out. `defaultLabel` names the CLI's own login.
+ * go to (▶), each one's lines, how full it is by its last report, and whether
+ * it is past a line or refused. `defaultLabel` names the CLI's own login.
  */
 export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | undefined, now = Date.now()): string[] {
   const next = pool.pick()?.id;
-  return pool.status().map(({ account, state, availableAt }) => {
+  return pool.status().map(({ account, state }, index) => {
     const name = account.id === DEFAULT_ACCOUNT_ID ? (defaultLabel ?? 'CLI 登录') : (account.label ?? account.id);
     const marker = account.id === next ? '▶ ' : '';
-    const reserved = pool.isReserved(account.id);
-    const reserve = reserved ? `（预留 ${100 - pool.limitOf(account.id)}%，用到 ${pool.limitOf(account.id)}% 切走）` : '';
-    const windows = Object.entries(ACCOUNT_WINDOWS)
-      .map(([kind, label]) => {
+    const role = index === 0 ? '主账户' : `备用 ${index}`;
+    const lines = `切换线 5h ${pool.lineOf(account.id, 'five_hour')}% · 周 ${pool.lineOf(account.id, 'seven_day')}%`;
+    const usage =
+      WINDOW_KINDS.map((kind) => {
         const window = state?.windows[kind];
         if (!window) return undefined;
         const used = window.resetsAt !== undefined && window.resetsAt <= now ? 0 : window.usedPercent;
-        return `${label} ${Math.round(used)}%`;
+        return `${WINDOW_LABELS[kind]} ${Math.round(used)}%`;
       })
-      .filter((part): part is string => part !== undefined);
-    const usage = windows.length > 0 ? windows.join(' · ') : '还没有运行记录';
-    const blocked = state?.blockedUntil !== undefined && state.blockedUntil > now;
-    const rest =
-      availableAt > now ? ` · ⛔ ${blocked || !reserved ? '额度用尽' : '已到预留线'}，${formatClock(availableAt)} 恢复` : '';
-    return `- ${marker}**${name}**（${account.id}）${reserve}：${usage}${rest}`;
+        .filter((part): part is string => part !== undefined)
+        .join(' · ') || '还没有运行记录';
+    const refused = pool.refusedUntil(account.id, now);
+    const past = pool.pastLine(account.id, now);
+    const flag =
+      refused !== undefined
+        ? ` · ⛔ 额度用尽，${formatClock(refused)} 恢复`
+        : past
+          ? ` · ⚠️ 已过${WINDOW_LABELS[past.kind]}切换线，其他账户也到线后才轮到它`
+          : '';
+    return `- ${marker}**${name}**（${role}，${account.id}；${lines}）：${usage}${flag}`;
   });
 }
 

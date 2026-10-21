@@ -27,8 +27,9 @@ const ACCOUNT_REPORTS: Record<AgentKind, (profileDir: string) => Promise<string[
     const pool = claudeAccountPool(profileDir);
     await pool.refresh();
     if (!pool.multi) return undefined;
+    const lines = pool.defaultLines;
     return [
-      `**订阅账户**（额度用尽自动切换，▶ 为新任务使用的账户；任一窗口到 ${pool.switchAtPercent}% 即视为用尽）`,
+      `**订阅账户**（▶ 为新任务使用的账户。先按顺序用还没到切换线的账户；都到线后再按顺序把各账户用到额度耗尽；全部耗尽才暂停，到最早恢复的账户重置时自动续跑。默认切换线：5 小时 ${lines.five_hour}% · 本周 ${lines.seven_day}%）`,
       ...accountsReport(pool, await claudeAccountName()),
     ];
   },

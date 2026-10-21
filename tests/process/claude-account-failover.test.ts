@@ -85,7 +85,7 @@ describe('Claude account failover (process)', () => {
     expect(pool.pick()?.id).toBe('b');
   });
 
-  it('leaves an account at its reserve line between two steps', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
+  it('leaves an account at its switch line between two steps', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'lcb-reserve-'));
     cleanup.push(dir);
     const record = join(dir, 'record.jsonl');
@@ -130,7 +130,7 @@ rl.once('line', (line) => {
     const paths = claudeAccountsPaths(dir);
     await writeFile(
       paths.configFile,
-      JSON.stringify({ accounts: [{ id: 'default', reservePercent: 20 }, { id: 'b', label: 'backup' }] }),
+      JSON.stringify({ accounts: [{ id: 'default', lines: { five_hour: 80 } }, { id: 'b', label: 'backup' }] }),
     );
     const pool = new ClaudeAccountPool({ paths, readSecret: async () => 'sk-ant-oat01-b' });
     const adapter = new ClaudeAdapter({ binary, accounts: pool });
@@ -151,7 +151,9 @@ rl.once('line', (line) => {
     expect(calls[1]!.argv.join(' ')).toContain('--resume sess-1');
     expect(calls[1]!.prompt).toBe(SWITCH_LINE_PROMPT);
     expect(events).not.toContainEqual({ type: 'text', delta: 'kept going on the reserve' });
-    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'backup', reserveLine: 80 }));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'account', label: 'backup', reason: '5 小时窗口用量到了 80% 的切换线' }),
+    );
     expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
   });
 });
