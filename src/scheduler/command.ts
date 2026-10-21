@@ -2,14 +2,17 @@ import { CronParseError, describeCron, nextCronTime, parseCron } from './cron';
 import { formatTime } from './runner';
 import type { JobSchedule, ScheduledJob } from './types';
 
+export { jobTitle, jobTitleMd } from './types';
+
 export const CRON_USAGE = [
   '**定时任务**',
   '',
-  '`/cron add <时间> | <要做的事>` — 新建任务',
+  '`/cron add [--name <名称>] <时间> | <要做的事>` — 新建任务（名称可选，含空格时加引号）',
   '`/cron list` — 本会话的任务列表',
   '`/cron show <id>` — 任务详情',
   '`/cron run <id>` — 立刻跑一次（不影响排期）',
   '`/cron pause <id>` / `/cron resume <id>` — 暂停 / 恢复',
+  '`/cron rename <id> <名称>` — 改名（名称留空则清除）',
   '`/cron remove <id>` — 删除',
   '',
   '**时间写法**',
@@ -19,14 +22,18 @@ export const CRON_USAGE = [
   '',
   '加 `--continue` 让每次运行复用同一个会话（默认每次都是新会话）。',
   '',
-  '例：`/cron add 0 9 * * 1-5 | 看一下昨天 CI 的失败并总结`',
+  '例：`/cron add --name CI日报 0 9 * * 1-5 | 看一下昨天 CI 的失败并总结`',
 ].join('\n');
 
 export interface ParsedAdd {
   schedule: JobSchedule;
   prompt: string;
   session: 'fresh' | 'continue';
+  name?: string;
 }
+
+/** Longest name we keep; the list card has one line for it. */
+export const MAX_JOB_NAME = 40;
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -41,7 +48,16 @@ export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string
 export function parseAdd(raw: string, now: number = Date.now()): ParseResult<ParsedAdd> {
   let rest = raw.trim();
   let session: 'fresh' | 'continue' = 'fresh';
+  let name: string | undefined;
   for (;;) {
+    const named = /^--name(?:=|\s+)(?:"([^"]*)"|“([^”]*)”|(\S+))\s*/.exec(rest);
+    if (named) {
+      const parsed = normalizeJobName(named[1] ?? named[2] ?? named[3] ?? '');
+      if (!parsed.ok) return parsed;
+      name = parsed.value;
+      rest = rest.slice(named[0].length);
+      continue;
+    }
     const flag = /^(--continue|--fresh)\b\s*/.exec(rest);
     if (!flag) break;
     session = flag[1] === '--continue' ? 'continue' : 'fresh';
@@ -60,7 +76,17 @@ export function parseAdd(raw: string, now: number = Date.now()): ParseResult<Par
 
   const schedule = parseSchedule(split.spec, now);
   if (!schedule.ok) return schedule;
-  return { ok: true, value: { schedule: schedule.value, prompt: split.prompt, session } };
+  return {
+    ok: true,
+    value: { schedule: schedule.value, prompt: split.prompt, session, ...(name ? { name } : {}) },
+  };
+}
+
+/** Trim a job name and enforce the length cap; an empty result means "no name". */
+export function normalizeJobName(raw: string): ParseResult<string | undefined> {
+  const name = raw.replace(/\s+/g, ' ').trim();
+  if (name.length > MAX_JOB_NAME) return { ok: false, error: `名称太长了（最多 ${MAX_JOB_NAME} 个字）。` };
+  return { ok: true, value: name || undefined };
 }
 
 /** Turn a schedule expression into a {@link JobSchedule}, validating it fires at all. */

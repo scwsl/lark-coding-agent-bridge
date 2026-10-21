@@ -798,6 +798,7 @@ export function knowledgeCard(view: KnowledgeStatusView): object {
 
 export interface CronJobView {
   id: string;
+  name?: string;
   schedule: string;
   status: string;
   lastRun?: string;
@@ -823,7 +824,13 @@ export function cronCard(jobs: CronJobView[], hint: string): object {
     // lark_md has no inline code and reads `*` as emphasis, so a cron
     // expression like `0 6 * * 6` came out as "`0 6  6`". Everything that
     // carries user or schedule text goes out as plain_text instead.
-    elements.push(divMd(`**${escapeMd(job.id)}**`));
+    elements.push(
+      divMd(
+        job.name
+          ? `**${escapeMd(job.name)}** <font color='grey'>${escapeMd(job.id)}</font>`
+          : `**${escapeMd(job.id)}**`,
+      ),
+    );
     elements.push(divText(`${job.schedule}\n${job.status}`));
     elements.push(divText(job.prompt));
     if (job.lastRun) elements.push(divText(job.lastRun));

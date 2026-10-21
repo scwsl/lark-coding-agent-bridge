@@ -87,3 +87,27 @@ describe('duration and clock parsing', () => {
     expect(parseAbsoluteTime('09:70', NOW)).toBeUndefined();
   });
 });
+
+describe('/cron add --name', () => {
+  it('takes a single-word name before the schedule', () => {
+    expect(parseAdd('--name 储能周报 0 6 * * 6 | 执行每周更新', NOW)).toMatchObject({
+      ok: true,
+      value: { name: '储能周报', schedule: { kind: 'cron', expr: '0 6 * * 6' }, prompt: '执行每周更新' },
+    });
+  });
+
+  it('accepts quoted names with spaces and mixes with --continue', () => {
+    expect(parseAdd('--continue --name "CI 日报" @daily | 看日志', NOW)).toMatchObject({
+      ok: true,
+      value: { name: 'CI 日报', session: 'continue', schedule: { kind: 'cron', expr: '@daily' } },
+    });
+    expect(parseAdd('--name=“储能 周报” @daily | 看日志', NOW)).toMatchObject({ ok: true, value: { name: '储能 周报' } });
+  });
+
+  it('leaves name unset when absent and rejects overlong names', () => {
+    const plain = parseAdd('@daily | 看日志', NOW);
+    expect(plain.ok).toBe(true);
+    expect(plain.ok ? plain.value.name : 'x').toBeUndefined();
+    expect(parseAdd(`--name ${'长'.repeat(41)} @daily | 看日志`, NOW)).toMatchObject({ ok: false });
+  });
+});

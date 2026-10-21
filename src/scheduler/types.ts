@@ -2,6 +2,11 @@
 export interface ScheduledJob {
   /** Short, user-facing id — what `/cron remove <id>` takes. */
   id: string;
+  /**
+   * Human-readable name shown in `/cron list`, `/cron show` and on every
+   * delivered result, so nobody has to remember what `d55d1f` was.
+   */
+  name?: string;
   /** What the agent is asked to do when the job fires. */
   prompt: string;
   schedule: JobSchedule;
@@ -69,4 +74,14 @@ export function isScheduledJob(value: unknown): value is ScheduledJob {
   if (schedule.kind === 'cron') return typeof schedule.expr === 'string' && Boolean(schedule.expr);
   if (schedule.kind === 'once') return typeof schedule.at === 'number';
   return false;
+}
+
+/** "储能周报 · d55d1f", or just the id for a job without a name. Plain text. */
+export function jobTitle(job: Pick<ScheduledJob, 'id' | 'name'>): string {
+  return job.name ? `${job.name} · ${job.id}` : job.id;
+}
+
+/** Markdown form of {@link jobTitle}: the name as-is, the id in a code span. */
+export function jobTitleMd(job: Pick<ScheduledJob, 'id' | 'name'>): string {
+  return job.name ? `「${job.name}」\`${job.id}\`` : `\`${job.id}\``;
 }

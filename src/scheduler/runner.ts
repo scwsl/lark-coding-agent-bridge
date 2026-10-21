@@ -19,7 +19,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { describeCron } from './cron';
-import type { JobRunRecord, ScheduledJob } from './types';
+import { jobTitleMd, type JobRunRecord, type ScheduledJob } from './types';
 
 export interface JobRunnerDeps {
   channel: LarkChannel;
@@ -174,7 +174,7 @@ async function deliver(deps: JobRunnerDeps, job: ScheduledJob, state: RunState):
     return;
   }
   const replyMode = getMessageReplyMode(deps.controls.cfg);
-  const header = `⏰ 定时任务 \`${job.id}\` · ${scheduleLabel(job)}`;
+  const header = `⏰ 定时任务 ${jobTitleMd(job)} · ${scheduleLabel(job)}`;
   const payload =
     replyMode === 'card'
       ? { card: renderCard(headedState(state, header), await cardOptions(deps, job.chatId)) }

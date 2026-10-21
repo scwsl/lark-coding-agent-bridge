@@ -2,7 +2,7 @@ import { log } from '../core/logger';
 import { CronParseError, nextCronTime, parseCron } from './cron';
 import { notifyJobChat, runScheduledJob, scheduleLabel, type JobRunnerDeps } from './runner';
 import type { JobStore } from './store';
-import type { JobRunRecord, ScheduledJob } from './types';
+import { jobTitleMd, type JobRunRecord, type ScheduledJob } from './types';
 
 /** How often the scheduler looks for due jobs. */
 const DEFAULT_TICK_MS = 30_000;
@@ -211,5 +211,5 @@ export class Scheduler {
 }
 
 function failureNotice(job: ScheduledJob, record: JobRunRecord): string {
-  return `⏰ 定时任务 \`${job.id}\`（${scheduleLabel(job)}）执行失败：${record.error ?? '未知原因'}`;
+  return `⏰ 定时任务 ${jobTitleMd(job)}（${scheduleLabel(job)}）执行失败：${record.error ?? '未知原因'}`;
 }
