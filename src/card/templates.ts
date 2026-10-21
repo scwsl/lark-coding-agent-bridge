@@ -19,6 +19,11 @@ function divMd(content: string): object {
   return { tag: 'div', text: { tag: 'lark_md', content } };
 }
 
+/** A div rendered verbatim — no markdown, so `*`, `_` and backticks stay as typed. */
+function divText(content: string): object {
+  return { tag: 'div', text: { tag: 'plain_text', content } };
+}
+
 function actions(buttons: ButtonSpec[]): object {
   return { tag: 'action', actions: buttons.map(button) };
 }
@@ -815,11 +820,13 @@ export function cronCard(jobs: CronJobView[], hint: string): object {
   }
 
   jobs.forEach((job, i) => {
-    elements.push(
-      divMd(`**\`${escapeCode(job.id)}\`** · ${job.schedule}\n${job.status}`),
-    );
-    elements.push(divMd(escapeMd(job.prompt)));
-    if (job.lastRun) elements.push(divMd(`<font color='grey'>${escapeMd(job.lastRun)}</font>`));
+    // lark_md has no inline code and reads `*` as emphasis, so a cron
+    // expression like `0 6 * * 6` came out as "`0 6  6`". Everything that
+    // carries user or schedule text goes out as plain_text instead.
+    elements.push(divMd(`**${escapeMd(job.id)}**`));
+    elements.push(divText(`${job.schedule}\n${job.status}`));
+    elements.push(divText(job.prompt));
+    if (job.lastRun) elements.push(divText(job.lastRun));
     elements.push(
       actions([
         { text: '立即运行', value: { cmd: 'cron.run', arg: job.id }, style: 'primary' },

@@ -166,6 +166,13 @@ export function scheduleSummary(job: ScheduledJob): string {
     : `单次 ${formatTime(job.schedule.at)}`;
 }
 
+/** {@link scheduleSummary} without markdown, for plain_text card fields. */
+export function scheduleSummaryPlain(job: ScheduledJob): string {
+  return job.schedule.kind === 'cron'
+    ? `${describeCron(job.schedule.expr)}（${job.schedule.expr}）`
+    : `单次 ${formatTime(job.schedule.at)}`;
+}
+
 /** One-line status used in the list card. */
 export function jobStatusLine(job: ScheduledJob): string {
   if (!job.enabled) return '⏸ 已暂停';
