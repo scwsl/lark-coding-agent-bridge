@@ -34,6 +34,8 @@ export interface AppPaths {
   jobsFile: string;
   /** Tasks paused by the plan quota, waiting to be resumed after the reset. */
   autoResumeFile: string;
+  /** Tasks to start without a message, one JSON file each (see KickoffInbox). */
+  kickoffDir: string;
   secretsFile: string;
   keystoreSaltFile: string;
   secretsGetterScript: string;
@@ -87,6 +89,7 @@ export function resolveAppPaths(opts: ResolveAppPathsOptions = {}): AppPaths {
     skillLibrariesDir: join(profileDir, 'skill-libraries'),
     jobsFile: join(profileDir, 'jobs.json'),
     autoResumeFile: join(profileDir, 'auto-resume.json'),
+    kickoffDir: join(profileDir, 'kickoffs'),
     secretsFile: join(profileDir, 'secrets.enc'),
     keystoreSaltFile: join(profileDir, '.keystore.salt'),
     secretsGetterScript: join(rootDir, 'secrets-getter'),

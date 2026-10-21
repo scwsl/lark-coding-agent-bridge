@@ -111,6 +111,7 @@ import {
   resumeAtFor,
   type PendingResume,
 } from './auto-resume';
+import { KickoffInbox, kickoffScope, type Kickoff } from './kickoff-inbox';
 import { CardPatchHealth, instrumentCardPatches, larkErrorCode } from './card-patch-health';
 import { processAgentStream } from './agent-stream';
 import { createRunsMonitor } from './runs-monitor';
@@ -303,7 +304,9 @@ export interface StartChannelDeps {
     | 'auditFile'
     | 'profileDir'
   > &
-    Partial<Pick<AppPaths, 'rotationsFile' | 'contextCursorsFile' | 'skillLibrariesDir' | 'userLockDir' | 'autoResumeFile'>>;
+    Partial<
+      Pick<AppPaths, 'rotationsFile' | 'contextCursorsFile' | 'skillLibrariesDir' | 'userLockDir' | 'autoResumeFile' | 'kickoffDir'>
+    >;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -611,6 +614,26 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     pending.push(resume.scope, autoResumeMessage(resume));
   };
 
+  // Opening tasks left by skills (a new topic's brief): started on the
+  // writer's behalf, with their access checked again now, as if they had
+  // written the prompt in that conversation.
+  const kickoffs = deps.appPaths?.kickoffDir
+    ? new KickoffInbox({
+        dir: deps.appPaths.kickoffDir,
+        fire: async (kickoff) => {
+          const access =
+            kickoff.chatType === 'p2p'
+              ? canUseDm(controls.profileConfig, controls, kickoff.senderId)
+              : canUseGroup(controls.profileConfig, controls, kickoff.chatId, kickoff.senderId);
+          if (!access.ok) {
+            log.warn('kickoff', 'access-denied', { chatId: kickoff.chatId, reason: access.reason });
+            return;
+          }
+          pending.push(kickoffScope(kickoff), kickoffMessage(kickoff));
+        },
+      })
+    : undefined;
+
   // Counter for stdout reconnect escalation; reset on `reconnected`.
   let consecutiveReconnects = 0;
 
@@ -796,6 +819,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Same reason as the scheduler: only resume once the channel can deliver.
   autoResumer.start();
   controls.autoResumer = autoResumer;
+  kickoffs?.start();
 
   // 课堂精练: runs when an admin asks (`/practice run`, Web console) or, with
   // 自动整理 on, when its gates pass — never while the profile has anything
@@ -924,6 +948,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       scheduler?.stop();
       autoResumer.stop();
       controls.autoResumer = undefined;
+      kickoffs?.stop();
       controls.scheduler = undefined;
       await dream?.dispose().catch((err: unknown) => log.fail('dream', err, { step: 'dispose' }));
       controls.dream = undefined;
@@ -2393,6 +2418,25 @@ function autoResumeMessage(resume: PendingResume): NormalizedMessage {
 }
 
 const AUTO_RESUME_CONTENT_TYPE = 'auto_resume';
+
+/** The message a kickoff stands in for: its sender writing the prompt there. */
+function kickoffMessage(kickoff: Kickoff): NormalizedMessage {
+  return {
+    messageId: kickoff.originMessageId,
+    chatId: kickoff.chatId,
+    chatType: kickoff.chatType,
+    ...(kickoff.threadId ? { threadId: kickoff.threadId } : {}),
+    senderId: kickoff.senderId,
+    ...(kickoff.senderName ? { senderName: kickoff.senderName } : {}),
+    content: kickoff.prompt,
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: true,
+    createTime: Date.now(),
+  } as NormalizedMessage;
+}
 
 /** The paused card, with a line saying the task went on in a new card. */
 function withResumedNote(card: object, at: number, locale: Locale | undefined): object {
