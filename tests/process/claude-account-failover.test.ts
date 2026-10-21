@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeAccountsPaths, ClaudeAccountPool } from '../../src/agent/claude/accounts.js';
+import { SWITCH_LINE_PROMPT } from '../../src/agent/claude/account-failover.js';
 import { ClaudeAdapter } from '../../src/agent/claude/adapter.js';
 import type { AgentEvent } from '../../src/agent/types.js';
 
@@ -82,5 +83,75 @@ describe('Claude account failover (process)', () => {
     expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'backup' }));
     expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
     expect(pool.pick()?.id).toBe('b');
+  });
+
+  it('leaves an account at its reserve line between two steps', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lcb-reserve-'));
+    cleanup.push(dir);
+    const record = join(dir, 'record.jsonl');
+    const script = join(dir, 'claude-fake.js');
+    // On the CLI login: one tool step at 85%, then it would go on for a long time.
+    await writeFile(
+      script,
+      `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const [record] = process.argv.slice(-1);
+const argv = process.argv.slice(2, -1);
+const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const rl = readline.createInterface({ input: process.stdin });
+rl.once('line', (line) => {
+  const msg = JSON.parse(line);
+  fs.appendFileSync(record, JSON.stringify({ argv, token: token ?? null, prompt: msg.message.content }) + '\\n');
+  out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+  out({ type: 'user', isReplay: true, uuid: msg.uuid });
+  if (!token) {
+    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } });
+    out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });
+    setTimeout(() => {
+      out({ type: 'assistant', message: { content: [{ type: 'text', text: 'kept going on the reserve' }] } });
+      out({ type: 'result', subtype: 'success', is_error: false, session_id: 'sess-1', num_turns: 2 });
+      process.exit(0);
+    }, 20000);
+  } else {
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'finished on ' + token }] } });
+    out({ type: 'result', subtype: 'success', is_error: false, session_id: 'sess-1', num_turns: 1 });
+    process.exit(0);
+  }
+});
+`,
+    );
+    const binary = join(dir, 'claude');
+    await writeFile(binary, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@" "${record}"\n`, { mode: 0o755 });
+    await chmod(binary, 0o755);
+
+    const paths = claudeAccountsPaths(dir);
+    await writeFile(
+      paths.configFile,
+      JSON.stringify({ accounts: [{ id: 'default', reservePercent: 20 }, { id: 'b', label: 'backup' }] }),
+    );
+    const pool = new ClaudeAccountPool({ paths, readSecret: async () => 'sk-ant-oat01-b' });
+    const adapter = new ClaudeAdapter({ binary, accounts: pool });
+    await adapter.prepareRun();
+
+    const started = Date.now();
+    const run = adapter.run({ runId: 'run-2', prompt: 'hello', cwd: dir, sessionId: 'sess-0' });
+    const events: AgentEvent[] = [];
+    for await (const evt of run.events) events.push(evt);
+    await pool.flush();
+
+    expect(Date.now() - started).toBeLessThan(15_000);
+    const calls = (await readFile(record, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { argv: string[]; token: string | null; prompt: string });
+    expect(calls.map((c) => c.token)).toEqual([null, 'sk-ant-oat01-b']);
+    expect(calls[1]!.argv.join(' ')).toContain('--resume sess-1');
+    expect(calls[1]!.prompt).toBe(SWITCH_LINE_PROMPT);
+    expect(events).not.toContainEqual({ type: 'text', delta: 'kept going on the reserve' });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'backup', reserveLine: 80 }));
+    expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
   });
 });

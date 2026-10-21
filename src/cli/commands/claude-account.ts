@@ -7,6 +7,7 @@ import {
   deleteAccount,
   isValidAccountId,
   saveAccount,
+  updateAccount,
 } from '../../agent/claude/accounts';
 import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
 import { promptPassword } from '../prompt';
@@ -38,8 +39,9 @@ export async function runClaudeAccountList(opts: AccountCliOptions = {}): Promis
 
 export async function runClaudeAccountAdd(
   id: string,
-  opts: AccountCliOptions & { label?: string; tokenStdin?: boolean; verify?: boolean },
+  opts: AccountCliOptions & { label?: string; reserve?: string; tokenStdin?: boolean; verify?: boolean },
 ): Promise<void> {
+  const reservePercent = parseReserve(opts.reserve);
   if (!isValidAccountId(id) || id === 'default') {
     console.error('✗ 账号 id 只能用字母、数字、- 和 _（最长 32 位），且不能是 default');
     process.exit(1);
@@ -70,11 +72,41 @@ export async function runClaudeAccountAdd(
   const config = await saveAccount(claudeAccountsPaths(appPaths.profileDir), {
     id,
     ...(opts.label ? { label: opts.label } : {}),
+    ...(reservePercent !== undefined ? { reservePercent } : {}),
     token,
   });
   console.log(`✓ 已保存账户 ${id}（令牌加密存在 profile ${appPaths.profile} 的 keystore）`);
   console.log(`  优先顺序：${config.accounts.map((a) => a.id).join(' → ')}`);
   console.log('  运行中的 bridge 会在下一次运行前自动读取，不用重启。');
+}
+
+export async function runClaudeAccountSet(
+  id: string,
+  opts: AccountCliOptions & { label?: string; reserve?: string },
+): Promise<void> {
+  const reservePercent = parseReserve(opts.reserve);
+  if (opts.label === undefined && reservePercent === undefined) {
+    console.error('✗ 至少给一项：--label <名字> 或 --reserve <百分比>（0 表示不预留）');
+    process.exit(1);
+  }
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await updateAccount(claudeAccountsPaths(appPaths.profileDir), id, {
+    ...(opts.label !== undefined ? { label: opts.label } : {}),
+    ...(reservePercent !== undefined ? { reservePercent } : {}),
+  });
+  console.log(`✓ 已更新账户 ${id}，运行中的 bridge 下一次运行前生效`);
+  await runClaudeAccountList(opts);
+}
+
+/** `--reserve 20` / `20%` → 20; absent → undefined; anything else exits. */
+function parseReserve(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw.trim().replace(/%$/, ''));
+  if (!Number.isInteger(value) || value < 0 || value > 99) {
+    console.error(`✗ --reserve 要是 0–99 的整数（0 表示不预留）：${raw}`);
+    process.exit(1);
+  }
+  return value;
 }
 
 export async function runClaudeAccountRemove(id: string, opts: AccountCliOptions = {}): Promise<void> {

@@ -38,6 +38,13 @@ export interface ClaudeAccountEntry {
   id: string;
   /** Shown on the reply card's `Sponsor:` line. The CLI's own login reads its name from `claude auth status`. */
   label?: string;
+  /**
+   * Share of the account (1–99%) the bot must leave alone — e.g. someone
+   * else's own account lent as a backup. Runs leave it once a window reaches
+   * `100 - reservePercent`, and it is never used past that line: with no
+   * other account left the task pauses instead.
+   */
+  reservePercent?: number;
 }
 
 export interface ClaudeAccountsConfig {
@@ -92,6 +99,10 @@ export function isValidAccountId(id: string): boolean {
   return ACCOUNT_ID.test(id);
 }
 
+export function isValidReserve(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 99;
+}
+
 export function defaultAccountsConfig(): ClaudeAccountsConfig {
   return { switchAtPercent: DEFAULT_SWITCH_AT_PERCENT, accounts: [{ id: DEFAULT_ACCOUNT_ID }] };
 }
@@ -113,10 +124,14 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
     if (!item || typeof item !== 'object') continue;
-    const { id, label } = item as { id?: unknown; label?: unknown };
+    const { id, label, reservePercent } = item as { id?: unknown; label?: unknown; reservePercent?: unknown };
     if (typeof id !== 'string' || !isValidAccountId(id) || seen.has(id)) continue;
     seen.add(id);
-    accounts.push({ id, ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}) });
+    accounts.push({
+      id,
+      ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
+      ...(isValidReserve(reservePercent) ? { reservePercent } : {}),
+    });
   }
   if (!seen.has(DEFAULT_ACCOUNT_ID)) accounts.unshift({ id: DEFAULT_ACCOUNT_ID });
   config.accounts = accounts;
@@ -138,21 +153,49 @@ async function writeAccountsConfig(paths: ClaudeAccountsPaths, config: ClaudeAcc
 /** Add (or replace the token / label of) an account; new ones go last in the preference order. */
 export async function saveAccount(
   paths: ClaudeAccountsPaths,
-  account: { id: string; label?: string; token: string },
+  account: { id: string; label?: string; token: string; reservePercent?: number },
 ): Promise<ClaudeAccountsConfig> {
   if (account.id === DEFAULT_ACCOUNT_ID) throw new Error('default 是 CLI 自己的登录，不能存令牌');
   if (!isValidAccountId(account.id)) throw new Error(`账号 id 只能用字母、数字、- 和 _（最长 32 位）：${account.id}`);
   await setSecret(accountSecretId(account.id), account.token, paths.keystore);
   const config = readAccountsConfig(paths);
-  const label = account.label?.trim();
-  const existing = config.accounts.find((a) => a.id === account.id);
-  if (existing) {
-    if (label) existing.label = label;
-  } else {
-    config.accounts.push({ id: account.id, ...(label ? { label } : {}) });
-  }
+  if (!config.accounts.some((a) => a.id === account.id)) config.accounts.push({ id: account.id });
+  applyAccountChanges(config, account.id, {
+    ...(account.label !== undefined ? { label: account.label } : {}),
+    ...(account.reservePercent !== undefined ? { reservePercent: account.reservePercent } : {}),
+  });
   await writeAccountsConfig(paths, config);
   return config;
+}
+
+export interface AccountChanges {
+  label?: string;
+  /** `0` removes the reserve. */
+  reservePercent?: number;
+}
+
+/** Change an account's name or reserve without touching its token. */
+export async function updateAccount(
+  paths: ClaudeAccountsPaths,
+  id: string,
+  changes: AccountChanges,
+): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户 ${id}`);
+  applyAccountChanges(config, id, changes);
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
+function applyAccountChanges(config: ClaudeAccountsConfig, id: string, changes: AccountChanges): void {
+  const entry = config.accounts.find((a) => a.id === id)!;
+  const label = changes.label?.trim();
+  if (label) entry.label = label;
+  if (changes.reservePercent !== undefined) {
+    if (changes.reservePercent === 0) delete entry.reservePercent;
+    else if (isValidReserve(changes.reservePercent)) entry.reservePercent = changes.reservePercent;
+    else throw new Error(`预留比例要在 1–99 之间（0 表示不预留）：${changes.reservePercent}`);
+  }
 }
 
 export async function deleteAccount(paths: ClaudeAccountsPaths, id: string): Promise<boolean> {
@@ -218,6 +261,17 @@ export class ClaudeAccountPool {
     return this.config.switchAtPercent;
   }
 
+  /** The fill (0–100) at which runs leave the account: its reserve line, else the profile's threshold. */
+  limitOf(id: string): number {
+    const reserve = this.config.accounts.find((a) => a.id === id)?.reservePercent;
+    return reserve !== undefined ? 100 - reserve : this.config.switchAtPercent;
+  }
+
+  /** The account keeps a reserve the bot must never dip into. */
+  isReserved(id: string): boolean {
+    return this.config.accounts.find((a) => a.id === id)?.reservePercent !== undefined;
+  }
+
   /** Accounts that can run, in order of preference: the CLI's own login and those with a token. */
   accounts(): PickedAccount[] {
     return this.config.accounts
@@ -233,20 +287,48 @@ export class ClaudeAccountPool {
   /**
    * The account a new run should use: the first in preference order with room
    * left — so the main account is back in use as soon as its window resets.
-   * When none has room, the one that frees up first.
+   * When none has room, the one that frees up first, leaving out accounts
+   * with a reserve: those are never used past their line. Undefined when
+   * only such accounts remain — the run has to wait.
    */
   pick(exclude?: ReadonlySet<string>): PickedAccount | undefined {
+    return this.pickRunnable(exclude) ?? this.fallbacks(exclude)[0];
+  }
+
+  /**
+   * Like {@link pick}, but never an account that was refused: one with room,
+   * else one without a reserve that is only past its switch line.
+   */
+  pickRunnable(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
-    const candidates = this.accounts().filter((a) => !exclude?.has(a.id));
-    const ready = candidates.find((a) => this.availableAt(a.id, now) <= now);
-    if (ready) return ready;
-    return [...candidates].sort((a, b) => this.availableAt(a.id, now) - this.availableAt(b.id, now))[0];
+    const ready = this.accounts().find((a) => !exclude?.has(a.id) && this.availableAt(a.id, now) <= now);
+    return ready ?? this.fallbacks(exclude).find((a) => !this.isRefused(a.id, now));
+  }
+
+  /** Accounts without a reserve, soonest free first. */
+  private fallbacks(exclude?: ReadonlySet<string>): PickedAccount[] {
+    const now = this.now();
+    return this.accounts()
+      .filter((a) => !exclude?.has(a.id) && !this.isReserved(a.id))
+      .sort((a, b) => this.availableAt(a.id, now) - this.availableAt(b.id, now));
+  }
+
+  /** A request on the account was refused and its window has not reset yet. */
+  isRefused(id: string, now = this.now()): boolean {
+    const until = this.loadState()[id]?.blockedUntil;
+    return until !== undefined && until > now;
   }
 
   /** Like {@link pick}, but only an account that has room right now. */
   pickReady(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
     return this.accounts().find((a) => !exclude?.has(a.id) && this.availableAt(a.id, now) <= now);
+  }
+
+  /** The account is below its switch line and not refused right now. */
+  hasRoom(id: string): boolean {
+    const now = this.now();
+    return this.availableAt(id, now) <= now;
   }
 
   /** When the first account frees up; undefined when one has room now. */
@@ -267,8 +349,9 @@ export class ClaudeAccountPool {
     if (!state) return now;
     let at = now;
     if (state.blockedUntil !== undefined && state.blockedUntil > now) at = state.blockedUntil;
+    const limit = this.limitOf(id);
     for (const [kind, window] of Object.entries(state.windows)) {
-      if (!(kind in ACCOUNT_WINDOWS) || window.usedPercent < this.config.switchAtPercent) continue;
+      if (!(kind in ACCOUNT_WINDOWS) || window.usedPercent < limit) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > at) at = until;
     }
@@ -387,6 +470,8 @@ export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | u
   return pool.status().map(({ account, state, availableAt }) => {
     const name = account.id === DEFAULT_ACCOUNT_ID ? (defaultLabel ?? 'CLI 登录') : (account.label ?? account.id);
     const marker = account.id === next ? '▶ ' : '';
+    const reserved = pool.isReserved(account.id);
+    const reserve = reserved ? `（预留 ${100 - pool.limitOf(account.id)}%，用到 ${pool.limitOf(account.id)}% 切走）` : '';
     const windows = Object.entries(ACCOUNT_WINDOWS)
       .map(([kind, label]) => {
         const window = state?.windows[kind];
@@ -396,8 +481,10 @@ export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | u
       })
       .filter((part): part is string => part !== undefined);
     const usage = windows.length > 0 ? windows.join(' · ') : '还没有运行记录';
-    const rest = availableAt > now ? ` · ⛔ 额度用尽，${formatClock(availableAt)} 恢复` : '';
-    return `- ${marker}**${name}**（${account.id}）：${usage}${rest}`;
+    const blocked = state?.blockedUntil !== undefined && state.blockedUntil > now;
+    const rest =
+      availableAt > now ? ` · ⛔ ${blocked || !reserved ? '额度用尽' : '已到预留线'}，${formatClock(availableAt)} 恢复` : '';
+    return `- ${marker}**${name}**（${account.id}）${reserve}：${usage}${rest}`;
   });
 }
 

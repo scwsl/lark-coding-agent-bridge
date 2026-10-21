@@ -2,7 +2,7 @@ import { runMonitor } from './commands/monitor';
 import { Command } from 'commander';
 import pkg from '../../package.json';
 import { formatAgentPreflightDiagnostic, getAgentPreflightDiagnostic } from '../agent/preflight';
-import { runClaudeAccountAdd, runClaudeAccountList, runClaudeAccountRemove } from './commands/claude-account';
+import { runClaudeAccountAdd, runClaudeAccountList, runClaudeAccountRemove, runClaudeAccountSet } from './commands/claude-account';
 import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
@@ -287,11 +287,24 @@ claudeAccount
   .command('add <id>')
   .description('Add an account from a `claude setup-token` token (prompted without echo, or piped on stdin)')
   .option('--label <name>', 'name shown as the reply card Sponsor')
+  .option('--reserve <percent>', "share of the account the bot leaves alone (switch away at 100 - percent)")
   .option('--token-stdin', 'read the token from stdin')
   .option('--no-verify', 'save without a test request')
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .action(async (id: string, opts: { label?: string; tokenStdin?: boolean; verify?: boolean; profile?: string }) => {
-    await runClaudeAccountAdd(id, opts);
+  .action(
+    async (id: string, opts: { label?: string; reserve?: string; tokenStdin?: boolean; verify?: boolean; profile?: string }) => {
+      await runClaudeAccountAdd(id, opts);
+    },
+  );
+
+claudeAccount
+  .command('set <id>')
+  .description("Change an account's name or reserve (0 removes the reserve) without re-entering its token")
+  .option('--label <name>', 'name shown as the reply card Sponsor')
+  .option('--reserve <percent>', 'share of the account the bot leaves alone; 0 for none')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string, opts: { label?: string; reserve?: string; profile?: string }) => {
+    await runClaudeAccountSet(id, opts);
   });
 
 claudeAccount

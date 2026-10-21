@@ -530,10 +530,12 @@ Claude profile 可以挂多个订阅账户。当前账户的额度（5 小时窗
   lark-channel-bridge claude-account add <id> --label <名字> --profile claude   # 不回显地粘贴令牌，或用管道 + --token-stdin
   lark-channel-bridge claude-account list --profile claude
   lark-channel-bridge claude-account remove <id> --profile claude
+  lark-channel-bridge claude-account set <id> [--label <名字>] [--reserve <百分比>]   # 改名字 / 预留，不用重输令牌
   ```
 
   `add` 先用 haiku 发一条极短的请求验证令牌（`--no-verify` 跳过）。令牌加密存在 profile 的 keystore（`claude-oauth-<id>`），清单在 `profiles/<p>/claude-accounts.json`（顺序即优先级，`switchAtPercent` 为切换阈值，默认 98）。运行中的 bridge 每次开跑前按文件修改时间重读，**增删账户不用重启**。
 - **何时切换**：每轮 stream-json 里的 `rate_limit_event` 带着各窗口用量，记在 `claude-accounts-state.json`。开跑前选第一个两个窗口都低于阈值、也没有被拒的账户；跑到一半被拒（`rate_limit` blocked）时，扣下这次拒绝，换下一个有余量的账户 `--resume` 同一会话，并告诉模型从中断处继续（原消息附在后面）。所有账户都用尽时照旧暂停，自动续跑时间取最早恢复的那个账户。
+- **预留**：借来的账户可以给主人留一部分，`--reserve 20` 表示只用到 80%。到线就不再用它——开跑前跳过；跑到一半时，Claude 每条消息只在第一次请求后报一次用量，超线就在下一个没有工具调用、子 agent 和后台任务在跑的间隙换到别的账户（新进程续接同一会话）；别的账户都不能用时任务暂停，等有账户恢复后自动续跑，不动预留的部分。没设预留的账户只是到 `switchAtPercent` 时优先换别的，没得换仍会继续用。单条消息跑得很长时，开头之后的消耗看不到，可能略微超线。
 - **展示**：回复卡的 `Sponsor:` 是实际付费的账户；中途切换时正文里会有一行「账户 A 额度用尽，已切换到 B 继续」。管理员 `/usage` 会在订阅额度下面列出各账户的用量和状态（▶ 为新任务会用的账户）。
 - **额度门槛**：过载保护和课堂精练读到的额度取「余量最大的账户」——只要还有账户有余量，就不算过载。
 

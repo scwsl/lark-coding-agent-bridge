@@ -53,9 +53,10 @@ export type AgentEvent =
   /**
    * Which subscription account this run (or, after a failover, the rest of
    * it) is paid by — for the reply card's `Sponsor:` line. `switchedFrom` is
-   * set when the bridge moved the run off an account whose quota ran out.
+   * set when the bridge moved the run off another account: its quota ran
+   * out, or (`reserveLine`, 0–100) it reached the share kept in reserve.
    */
-  | { type: 'account'; label: string; switchedFrom?: string }
+  | { type: 'account'; label: string; switchedFrom?: string; reserveLine?: number }
   | {
       /**
        * One turn's consumption. `inputTokens` is the whole prompt, the cached
