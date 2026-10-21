@@ -14,6 +14,8 @@ export interface GitRunOptions {
   timeoutMs?: number;
   /** Cap on captured stdout. A `git diff` on a big branch can be megabytes. */
   maxBytes?: number;
+  /** Extra environment for the command (cannot override the non-interactive settings below). */
+  env?: Record<string, string>;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -58,6 +60,7 @@ export async function runCapture(
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: mergeProcessEnv(process.env, {
+        ...(opts.env ?? {}),
         // Deterministic, non-interactive output: no pager to block on, no
         // credential prompt to hang on, and English messages we can parse.
         GIT_PAGER: 'cat',

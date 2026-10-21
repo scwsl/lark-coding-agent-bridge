@@ -176,7 +176,7 @@ export async function removeAppSecret(
   return removeSecret(secretKeyForApp(appId), appPaths);
 }
 
-async function resolveSecretProfilePaths(opts: SecretProfileOptions): Promise<AppPaths> {
+export async function resolveSecretProfilePaths(opts: SecretProfileOptions): Promise<AppPaths> {
   const rootDir = opts.rootDir ?? paths.rootDir;
   const rootPaths = resolveAppPaths({ rootDir });
   const root = await loadRootConfig(rootPaths.configFile);

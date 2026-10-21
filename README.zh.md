@@ -519,6 +519,24 @@ Web 控制台「配置」页有「课堂精练」卡片：显示目标仓库、�
 
 阈值在 profile 的 `preferences.longRunNoticeMinutes`（分钟，`0` 关闭），只能改配置文件。
 
+## 多个 Claude 订阅账户：额度用尽自动切换
+
+Claude profile 可以挂多个订阅账户。当前账户的额度（5 小时窗口或本周）用完时，正在跑的任务自动换到下一个账户、续接同一个会话接着做；主账户额度重置后，新任务自动回到主账户。
+
+- **账户**：`default` 是本机 claude CLI 自己的登录（钥匙串），永远排第一；备用账户是 `claude setup-token` 生成的长期令牌（一年有效），运行时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入该次 claude 进程。只有凭据不同，配置目录、会话转录、设置、技能都还是 `~/.claude` 那一份，所以 `--resume` 能跨账户续接（跨组织时 CLI 会丢掉上一账户的 thinking 块，不影响对话）。
+- **添加**：先在终端里执行 `claude setup-token`，浏览器里用**备用账户**登录，拿到令牌；再执行
+
+  ```bash
+  lark-channel-bridge claude-account add <id> --label <名字> --profile claude   # 不回显地粘贴令牌，或用管道 + --token-stdin
+  lark-channel-bridge claude-account list --profile claude
+  lark-channel-bridge claude-account remove <id> --profile claude
+  ```
+
+  `add` 先用 haiku 发一条极短的请求验证令牌（`--no-verify` 跳过）。令牌加密存在 profile 的 keystore（`claude-oauth-<id>`），清单在 `profiles/<p>/claude-accounts.json`（顺序即优先级，`switchAtPercent` 为切换阈值，默认 98）。运行中的 bridge 每次开跑前按文件修改时间重读，**增删账户不用重启**。
+- **何时切换**：每轮 stream-json 里的 `rate_limit_event` 带着各窗口用量，记在 `claude-accounts-state.json`。开跑前选第一个两个窗口都低于阈值、也没有被拒的账户；跑到一半被拒（`rate_limit` blocked）时，扣下这次拒绝，换下一个有余量的账户 `--resume` 同一会话，并告诉模型从中断处继续（原消息附在后面）。所有账户都用尽时照旧暂停，自动续跑时间取最早恢复的那个账户。
+- **展示**：回复卡的 `Sponsor:` 是实际付费的账户；中途切换时正文里会有一行「账户 A 额度用尽，已切换到 B 继续」。管理员 `/usage` 会在订阅额度下面列出各账户的用量和状态（▶ 为新任务会用的账户）。
+- **额度门槛**：过载保护和课堂精练读到的额度取「余量最大的账户」——只要还有账户有余量，就不算过载。
+
 ## lark-cli 身份策略
 
 每个 profile 都使用当前 profile 的 lark-cli 目录：`~/.lark-channel/profiles/<profile>/lark-cli`。agent 子进程会收到指向这个目录的 `LARKSUITE_CLI_CONFIG_DIR`，所以一个 profile 里的个人授权不会共享给另一个 profile。

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import { agentAccountsReport } from '../agent/account';
 import { agentCapability } from '../agent/capability';
 import { agentDescriptor, type AgentKind } from '../agent/registry';
 import {
@@ -1682,7 +1683,11 @@ async function handlePlanQuota(ctx: CommandContext): Promise<void> {
     await reply(ctx, `❌ 读取额度失败：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  const card = usageCard(usageMarkdown(parseClaudeUsage(raw), raw));
+  const accounts = await agentAccountsReport(ctx.controls.profileConfig, commandProfilePaths(ctx).profileDir);
+  const body = usageMarkdown(parseClaudeUsage(raw), raw);
+  const card = usageCard(
+    accounts ? [`**CLI 登录账户**`, body, '', ...accounts, '_各账户用量取自它最近一次运行的报告。_'].join('\n') : body,
+  );
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
 

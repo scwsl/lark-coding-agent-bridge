@@ -19,12 +19,17 @@ import {
   type AgentRun,
   type AgentRunOptions,
 } from '../types';
+import { claudeAccountName } from './account';
+import { runWithAccountFailover } from './account-failover';
+import type { ClaudeAccountPool, PickedAccount } from './accounts';
 import { restoredSessionCost } from './session-cost';
 import { translateEvent } from './stream-json';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
   larkChannel?: LarkChannelEnvContext;
+  /** The profile's subscription accounts; runs move to another one when the quota runs out. */
+  accounts?: ClaudeAccountPool;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -35,11 +40,18 @@ export class ClaudeAdapter implements AgentAdapter {
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly accounts: ClaudeAccountPool | undefined;
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: ClaudeAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
     this.larkChannel = opts.larkChannel;
+    this.accounts = opts.accounts;
+  }
+
+  async prepareRun(): Promise<void> {
+    // Pick up accounts added or removed since the last run.
+    await this.accounts?.refresh();
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -60,6 +72,20 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   run(opts: AgentRunOptions): AgentRun {
+    if (!opts.cwd) {
+      throw new Error('cwd is required for ClaudeAdapter.run');
+    }
+    const pool = this.accounts;
+    if (!pool) return this.spawnRun(opts, undefined);
+    return runWithAccountFailover(opts, {
+      pool,
+      spawn: (attemptOpts, account) => this.spawnRun(attemptOpts, account),
+      labelOf: (account) => (account.env.CLAUDE_CODE_OAUTH_TOKEN ? Promise.resolve(account.label) : claudeAccountName()),
+    });
+  }
+
+  /** One claude process, on `account` (undefined: the CLI's own login, untouched). */
+  private spawnRun(opts: AgentRunOptions, account: PickedAccount | undefined): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
     }
@@ -120,6 +146,8 @@ export class ClaudeAdapter implements AgentAdapter {
         // 会话智能压缩: Claude Code auto-compacts against this window instead
         // of the model's full (up to 1M-token) one.
         ...(opts.compactWindowTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(opts.compactWindowTokens) } : {}),
+        // Another subscription account: its token outranks the CLI's own login.
+        ...(account?.env ?? {}),
       }),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ClaudeChild;
@@ -131,6 +159,7 @@ export class ClaudeAdapter implements AgentAdapter {
       promptChars: opts.prompt.length,
       model: opts.model,
       effort: opts.effort,
+      ...(account ? { account: account.id } : {}),
     });
 
     // Listeners MUST be attached synchronously here, before we return.

@@ -42,9 +42,20 @@ export type AgentEvent =
       resetsAt?: number;
       /** The agent's own wording, e.g. "You've hit your limit · resets 11pm". */
       message?: string;
+      /**
+       * How full each subscription window is, when the agent said: Claude's
+       * `unifiedWindows` (`five_hour`, `seven_day`), `usedPercent` 0–100.
+       */
+      windows?: Array<{ kind: string; usedPercent: number; resetsAt?: number }>;
       /** Epoch ms the event was seen. */
       at: number;
     }
+  /**
+   * Which subscription account this run (or, after a failover, the rest of
+   * it) is paid by — for the reply card's `Sponsor:` line. `switchedFrom` is
+   * set when the bridge moved the run off an account whose quota ran out.
+   */
+  | { type: 'account'; label: string; switchedFrom?: string }
   | {
       /**
        * One turn's consumption. `inputTokens` is the whole prompt, the cached

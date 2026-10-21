@@ -1,5 +1,6 @@
 import type { ProfileConfig } from '../config/profile-schema';
 import { claudeAccountName } from './claude/account';
+import { accountsReport, claudeAccountPool } from './claude/accounts';
 import { codexAccountName, effectiveCodexHome } from './codex/account';
 import type { AgentKind } from './registry';
 
@@ -19,4 +20,25 @@ const ACCOUNT_NAMES: Record<AgentKind, (profileConfig: AccountProfile) => Promis
  */
 export function agentAccountName(profileConfig: AccountProfile): Promise<string | undefined> {
   return ACCOUNT_NAMES[profileConfig.agentKind]?.(profileConfig) ?? Promise.resolve(undefined);
+}
+
+const ACCOUNT_REPORTS: Record<AgentKind, (profileDir: string) => Promise<string[] | undefined>> = {
+  claude: async (profileDir) => {
+    const pool = claudeAccountPool(profileDir);
+    await pool.refresh();
+    if (!pool.multi) return undefined;
+    return [
+      `**订阅账户**（额度用尽自动切换，▶ 为新任务使用的账户；任一窗口到 ${pool.switchAtPercent}% 即视为用尽）`,
+      ...accountsReport(pool, await claudeAccountName()),
+    ];
+  },
+  codex: () => Promise.resolve(undefined),
+};
+
+/**
+ * The profile's subscription accounts and how full each is, as Markdown lines
+ * for `/usage`. Undefined when the profile has only one account.
+ */
+export function agentAccountsReport(profileConfig: AccountProfile, profileDir: string): Promise<string[] | undefined> {
+  return (ACCOUNT_REPORTS[profileConfig.agentKind]?.(profileDir) ?? Promise.resolve(undefined)).catch(() => undefined);
 }

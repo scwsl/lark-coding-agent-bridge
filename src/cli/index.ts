@@ -2,6 +2,7 @@ import { runMonitor } from './commands/monitor';
 import { Command } from 'commander';
 import pkg from '../../package.json';
 import { formatAgentPreflightDiagnostic, getAgentPreflightDiagnostic } from '../agent/preflight';
+import { runClaudeAccountAdd, runClaudeAccountList, runClaudeAccountRemove } from './commands/claude-account';
 import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
@@ -268,6 +269,37 @@ secrets
   .option('--profile <name>', 'profile name (defaults to active profile)')
   .action(async (opts: { appId: string; profile?: string }) => {
     await runSecretsRemove(opts.appId, { profile: opts.profile });
+  });
+
+const claudeAccount = program
+  .command('claude-account')
+  .description('Extra Claude subscription accounts a profile switches to when the quota runs out');
+
+claudeAccount
+  .command('list')
+  .description('List the accounts in preference order with their last known quota')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (opts: { profile?: string }) => {
+    await runClaudeAccountList({ profile: opts.profile });
+  });
+
+claudeAccount
+  .command('add <id>')
+  .description('Add an account from a `claude setup-token` token (prompted without echo, or piped on stdin)')
+  .option('--label <name>', 'name shown as the reply card Sponsor')
+  .option('--token-stdin', 'read the token from stdin')
+  .option('--no-verify', 'save without a test request')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string, opts: { label?: string; tokenStdin?: boolean; verify?: boolean; profile?: string }) => {
+    await runClaudeAccountAdd(id, opts);
+  });
+
+claudeAccount
+  .command('remove <id>')
+  .description('Remove an account and its token')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string, opts: { profile?: string }) => {
+    await runClaudeAccountRemove(id, { profile: opts.profile });
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

@@ -1,3 +1,4 @@
+import { claudeAccountPool } from '../agent/claude/accounts';
 import { ClaudeAdapter } from '../agent/claude/adapter';
 import { CodexAdapter } from '../agent/codex/adapter';
 import type { LarkChannelEnvContext } from '../agent/lark-channel-env';
@@ -45,7 +46,8 @@ interface AdapterFactoryContext {
 
 /** One adapter constructor per agent kind; see src/agent/registry.ts for adding one. */
 const ADAPTER_FACTORIES: Record<AgentKind, (profileConfig: ProfileConfig, ctx: AdapterFactoryContext) => AgentAdapter> = {
-  claude: (_profileConfig, ctx) => new ClaudeAdapter({ larkChannel: ctx.larkChannel }),
+  claude: (_profileConfig, ctx) =>
+    new ClaudeAdapter({ larkChannel: ctx.larkChannel, accounts: claudeAccountPool(ctx.profileDir) }),
   codex: (profileConfig, ctx) => {
     const codex = profileConfig.codex;
     if (!codex?.binaryPath) {

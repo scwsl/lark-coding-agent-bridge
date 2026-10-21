@@ -108,7 +108,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(stopButton(options, t));
   } else {
     if (options.copyCode) elements.push(...copyButtons(state, options.copyCode, t));
-    elements.push(...byline(options.meta));
+    elements.push(...byline(state.sponsor && options.meta ? { ...options.meta, sponsor: state.sponsor } : options.meta));
   }
 
   // Mask raw emails across every text field so the Feishu tenant audit doesn't

@@ -21,6 +21,8 @@ interface ClaudeRawEvent {
     status?: string;
     resetsAt?: number;
     rateLimitType?: string;
+    /** Every window's fill, e.g. `{ five_hour: { utilization: 0.14, resetsAt: 1792563600 } }`. */
+    unifiedWindows?: Record<string, { utilization?: unknown; resetsAt?: unknown } | null | undefined>;
   };
   session_id?: string;
   cwd?: string;
@@ -99,12 +101,14 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
 
   if (evt.type === 'rate_limit_event' && evt.rate_limit_info) {
     const info = evt.rate_limit_info;
+    const windows = quotaWindows(info.unifiedWindows);
     yield {
       type: 'rate_limit',
       blocked: info.status === 'rejected',
       ...(info.rateLimitType ? { limitType: info.rateLimitType } : {}),
       // Claude reports epoch seconds.
       ...(typeof info.resetsAt === 'number' ? { resetsAt: info.resetsAt * 1000 } : {}),
+      ...(windows.length > 0 ? { windows } : {}),
       at: Date.now(),
     };
     return;
@@ -172,6 +176,24 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
     }
     yield { type: 'done', sessionId: evt.session_id, terminationReason: 'normal' };
   }
+}
+
+/** `unifiedWindows` as 0–100 percentages with epoch-ms resets; malformed entries are skipped. */
+function quotaWindows(
+  raw: NonNullable<ClaudeRawEvent['rate_limit_info']>['unifiedWindows'],
+): Array<{ kind: string; usedPercent: number; resetsAt?: number }> {
+  if (!raw || typeof raw !== 'object') return [];
+  const windows: Array<{ kind: string; usedPercent: number; resetsAt?: number }> = [];
+  for (const [kind, value] of Object.entries(raw)) {
+    if (!value || typeof value !== 'object' || typeof value.utilization !== 'number') continue;
+    if (!Number.isFinite(value.utilization)) continue;
+    windows.push({
+      kind,
+      usedPercent: Math.round(value.utilization * 1000) / 10,
+      ...(typeof value.resetsAt === 'number' ? { resetsAt: value.resetsAt * 1000 } : {}),
+    });
+  }
+  return windows;
 }
 
 /** Encode one prompt as a stream-json user message (`--input-format stream-json`). */

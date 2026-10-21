@@ -47,6 +47,8 @@ export interface RunState {
   subagent?: { parentToolUseId: string; tool?: string; description?: string; at: number };
   /** Set once a request was refused for quota; the run ends `paused`. */
   limit?: RunLimit;
+  /** The account the agent reported paying for the run (last one after a failover). */
+  sponsor?: string;
 }
 
 export const initialState: RunState = {
@@ -141,6 +143,24 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         at: evt.at,
       };
       return { ...state, quota, limit };
+    }
+
+    case 'account': {
+      if (!evt.switchedFrom) return { ...state, sponsor: evt.label };
+      // Moved to another account mid-task: say so where it happened, and drop
+      // the refusal that caused it — the task goes on, it is not paused.
+      const note: Block = {
+        kind: 'text',
+        content: `🔄 **账户 ${evt.switchedFrom} 额度用尽，已切换到 ${evt.label} 继续**\n\n`,
+        streaming: false,
+      };
+      const { limit: _limit, ...rest } = state;
+      return {
+        ...rest,
+        sponsor: evt.label,
+        blocks: [...closeStreamingText(state.blocks), note],
+        footer: 'thinking',
+      };
     }
 
     case 'subagent_activity':

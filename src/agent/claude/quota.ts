@@ -1,5 +1,6 @@
 import { runCapture } from '../../git/exec';
 import type { QuotaReading, QuotaReadOptions, QuotaWindow } from '../quota';
+import { claudeAccountPool, type ClaudeAccountPool } from './accounts';
 
 /**
  * Claude Code's subscription windows from `claude -p "/usage"` — a local
@@ -12,11 +13,41 @@ import type { QuotaReading, QuotaReadOptions, QuotaWindow } from '../quota';
  *
  * Model-specific weekly windows only limit that model and are left out.
  */
-export async function readClaudeQuota(opts: QuotaReadOptions, binary = 'claude'): Promise<QuotaReading | undefined> {
-  const result = await runCapture(binary, opts.cwd, ['-p', '/usage'], { timeoutMs: opts.timeoutMs ?? 60_000, maxBytes: 64_000 });
+export async function readClaudeQuota(
+  opts: QuotaReadOptions,
+  binary = 'claude',
+  pool: ClaudeAccountPool | undefined = opts.profileDir ? claudeAccountPool(opts.profileDir) : undefined,
+): Promise<QuotaReading | undefined> {
+  await pool?.refresh();
+  if (!pool?.multi) return readUsage(opts, binary, {});
+  // Several accounts: the profile has as much room as its emptiest account,
+  // since runs move there once the others fill up. An account whose token
+  // cannot read `/usage` (setup-token logins may lack the scope) is judged by
+  // what its last run reported; one never used yet is left out.
+  const readings: QuotaReading[] = [];
+  for (const account of pool.accounts()) {
+    const reading = (await readUsage(opts, binary, account.env)) ?? pool.quotaReading(account.id);
+    if (reading) readings.push(reading);
+  }
+  return mostRoom(readings);
+}
+
+async function readUsage(opts: QuotaReadOptions, binary: string, env: Record<string, string>): Promise<QuotaReading | undefined> {
+  const result = await runCapture(binary, opts.cwd, ['-p', '/usage'], {
+    timeoutMs: opts.timeoutMs ?? 60_000,
+    maxBytes: 64_000,
+    env,
+  });
   if (!result.ok) return undefined;
   const windows = parseClaudeUsage(result.stdout);
   return windows.length > 0 ? { windows } : undefined;
+}
+
+/** The reading whose fullest window is the emptiest; a blocked account counts as full. */
+function mostRoom(readings: QuotaReading[]): QuotaReading | undefined {
+  const fullness = (reading: QuotaReading): number =>
+    reading.blocked ? 100 : Math.max(0, ...reading.windows.map((w) => w.usedPercent));
+  return [...readings].sort((a, b) => fullness(a) - fullness(b))[0];
 }
 
 export function parseClaudeUsage(text: string): QuotaWindow[] {
