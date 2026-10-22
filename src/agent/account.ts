@@ -67,7 +67,7 @@ export async function agentAccountsTable(profileConfig: AccountProfile, profileD
   await pool.refresh();
   const rows = accountRows(pool, await claudeAccountName());
   return [
-    '**Claude 订阅账户**（▶ 为新任务正在用的账户；到切换线后自动按顺序换下一个）',
+    '**Claude 订阅账户**（✅ 为新任务正在用的账户；到切换线后自动按顺序换下一个）',
     '',
     accountsTable(rows),
     '',

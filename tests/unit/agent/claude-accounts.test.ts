@@ -214,7 +214,7 @@ describe('account table and switching (/accounts)', () => {
     expect(empty).toBeGreaterThan(full);
     // Same usage: the week that resets sooner wins.
     expect(switchScore(view(0, 50, DAY), true)).toBeGreaterThan(switchScore(view(0, 50, 6 * DAY), true));
-    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.35);
+    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.3);
     // Past the line: no room left.
     expect(switchScore(view(0, 95, 6 * DAY), true)).toBeLessThan(0.3);
   });
@@ -228,9 +228,9 @@ describe('account table and switching (/accounts)', () => {
     pool.observe('b', limit({ windows: [{ kind: 'seven_day', usedPercent: 10, resetsAt: NOW + 5 * DAY }] }));
     const rows = accountRows(pool, 'shilong.wang', NOW);
     const table = accountsTable(rows);
-    expect(table.split('\n')[0]).toBe('| | 账户 | 5 小时用量 | 5 小时重置 | 本周用量 | 本周重置 | 5 小时切换线 | 本周切换线 | 得分 | 状态 |');
-    expect(table).toContain('| ▶ | **shilong.wang**（主，default） | 46% | 4h32m | 55% | 2d22h | 98% | 98% |');
-    expect(table).toContain('**c-name**（备 2，c） | — | — | — | — | 98% | 98% | 35 | 还没运行过 |');
+    expect(table.split('\n')[0]).toBe('| 账户 | 5 小时用量 / 重置 | 本周用量 / 重置 | 切换线（5 小时 / 本周） | 得分 | 状态 |');
+    expect(table).toContain('| ✅ **shilong.wang**（主，default） | 46% / 4h32m | 55% / 2d22h | 98% / 98% |');
+    expect(table).toContain('| **c-name**（备 2，c） | — | — | 98% / 98% | 30 | 还没运行过 |');
   });
 
   it('switches without a name to the best-scoring account with room, never the current one', async () => {

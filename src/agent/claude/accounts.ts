@@ -567,7 +567,7 @@ function formatClock(at: number): string {
 // ─── Account table and switching (`/accounts`, `claude-account switch`) ─────
 
 /** Weights of the switch score: room left first, then how soon the tighter window resets. */
-export const SWITCH_SCORE_WEIGHTS = { room: 0.7, reset: 0.3 } as const;
+export const SWITCH_SCORE_WEIGHTS = { room: 0.6, reset: 0.4 } as const;
 /** Room assumed for an account that has never run here (its token is untested). */
 const UNKNOWN_ROOM = 0.5;
 const WINDOW_MS: Record<WindowKind, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
@@ -604,7 +604,7 @@ export interface AccountRow {
 
 /**
  * How good a switch target an account is, 0–1:
- * `0.7 × room + 0.3 × resetSoon`, where room is what is left before the
+ * `0.6 × room + 0.4 × resetSoon`, where room is what is left before the
  * tighter of its two lines (1 − the larger of used ÷ line per window), and
  * resetSoon is how close that same window is to resetting (1 − time left ÷
  * window length). Little used wins; between similar ones, the one whose
@@ -682,13 +682,11 @@ export function formatDaysHours(ms: number): string {
   return `${Math.floor(hours / 24)}d${hours % 24}h`;
 }
 
-function usedCell(view: AccountWindowView): string {
-  return view.usedPercent === undefined ? '—' : `${Math.round(view.usedPercent)}%`;
-}
-
-function resetCell(view: AccountWindowView, format: (ms: number) => string): string {
-  if (view.reset) return '已重置';
-  return view.resetsInMs === undefined ? '—' : format(view.resetsInMs);
+/** `18% / 4h19m`; `0% / 已重置` after a reset; `—` when no run reported the window. */
+function windowCell(view: AccountWindowView, format: (ms: number) => string): string {
+  if (view.usedPercent === undefined) return '—';
+  const reset = view.reset ? '已重置' : view.resetsInMs === undefined ? '—' : format(view.resetsInMs);
+  return `${Math.round(view.usedPercent)}% / ${reset}`;
 }
 
 function stateCell(row: AccountRow): string {
@@ -698,18 +696,18 @@ function stateCell(row: AccountRow): string {
   return row.next ? '使用中' : '可用';
 }
 
-/** The accounts as one Markdown table, one column per figure. */
+/** The accounts as one Markdown table; ✅ marks the account new runs use. */
 export function accountsTable(rows: AccountRow[]): string {
   const out = [
-    '| | 账户 | 5 小时用量 | 5 小时重置 | 本周用量 | 本周重置 | 5 小时切换线 | 本周切换线 | 得分 | 状态 |',
-    '|---|---|---|---|---|---|---|---|---|---|',
+    '| 账户 | 5 小时用量 / 重置 | 本周用量 / 重置 | 切换线（5 小时 / 本周） | 得分 | 状态 |',
+    '|---|---|---|---|---|---|',
   ];
   for (const row of rows) {
     const five = row.windows.five_hour;
     const week = row.windows.seven_day;
     const role = row.index === 0 ? '主' : `备 ${row.index}`;
     out.push(
-      `| ${row.next ? '▶' : ''} | **${row.name}**（${role}，${row.id}） | ${usedCell(five)} | ${resetCell(five, formatHoursMinutes)} | ${usedCell(week)} | ${resetCell(week, formatDaysHours)} | ${five.line}% | ${week.line}% | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
+      `| ${row.next ? '✅ ' : ''}**${row.name}**（${role}，${row.id}） | ${windowCell(five, formatHoursMinutes)} | ${windowCell(week, formatDaysHours)} | ${five.line}% / ${week.line}% | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
     );
   }
   return out.join('\n');
