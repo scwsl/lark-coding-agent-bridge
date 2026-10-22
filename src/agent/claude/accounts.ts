@@ -52,6 +52,14 @@ export const WINDOW_LABELS: Record<WindowKind, string> = { five_hour: '5 小时�
 /** Fill (1–100%) per window at which runs move to another account. */
 export type SwitchLines = Record<WindowKind, number>;
 export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
+/** How far a switch by name (`/accounts switch <name>`) raises the account's lines, for a while. */
+export const SWITCH_BOOST_LINE = 98;
+
+/** A raised line and until when it holds (that window's next reset). */
+export interface LineBoost {
+  line: number;
+  until: number;
+}
 
 export interface ClaudeAccountEntry {
   id: string;
@@ -59,6 +67,11 @@ export interface ClaudeAccountEntry {
   label?: string;
   /** This account's own lines; a window left out follows the profile's. */
   lines?: Partial<SwitchLines>;
+  /**
+   * Lines raised by a switch by name, per window, until that window resets.
+   * Dropped as soon as runs move on to another account.
+   */
+  boost?: Partial<Record<WindowKind, LineBoost>>;
 }
 
 export interface ClaudeAccountsConfig {
@@ -140,11 +153,12 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
     if (!item || typeof item !== 'object') continue;
-    const { id, label, lines, reservePercent } = item as {
+    const { id, label, lines, reservePercent, boost } = item as {
       id?: unknown;
       label?: unknown;
       lines?: unknown;
       reservePercent?: unknown;
+      boost?: unknown;
     };
     if (typeof id !== 'string' || !isValidAccountId(id) || seen.has(id)) continue;
     seen.add(id);
@@ -153,15 +167,29 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
         ? { five_hour: 100 - reservePercent, seven_day: 100 - reservePercent }
         : {};
     const own = { ...legacy, ...parseLines(lines) };
+    const raised = parseBoost(boost);
     accounts.push({
       id,
       ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
       ...(Object.keys(own).length > 0 ? { lines: own } : {}),
+      ...(raised ? { boost: raised } : {}),
     });
   }
   if (!seen.has(DEFAULT_ACCOUNT_ID)) accounts.unshift({ id: DEFAULT_ACCOUNT_ID });
   config.accounts = accounts;
   return config;
+}
+
+function parseBoost(raw: unknown): ClaudeAccountEntry['boost'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const boost: Partial<Record<WindowKind, LineBoost>> = {};
+  for (const kind of WINDOW_KINDS) {
+    const value = (raw as Record<string, { line?: unknown; until?: unknown } | undefined>)[kind];
+    if (value && isValidLine(value.line) && typeof value.until === 'number' && Number.isFinite(value.until)) {
+      boost[kind] = { line: value.line, until: value.until };
+    }
+  }
+  return Object.keys(boost).length > 0 ? boost : undefined;
 }
 
 function parseLines(raw: unknown): Partial<SwitchLines> {
@@ -245,6 +273,8 @@ export async function reorderAccounts(paths: ClaudeAccountsPaths, ids: string[])
   if (new Set(ids).size !== ids.length) throw new Error('账户重复了');
   const first = ids.map((id) => config.accounts.find((a) => a.id === id)!);
   config.accounts = [...first, ...config.accounts.filter((a) => !ids.includes(a.id))];
+  // Raised lines belong to the main account alone.
+  for (const entry of config.accounts.slice(1)) delete entry.boost;
   await writeAccountsConfig(paths, config);
   return config;
 }
@@ -331,9 +361,21 @@ export class ClaudeAccountPool {
     return { ...this.config.lines };
   }
 
-  /** The line (1–100) at which runs leave the account in `kind`'s window. */
-  lineOf(id: string, kind: WindowKind): number {
+  /** The line (1–100) at which runs leave the account in `kind`'s window, a raised one included. */
+  lineOf(id: string, kind: WindowKind, now = this.now()): number {
+    const line = this.baseLineOf(id, kind);
+    const boost = this.config.accounts.find((a) => a.id === id)?.boost?.[kind];
+    return boost && boost.until > now ? Math.max(line, boost.line) : line;
+  }
+
+  /** The account's own line, or the profile's, without any raise. */
+  baseLineOf(id: string, kind: WindowKind): number {
     return this.config.accounts.find((a) => a.id === id)?.lines?.[kind] ?? this.config.lines[kind];
+  }
+
+  /** Some window's line is raised right now (a switch by name). */
+  isBoosted(id: string, now = this.now()): boolean {
+    return WINDOW_KINDS.some((kind) => this.lineOf(id, kind, now) > this.baseLineOf(id, kind));
   }
 
   /** Accounts that can run, in order of preference: the CLI's own login and those with a token. */
@@ -401,16 +443,17 @@ export class ClaudeAccountPool {
 
   /**
    * Put `id` at the top of the list once a run moved to it, so new runs stay
-   * on it until it reaches a line too. Takes effect at once; the file follows.
+   * on it until it reaches a line too; raised lines end with the move. Takes
+   * effect at once; the file follows.
    */
   promote(id: string): void {
     const accounts = this.config.accounts;
     const entry = accounts.find((a) => a.id === id);
     if (!entry || accounts[0]?.id === id) return;
-    this.config = { ...this.config, accounts: [entry, ...accounts.filter((a) => a.id !== id)] };
+    this.config = { ...this.config, accounts: withMain(accounts, id) };
     log.info('claude-accounts', 'promote', { id });
     this.writing = this.writing
-      .then(() => reorderAccounts(this.opts.paths, [id]))
+      .then(() => switchToAccount(this.opts.paths, id))
       .then(() => undefined)
       .catch((err: unknown) => log.warn('claude-accounts', 'promote-write-failed', { id, err: String(err) }));
   }
@@ -421,7 +464,7 @@ export class ClaudeAccountPool {
     const windows = {} as Record<WindowKind, AccountWindowView>;
     for (const kind of WINDOW_KINDS) {
       const window = state?.windows[kind];
-      const line = this.lineOf(id, kind);
+      const line = this.lineOf(id, kind, now);
       if (!window) {
         windows[kind] = { line };
         continue;
@@ -477,7 +520,7 @@ export class ClaudeAccountPool {
     if (!state) return undefined;
     for (const kind of WINDOW_KINDS) {
       const window = state.windows[kind];
-      const line = this.lineOf(id, kind);
+      const line = this.lineOf(id, kind, now);
       if (!window || window.usedPercent < line) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > now) return { kind, line };
@@ -492,7 +535,7 @@ export class ClaudeAccountPool {
     let at = this.refusedUntil(id, now) ?? now;
     for (const kind of WINDOW_KINDS) {
       const window = state.windows[kind];
-      if (!window || window.usedPercent < this.lineOf(id, kind)) continue;
+      if (!window || window.usedPercent < this.lineOf(id, kind, now)) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > at) at = until;
     }
@@ -642,7 +685,8 @@ function formatClock(at: number): string {
 export const SWITCH_SCORE_WEIGHTS = { weekRoom: 0.45, weekExpiring: 0.25, fiveHourRoom: 0.3 } as const;
 /** Room assumed for an account that has never run here (its token is untested). */
 const UNKNOWN_ROOM = 0.5;
-const WEEK_MS = 7 * 86_400_000;
+const WINDOW_MS: Record<WindowKind, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
+const WEEK_MS = WINDOW_MS.seven_day;
 
 export interface AccountWindowView {
   /** 0–100; undefined when no run reported this window yet. */
@@ -670,6 +714,8 @@ export interface AccountRow {
   pastLine?: WindowKind;
   /** Below all its lines and not refused: a run would use it right now. */
   ready: boolean;
+  /** Its lines are raised for now by a switch by name. */
+  boosted: boolean;
   /** 0–1, see {@link switchScore}. */
   score: number;
 }
@@ -734,6 +780,7 @@ export function accountRows(pool: ClaudeAccountPool, defaultLabel: string | unde
       ...(refusedUntil !== undefined ? { refusedUntil } : {}),
       ...(pastLine ? { pastLine } : {}),
       ready: pool.underLinesAt(account.id, now) <= now,
+      boosted: pool.isBoosted(account.id, now),
       score: switchScore(windows, known),
     };
   });
@@ -776,7 +823,7 @@ export function accountsTable(rows: AccountRow[]): string {
     const week = row.windows.seven_day;
     const role = row.index === 0 ? '主' : `备 ${row.index}`;
     out.push(
-      `| ${row.next ? '✅ ' : ''}**${row.name}**（${role}，${row.id}） | ${windowCell(five, formatHoursMinutes)} | ${windowCell(week, formatDaysHours)} | ${five.line}% / ${week.line}% | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
+      `| ${row.next ? '✅ ' : ''}**${row.name}**（${role}，${row.id}） | ${windowCell(five, formatHoursMinutes)} | ${windowCell(week, formatDaysHours)} | ${five.line}% / ${week.line}%${row.boosted ? '（临时）' : ''} | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
     );
   }
   return out.join('\n');
@@ -795,7 +842,40 @@ export function findAccountRow(rows: AccountRow[], query: string): AccountRow | 
   return rows.find((row) => row.id.toLowerCase() === q) ?? rows.find((row) => row.name.toLowerCase() === q);
 }
 
-/** Make `id` the main account: new runs use it first; the rest keep their order. */
-export async function switchToAccount(paths: ClaudeAccountsPaths, id: string): Promise<ClaudeAccountsConfig> {
-  return reorderAccounts(paths, [id]);
+/**
+ * Make `id` the main account: new runs use it first; the rest keep their
+ * order. Any raised lines end here; `boost` raises the new main account's.
+ */
+export async function switchToAccount(
+  paths: ClaudeAccountsPaths,
+  id: string,
+  boost?: ClaudeAccountEntry['boost'],
+): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户：${id}`);
+  config.accounts = withMain(config.accounts, id);
+  if (boost && Object.keys(boost).length > 0) config.accounts[0]!.boost = boost;
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
+/** `id` first, the rest in order, nobody's lines raised. */
+function withMain(accounts: ClaudeAccountEntry[], id: string): ClaudeAccountEntry[] {
+  const plain = accounts.map(({ boost: _raised, ...entry }) => entry);
+  return [...plain.filter((a) => a.id === id), ...plain.filter((a) => a.id !== id)];
+}
+
+/**
+ * What a switch by name raises: each window whose line is below
+ * {@link SWITCH_BOOST_LINE} goes up to it until that window's next reset (a
+ * full window length when the reset is not known). Undefined when nothing rises.
+ */
+export function switchBoost(pool: ClaudeAccountPool, id: string, now = Date.now()): ClaudeAccountEntry['boost'] {
+  const windows = pool.windowViews(id, now);
+  const boost: Partial<Record<WindowKind, LineBoost>> = {};
+  for (const kind of WINDOW_KINDS) {
+    if (pool.baseLineOf(id, kind) >= SWITCH_BOOST_LINE) continue;
+    boost[kind] = { line: SWITCH_BOOST_LINE, until: now + (windows[kind].resetsInMs ?? WINDOW_MS[kind]) };
+  }
+  return Object.keys(boost).length > 0 ? boost : undefined;
 }

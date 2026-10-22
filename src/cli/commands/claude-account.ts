@@ -12,6 +12,8 @@ import {
   deleteAccount,
   isValidAccountId,
   reorderAccounts,
+  SWITCH_BOOST_LINE,
+  switchBoost,
   saveAccount,
   updateAccount,
   updateDefaultLines,
@@ -150,9 +152,12 @@ export async function runClaudeAccountSwitch(query: string | undefined, opts: Ac
     console.error(query ? `✗ 没有叫「${query}」的账户` : '✗ 其他账户都已到切换线或额度用尽，暂时没有可切换的');
     process.exit(1);
   }
-  await switchToAccount(paths, target.id);
+  const boost = query ? switchBoost(pool, target.id) : undefined;
+  await switchToAccount(paths, target.id, boost);
   await pool.refresh();
-  console.log(`✓ 已把 ${target.name}（${target.id}）设为主账户，运行中的 bridge 下一次运行前生效\n`);
+  console.log(
+    `✓ 已把 ${target.name}（${target.id}）设为主账户${boost ? `，切换线临时放宽到 ${SWITCH_BOOST_LINE}%` : ''}，运行中的 bridge 下一次运行前生效\n`,
+  );
   console.log(accountsTable(accountRows(pool, label)).replace(/\*\*/g, ''));
 }
 

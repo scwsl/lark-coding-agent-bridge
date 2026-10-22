@@ -12,6 +12,7 @@ import {
   findAccountRow,
   formatDaysHours,
   formatHoursMinutes,
+  switchBoost,
   switchScore,
   switchToAccount,
   reorderAccounts,
@@ -250,6 +251,34 @@ describe('account table and switching (/accounts)', () => {
     await pool.refresh();
     expect(pool.pick()?.id).toBe('d');
     expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['d', 'default', 'b', 'c']);
+  });
+
+  it('a switch by name raises the lines to 98% until each window resets, and they drop once runs move on', async () => {
+    const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 80, seven_day: 90 });
+    pool.observe('backup2', fiveHour(85));
+    expect(pool.hasRoom('backup2')).toBe(false);
+    const boost = switchBoost(pool, 'backup2', NOW);
+    // The 5-hour window resets in an hour; the weekly one is not known yet: a full week.
+    expect(boost).toEqual({
+      five_hour: { line: 98, until: NOW + HOUR },
+      seven_day: { line: 98, until: NOW + 7 * DAY },
+    });
+    await switchToAccount(paths, 'backup2', boost);
+    await pool.refresh();
+    expect(pool.pick()?.id).toBe('backup2');
+    expect(pool.lineOf('backup2', 'five_hour')).toBe(98);
+    expect(pool.lineOf('backup2', 'five_hour', NOW + 2 * HOUR)).toBe(80);
+    const rows = accountRows(pool, undefined, NOW);
+    expect(rows[0]?.boosted).toBe(true);
+    expect(accountsTable(rows)).toContain('| 98% / 98%（临时） |');
+    // An account whose lines are already 98% has nothing to raise.
+    const { pool: atDefault } = await poolWith(['b']);
+    expect(switchBoost(atDefault, 'b', NOW)).toBeUndefined();
+    // Runs move on (at 98%, or to another account): the raise is gone, in memory and on disk.
+    pool.promote('backup');
+    expect(pool.lineOf('backup2', 'five_hour')).toBe(80);
+    await pool.flush();
+    expect(readAccountsConfig(paths).accounts.find((a) => a.id === 'backup2')?.boost).toBeUndefined();
   });
 
   it('finds an account by id, name or the CLI login, ignoring case', async () => {

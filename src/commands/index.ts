@@ -1723,7 +1723,7 @@ async function handleAccounts(args: string, ctx: CommandContext): Promise<void> 
     await reply(ctx, `❌ ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  await reply(ctx, '用法：`/accounts` 查看账户；`/accounts switch` 自动切到得分最高的可用账户；`/accounts switch <名字或 id>` 切到指定账户。');
+  await reply(ctx, '用法：`/accounts` 查看账户；`/accounts switch` 自动切到得分最高的可用账户；`/accounts switch <名字或 id>` 切到指定账户，它的切换线临时放宽到 98%（5 小时和本周），到线自动切走或该窗口重置后恢复。');
 }
 
 // ─── /coffee ──────────────────────────────────────────────────────────────
