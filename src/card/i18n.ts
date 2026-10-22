@@ -8,12 +8,28 @@
 export type Locale = 'zh' | 'en';
 
 const HAN = /\p{Script=Han}/u;
-const LETTER = /\p{L}/u;
+// Bits of a message that say nothing about the writer's language: links,
+// paths and slash commands, @mentions, and anything with a digit (SNs, ticket
+// keys, versions).
+const NOISE = /https?:\/\/\S+|(?<!\S)[/~.]\S*|@\S+|\S*\d\S*/gu;
+const WORD = /\p{L}{2,}/gu;
+/**
+ * Fewer real words than this is a pick or an ack (`b`, `ok`, `A 方案` without
+ * the Chinese), not a language: stay on the Chinese default rather than flip
+ * the card to English.
+ */
+const MIN_FOREIGN_WORDS = 3;
 
 export function detectLocale(texts: readonly string[]): Locale {
   const joined = texts.join('\n');
   if (HAN.test(joined)) return 'zh';
-  return LETTER.test(joined) ? 'en' : 'zh';
+  const words = joined.replace(NOISE, ' ').match(WORD) ?? [];
+  return words.length >= MIN_FOREIGN_WORDS ? 'en' : 'zh';
+}
+
+/** Whether `text` has any Chinese in it — for text the agent wrote, not the caller. */
+export function hasChinese(text: string): boolean {
+  return HAN.test(text);
 }
 
 export interface RunStrings {

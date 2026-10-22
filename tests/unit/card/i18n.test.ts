@@ -17,6 +17,19 @@ describe('reply language', () => {
   it('follows a caller who wrote only in another language', () => {
     expect(detectLocale(['Please check the build'])).toBe('en');
     expect(detectLocale(['Bitte prüfe den Build'])).toBe('en');
+    expect(detectLocale(['Hi team, AL7002223030609 shows Fault on home page'])).toBe('en');
+  });
+
+  it('stays Chinese when a short reply says nothing about the language', () => {
+    // A pick from a list of options, an ack, or an ID is not a language.
+    expect(detectLocale(['b'])).toBe('zh');
+    expect(detectLocale(['B'])).toBe('zh');
+    expect(detectLocale(['ok'])).toBe('zh');
+    expect(detectLocale(['go on'])).toBe('zh');
+    expect(detectLocale(['ANTELOPE-7707'])).toBe('zh');
+    expect(detectLocale(['AL7002223030609 v1.3.2'])).toBe('zh');
+    expect(detectLocale(['/new-topic jira ANTELOPE-7707'])).toBe('zh');
+    expect(detectLocale(['https://alphaess.atlassian.net/browse/ANTELOPE-7673'])).toBe('zh');
   });
 
   it('renders the run card chrome in that language', () => {

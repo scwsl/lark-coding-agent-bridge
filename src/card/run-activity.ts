@@ -1,4 +1,4 @@
-import { detectLocale, runStrings, type Locale } from './i18n';
+import { hasChinese, runStrings, type Locale } from './i18n';
 import type { RunState, ToolEntry } from './run-state';
 
 const LABEL_MAX = 40;
@@ -37,7 +37,7 @@ export function runningToolLabel(state: RunState, locale: Locale = 'zh'): string
 
 /** The agent writes descriptions in the caller's language — when it doesn't, hide them. */
 function inLocale(text: string, locale: Locale): boolean {
-  return locale !== 'zh' || detectLocale([text]) === 'zh';
+  return locale !== 'zh' || hasChinese(text);
 }
 
 function oneLine(raw: string): string | undefined {
