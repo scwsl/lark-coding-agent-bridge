@@ -19,7 +19,7 @@ import {
 } from '../../config/profile-schema';
 import type { AppConfig } from '../../config/schema';
 import { isComplete } from '../../config/schema';
-import { configureLogger, gcOldLogs, log, reportError } from '../../core/logger';
+import { configureLogger, gcOldLogs, log, reportError, scheduleLogGc } from '../../core/logger';
 import { loadTelemetryAdapter, telemetry } from '../../core/telemetry';
 import { gcMediaCache } from '../../media/cache';
 import { startUiServer } from '../../ui/server';
@@ -143,6 +143,7 @@ async function runClassic(opts: StartOptions): Promise<void> {
     hostname: os.hostname(),
   });
   await gcOldLogs();
+  scheduleLogGc();
 
   const supervisor = new Supervisor({ configPath, rootDir: appPaths.rootDir });
 
@@ -202,6 +203,7 @@ async function runSupervisorConsole(opts: StartOptions): Promise<void> {
     hostname: os.hostname(),
   });
   await gcOldLogs();
+  scheduleLogGc();
 
   const supervisor = new Supervisor({ configPath, rootDir: appPaths.rootDir });
 

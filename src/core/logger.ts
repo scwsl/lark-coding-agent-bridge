@@ -7,6 +7,8 @@ import { telemetry } from './telemetry';
 export interface LoggerOptions {
   logsDir?: string;
   retentionDays: number;
+  /** Cap on all daily log files together; the oldest go first once it is exceeded. */
+  maxTotalBytes: number;
   now: () => Date;
 }
 
@@ -15,8 +17,15 @@ const DEFAULT_RETENTION_DAYS = Math.max(
   Number(process.env.LARK_CHANNEL_LOG_DAYS ?? 30) || 30,
 );
 
+const DEFAULT_MAX_TOTAL_BYTES =
+  Math.max(10, Number(process.env.LARK_CHANNEL_LOG_MAX_MB ?? 200) || 200) * 1024 * 1024;
+
+/** How often a long-running bridge re-runs {@link gcOldLogs} (it also runs on start). */
+const LOG_GC_INTERVAL_MS = 6 * 3_600_000;
+
 let loggerOptions: LoggerOptions = {
   retentionDays: DEFAULT_RETENTION_DAYS,
+  maxTotalBytes: DEFAULT_MAX_TOTAL_BYTES,
   now: () => new Date(),
 };
 
@@ -493,6 +502,7 @@ export function configureLogger(opts: Partial<LoggerOptions>): void {
   loggerOptions = {
     ...(opts.logsDir !== undefined ? { logsDir: opts.logsDir } : { logsDir: loggerOptions.logsDir }),
     retentionDays: Math.max(1, opts.retentionDays ?? loggerOptions.retentionDays),
+    maxTotalBytes: Math.max(1, opts.maxTotalBytes ?? loggerOptions.maxTotalBytes),
     now: opts.now ?? loggerOptions.now,
   };
 }
@@ -655,8 +665,11 @@ export async function readRecentLogs(opts: { maxBytes: number }): Promise<string
 }
 
 /**
- * Delete log files older than the retention window. Best-effort, called
- * on bridge startup. Returns the number of files removed.
+ * Delete log files older than the retention window, then — oldest first —
+ * whatever still pushes the total over `maxTotalBytes`. Today's file is never
+ * removed: it is the one being written. Best-effort; runs on bridge startup
+ * and every few hours after (see {@link scheduleLogGc}). Returns the number of
+ * files removed.
  */
 export async function gcOldLogs(): Promise<number> {
   const dir = logsDir();
@@ -668,23 +681,74 @@ export async function gcOldLogs(): Promise<number> {
     return 0;
   }
   const cutoff = loggerOptions.now().getTime() - loggerOptions.retentionDays * 86_400_000;
-  let removed = 0;
-  for (const name of entries) {
+  const today = logFileName(todayKey());
+  const kept: Array<{ name: string; size: number }> = [];
+  let expired = 0;
+  // Names sort by date, so `kept` ends up oldest first.
+  for (const name of entries.sort()) {
     const m = name.match(/^bridge-(\d{4})(\d{2})(\d{2})\.jsonl$/);
     if (!m) continue;
     const fileMs = Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-    if (Number.isNaN(fileMs) || fileMs >= cutoff) continue;
-    try {
-      await rm(join(dir, name));
-      removed++;
-    } catch {
-      /* skip */
+    if (Number.isNaN(fileMs)) continue;
+    if (fileMs < cutoff && name !== today) {
+      if (await removeQuietly(join(dir, name))) expired++;
+      continue;
+    }
+    const size = await stat(join(dir, name)).then((st) => st.size, () => 0);
+    kept.push({ name, size });
+  }
+  let total = kept.reduce((sum, f) => sum + f.size, 0);
+  let oversize = 0;
+  for (const f of kept) {
+    if (total <= loggerOptions.maxTotalBytes) break;
+    if (f.name === today) continue;
+    if (await removeQuietly(join(dir, f.name))) {
+      total -= f.size;
+      oversize++;
     }
   }
+  const removed = expired + oversize;
   if (removed > 0) {
-    log.info('logger', 'gc', { removed, retentionDays: loggerOptions.retentionDays });
+    log.info('logger', 'gc', {
+      removed,
+      expired,
+      oversize,
+      retentionDays: loggerOptions.retentionDays,
+      maxTotalMb: Math.round(loggerOptions.maxTotalBytes / 1024 / 1024),
+    });
   }
   return removed;
+}
+
+let gcTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Keep collecting while the bridge runs — it can stay up for weeks, and
+ * collecting only on start let old files pile up in between. Idempotent; the
+ * timer does not hold the process open. Returns a function that stops it.
+ */
+export function scheduleLogGc(intervalMs: number = LOG_GC_INTERVAL_MS): () => void {
+  if (!gcTimer) {
+    gcTimer = setInterval(() => {
+      void gcOldLogs().catch(() => {
+        /* best-effort */
+      });
+    }, intervalMs);
+    gcTimer.unref();
+  }
+  return () => {
+    if (gcTimer) clearInterval(gcTimer);
+    gcTimer = undefined;
+  };
+}
+
+async function removeQuietly(path: string): Promise<boolean> {
+  try {
+    await rm(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readTail(path: string, maxBytes: number): Promise<string> {
