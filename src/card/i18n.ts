@@ -53,6 +53,8 @@ export interface RunStrings {
   stopConfirmTitle: string;
   stopConfirmText: string;
   interrupted: string;
+  /** Terminal note when the run was cancelled because its message was recalled. */
+  recalled: string;
   idleTimeout(minutes: number): string;
   agentFailed(message: string): string;
   noContent: string;
@@ -63,6 +65,7 @@ export interface RunStrings {
   toolCalls(n: number, finished: boolean): string;
   summary: {
     interrupted: string;
+    recalled: string;
     idleTimeout: string;
     paused: string;
     error: string;
@@ -105,6 +108,7 @@ const zh: RunStrings = {
   stopConfirmTitle: '终止这个任务？',
   stopConfirmText: '任务和它启动的命令都会被结束，无法恢复。',
   interrupted: '_⏹ 已被中断_',
+  recalled: '_↩️ 消息已撤回，任务已取消_',
   idleTimeout: (m) => `_⏱ ${m} 分钟无响应,已自动终止_`,
   agentFailed: (msg) => `⚠️ agent 失败：${msg}`,
   noContent: '_（未返回内容）_',
@@ -115,6 +119,7 @@ const zh: RunStrings = {
   toolCalls: (n, finished) => `☕ **${n} 个工具调用${finished ? '（已结束）' : ''}**`,
   summary: {
     interrupted: '已中断',
+    recalled: '已撤回',
     idleTimeout: '已超时',
     paused: '额度用完，已暂停',
     error: '出错',
@@ -170,6 +175,7 @@ const en: RunStrings = {
   stopConfirmTitle: 'Stop this task?',
   stopConfirmText: 'The task and every command it started will be ended. This cannot be undone.',
   interrupted: '_⏹ Stopped_',
+  recalled: '_↩️ Message recalled — task cancelled_',
   idleTimeout: (m) => `_⏱ No response for ${m} min, stopped automatically_`,
   agentFailed: (msg) => `⚠️ Agent failed: ${msg}`,
   noContent: '_(no content)_',
@@ -180,6 +186,7 @@ const en: RunStrings = {
   toolCalls: (n, finished) => `☕ **${n} tool call${n === 1 ? '' : 's'}${finished ? ' (finished)' : ''}**`,
   summary: {
     interrupted: 'Stopped',
+    recalled: 'Recalled',
     idleTimeout: 'Timed out',
     paused: 'Paused: quota used up',
     error: 'Failed',

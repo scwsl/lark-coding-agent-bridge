@@ -49,6 +49,9 @@ export interface RunState {
   limit?: RunLimit;
   /** The account the agent reported paying for the run (last one after a failover). */
   sponsor?: string;
+  /** Set when terminal === 'interrupted' because the message that started
+   * the run was recalled — the card says so instead of a plain "stopped". */
+  interruptReason?: 'recalled';
 }
 
 export const initialState: RunState = {

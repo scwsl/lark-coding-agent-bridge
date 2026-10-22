@@ -24,7 +24,7 @@ export function renderText(state: RunState, locale?: Locale): string {
   }
 
   if (state.terminal === 'interrupted') {
-    parts.push(t.interrupted);
+    parts.push(state.interruptReason === 'recalled' ? t.recalled : t.interrupted);
   } else if (state.terminal === 'idle_timeout') {
     parts.push(t.idleTimeout(state.idleTimeoutMinutes ?? 0));
   } else if (state.terminal === 'paused') {

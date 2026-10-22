@@ -14,6 +14,9 @@ export interface SupplementTarget {
   initiators: Set<string>;
 }
 
+/** Who or what stopped a run — logged on `card final` so the watchdog can tell a wanted stop from a failure. */
+export type StopCause = 'user' | 'recalled' | 'shutdown';
+
 export interface RunHandle {
   run: AgentRun;
   interrupted: boolean;
@@ -30,8 +33,9 @@ export interface RunHandle {
   ledger?: string;
   /** Called once, when the agent first announces its ledger. */
   onLedger?: (path: string) => void;
-  /** Why the run was stopped, when it was: a person, or the bridge shutting down. */
-  stopCause?: 'user' | 'shutdown';
+  /** Why the run was stopped, when it was: a person, the message that started
+   * it being recalled, or the bridge shutting down. */
+  stopCause?: StopCause;
 }
 
 export class ActiveRuns {
@@ -146,14 +150,17 @@ export class ActiveRuns {
    * stopped. Fires stop() fire-and-forget — the old run's generator exits on
    * its own as the subprocess dies.
    */
-  interrupt(chatId: string): boolean {
+  interrupt(chatId: string, cause: Exclude<StopCause, 'shutdown'> = 'user'): boolean {
     // An idle kept process is stopped too, but quietly: nothing was running.
-    const result = this.interruptDetailed(chatId);
+    const result = this.interruptDetailed(chatId, cause);
     return result.active || result.background;
   }
 
   /** {@link interrupt}, reporting whether a user turn and/or background work was stopped. */
-  interruptDetailed(chatId: string): { active: boolean; background: boolean } {
+  interruptDetailed(
+    chatId: string,
+    cause: Exclude<StopCause, 'shutdown'> = 'user',
+  ): { active: boolean; background: boolean } {
     const lingering = this.lingering.get(chatId);
     if (lingering) {
       this.lingering.delete(chatId);
@@ -166,7 +173,7 @@ export class ActiveRuns {
     if (!h) return { active: false, background };
     this.reservations.delete(chatId);
     h.interrupted = true;
-    h.stopCause = 'user';
+    h.stopCause = cause;
     this.handles.delete(chatId);
     void h.run.stop().catch(() => {
       /* stop errors are non-fatal */

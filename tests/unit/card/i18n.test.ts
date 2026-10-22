@@ -51,6 +51,20 @@ describe('reply language', () => {
     );
   });
 
+  it('says a run cancelled by a recall was cancelled, not merely stopped', () => {
+    const recalled = { ...initialState, terminal: 'interrupted' as const, footer: null, interruptReason: 'recalled' as const };
+    const zh = JSON.stringify(renderCard(recalled));
+    expect(zh).toContain('↩️ 消息已撤回，任务已取消');
+    expect(zh).toContain('已撤回');
+    expect(zh).not.toContain('已被中断');
+    expect(renderText(recalled)).toBe('_↩️ 消息已撤回，任务已取消_');
+
+    const en = JSON.stringify(renderCard(recalled, { locale: 'en' }));
+    expect(en).toContain('Message recalled — task cancelled');
+    expect(en).not.toMatch(/\p{Script=Han}/u);
+    expect(renderText(recalled, 'en')).toBe('_↩️ Message recalled — task cancelled_');
+  });
+
   it('pauses and resumes in the caller language', () => {
     const limit = { limitType: 'five_hour', at: 0, resetsAt: 1, autoResumeAt: 2 };
     expect(pauseNotice(limit, 'en')).toContain('the Claude 5-hour quota is used up');

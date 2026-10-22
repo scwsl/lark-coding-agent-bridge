@@ -92,7 +92,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   if (state.terminal === 'interrupted') {
-    elements.push(noteMd(t.interrupted));
+    elements.push(noteMd(state.interruptReason === 'recalled' ? t.recalled : t.interrupted));
   } else if (state.terminal === 'idle_timeout') {
     elements.push(noteMd(t.idleTimeout(state.idleTimeoutMinutes ?? 0)));
   } else if (state.terminal === 'paused') {
@@ -365,7 +365,9 @@ export function formatAgo(ms: number, t: RunStrings = runStrings('zh')): string 
 }
 
 function summaryText(state: RunState, t: RunStrings): string {
-  if (state.terminal === 'interrupted') return t.summary.interrupted;
+  if (state.terminal === 'interrupted') {
+    return state.interruptReason === 'recalled' ? t.summary.recalled : t.summary.interrupted;
+  }
   if (state.terminal === 'idle_timeout') return t.summary.idleTimeout;
   if (state.terminal === 'paused') return t.summary.paused;
   if (state.terminal === 'error') return t.summary.error;

@@ -157,6 +157,11 @@ export async function processAgentStream(
       state = finalizeIfRunning(state);
     }
   }
+  // A recall-cancel says so on the card, whether the stop was noticed here or
+  // reported by the adapter itself (done / interrupted).
+  if (state.terminal === 'interrupted' && handle.stopCause === 'recalled') {
+    state = { ...state, interruptReason: 'recalled' };
+  }
   log.info('card', 'final', {
     scope,
     terminal: state.terminal,
