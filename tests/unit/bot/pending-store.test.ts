@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PendingQueue } from '../../../src/bot/pending-queue';
 import { PendingStore } from '../../../src/bot/pending-store';
 
@@ -80,5 +80,48 @@ describe('PendingQueue durability hooks', () => {
     ]);
     expect(queue.depth('s1')).toBe(0);
     expect(flushed).toEqual([]);
+  });
+
+  it('remove() takes one message out of its scope, keeps the rest queued, and syncs the durable copy', () => {
+    const changes: Array<[string, string[]]> = [];
+    const flushed: Array<[string, string[]]> = [];
+    const queue = new PendingQueue(
+      10_000,
+      (scope, batch) => flushed.push([scope, batch.map((m) => m.messageId)]),
+      (scope, messages) => changes.push([scope, messages.map((m) => m.messageId)]),
+    );
+    queue.push('s1', msg('a'));
+    queue.push('s1', msg('b'));
+    queue.push('s2', msg('c'));
+    changes.length = 0;
+
+    expect(queue.remove('b')).toBe('s1');
+    expect(queue.depth('s1')).toBe(1);
+    expect(queue.remove('c')).toBe('s2');
+    expect(queue.depth('s2')).toBe(0);
+    expect(queue.remove('missing')).toBeUndefined();
+    expect(changes).toEqual([
+      ['s1', ['a']],
+      ['s2', []],
+    ]);
+    queue.stop();
+    expect(flushed).toEqual([]);
+  });
+
+  it('an emptied scope never flushes, while one with messages left still does', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: Array<[string, string[]]> = [];
+      const queue = new PendingQueue(100, (scope, batch) => flushed.push([scope, batch.map((m) => m.messageId)]));
+      queue.push('s1', msg('a'));
+      queue.push('s2', msg('b'));
+      queue.push('s2', msg('c'));
+      queue.remove('a');
+      queue.remove('b');
+      vi.advanceTimersByTime(200);
+      expect(flushed).toEqual([['s2', ['c']]]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

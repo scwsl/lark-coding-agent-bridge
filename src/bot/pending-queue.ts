@@ -74,6 +74,28 @@ export class PendingQueue {
     return entry.messages;
   }
 
+  /**
+   * Take one message out of whichever scope holds it (a recalled message must
+   * not run). The scope's remaining messages keep their place and timer; an
+   * emptied scope is dropped. Returns the scope it was in, if any.
+   */
+  remove(messageId: string): string | undefined {
+    for (const [scope, entry] of this.map.entries()) {
+      const index = entry.messages.findIndex((m) => m.messageId === messageId);
+      if (index < 0) continue;
+      entry.messages.splice(index, 1);
+      if (entry.messages.length === 0) {
+        if (entry.timer) clearTimeout(entry.timer);
+        this.map.delete(scope);
+        this.onChange?.(scope, []);
+      } else {
+        this.onChange?.(scope, entry.messages);
+      }
+      return scope;
+    }
+    return undefined;
+  }
+
   cancelAll(): void {
     for (const [scope, entry] of this.map.entries()) {
       if (entry.timer) clearTimeout(entry.timer);
