@@ -204,19 +204,23 @@ describe('account table and switching (/accounts)', () => {
     expect(formatDaysHours(5 * HOUR)).toBe('0d5h');
   });
 
-  it('scores room first and a sooner reset second; an account that never ran counts half full', () => {
+  it('scores weekly room, weekly room about to reset, and 5-hour room; an account that never ran counts half full', () => {
     const view = (five: number, week: number, weekResetIn?: number) => ({
-      five_hour: { usedPercent: five, line: 98 },
+      five_hour: { usedPercent: five, line: 80 },
       seven_day: { usedPercent: week, line: 90, ...(weekResetIn !== undefined ? { resetsInMs: weekResetIn } : {}) },
     });
-    const empty = switchScore(view(0, 10, 6 * DAY), true);
-    const full = switchScore(view(0, 86, 6 * DAY), true);
-    expect(empty).toBeGreaterThan(full);
+    // 0.45 × 0.8 + 0.25 × 0.8 × 0.5 + 0.3 × 0.5
+    expect(switchScore(view(40, 18, 3.5 * DAY), true)).toBeCloseTo(0.61);
+    expect(switchScore(view(0, 10, 6 * DAY), true)).toBeGreaterThan(switchScore(view(0, 86, 6 * DAY), true));
     // Same usage: the week that resets sooner wins.
     expect(switchScore(view(0, 50, DAY), true)).toBeGreaterThan(switchScore(view(0, 50, 6 * DAY), true));
-    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.3);
-    // Past the line: no room left.
-    expect(switchScore(view(0, 95, 6 * DAY), true)).toBeLessThan(0.3);
+    // A busy 5-hour window no longer hides plenty of weekly room about to be lost.
+    expect(switchScore(view(70, 17, 18 * HOUR), true)).toBeGreaterThan(switchScore(view(35, 85, 3 * DAY), true));
+    // Room is against each account's own lines; at or past either line it scores 0.
+    expect(switchScore(view(0, 90, HOUR), true)).toBe(0);
+    expect(switchScore(view(80, 0, HOUR), true)).toBe(0);
+    expect(switchScore(view(0, 89, HOUR), true)).toBeGreaterThan(0.3);
+    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.375);
   });
 
   it('lists every account in one table, one column per figure', async () => {
@@ -230,7 +234,7 @@ describe('account table and switching (/accounts)', () => {
     const table = accountsTable(rows);
     expect(table.split('\n')[0]).toBe('| 账户 | 5 小时用量 / 重置 | 本周用量 / 重置 | 切换线（5 小时 / 本周） | 得分 | 状态 |');
     expect(table).toContain('| ✅ **shilong.wang**（主，default） | 46% / 4h32m | 55% / 2d22h | 98% / 98% |');
-    expect(table).toContain('| **c-name**（备 2，c） | — | — | 98% / 98% | 30 | 还没运行过 |');
+    expect(table).toContain('| **c-name**（备 2，c） | — | — | 98% / 98% | 38 | 还没运行过 |');
   });
 
   it('switches without a name to the best-scoring account with room, never the current one', async () => {
@@ -518,7 +522,7 @@ describe('switch lines and rounds', () => {
     expect(pool.accounts().map((a) => a.id)).toEqual(['backup', 'default', 'backup2']);
   });
 
-  it('keeps the main account below its lines, then the best score, then the best score not refused, then the soonest reset', async () => {
+  it('keeps the main account below its lines, then the best score, then in order until refused, then the soonest reset', async () => {
     const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
     expect(pool.pick()?.id).toBe('backup');
     pool.observe('backup', fiveHour(98));
@@ -530,11 +534,11 @@ describe('switch lines and rounds', () => {
     expect(pool.pickReady()).toBeUndefined();
     expect(pool.pick()?.id).toBe('backup');
     pool.observe('backup', limit({ blocked: true, resetsAt: NOW + 3 * HOUR }));
-    // Both left are at a line; Mia's 5-hour window frees up long before yu.ou's week.
-    expect(pool.pick()?.id).toBe('backup2');
-    pool.observe('backup2', limit({ blocked: true, resetsAt: NOW + 4 * HOUR }));
+    // Every one left is past a line, so all score 0: the list's order decides.
     expect(pool.pick()?.id).toBe('default');
     pool.observe('default', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
+    expect(pool.pick()?.id).toBe('backup2');
+    pool.observe('backup2', limit({ blocked: true, resetsAt: NOW + 4 * HOUR }));
     // All refused: the soonest reset.
     expect(pool.pickRunnable()).toBeUndefined();
     expect(pool.nextRunnableAt()).toBe(NOW + 2 * HOUR);
@@ -692,8 +696,8 @@ describe('switch lines and rounds', () => {
       labelOf: async (account) => account.label ?? account.id,
     });
     const events = await collect(run);
-    expect(spawned).toEqual(['backup', 'backup2']);
-    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'Mia', switchedFrom: 'shilong.wang' }));
+    expect(spawned).toEqual(['backup', 'default']);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'default', switchedFrom: 'shilong.wang' }));
     expect(events.reduce(reduce, initialState).terminal).toBe('done');
   });
 

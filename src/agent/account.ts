@@ -55,7 +55,7 @@ export function agentAccountsReport(profileConfig: AccountProfile, profileDir: s
   return (ACCOUNT_REPORTS[profileConfig.agentKind]?.(profileDir) ?? Promise.resolve(undefined)).catch(() => undefined);
 }
 
-const SCORE_NOTE = `得分 = ${SWITCH_SCORE_WEIGHTS.room} × 余量 + ${SWITCH_SCORE_WEIGHTS.reset} × 重置临近度：余量看两个窗口里离切换线更近的那个，临近度看这个窗口还有多久重置；没运行过的账户余量按一半算。`;
+const SCORE_NOTE = `得分 = ${SWITCH_SCORE_WEIGHTS.weekRoom} × 本周余量 + ${SWITCH_SCORE_WEIGHTS.weekExpiring} × 本周余量 × 本周重置临近度 + ${SWITCH_SCORE_WEIGHTS.fiveHourRoom} × 5 小时余量。余量 = 1 − 用量 ÷ 切换线，临近度 = 1 − 距本周重置 ÷ 7 天；已到任一切换线的账户记 0 分；没运行过的账户余量按一半算。`;
 
 /**
  * `/accounts`: the profile's Claude subscription accounts as one table —

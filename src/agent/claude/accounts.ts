@@ -638,11 +638,11 @@ function formatClock(at: number): string {
 
 // ─── Account table and switching (`/accounts`, `claude-account switch`) ─────
 
-/** Weights of the switch score: room left first, then how soon the tighter window resets. */
-export const SWITCH_SCORE_WEIGHTS = { room: 0.6, reset: 0.4 } as const;
+/** Weights of the switch score's three terms (see {@link switchScore}). */
+export const SWITCH_SCORE_WEIGHTS = { weekRoom: 0.45, weekExpiring: 0.25, fiveHourRoom: 0.3 } as const;
 /** Room assumed for an account that has never run here (its token is untested). */
 const UNKNOWN_ROOM = 0.5;
-const WINDOW_MS: Record<WindowKind, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
+const WEEK_MS = 7 * 86_400_000;
 
 export interface AccountWindowView {
   /** 0–100; undefined when no run reported this window yet. */
@@ -675,30 +675,36 @@ export interface AccountRow {
 }
 
 /**
- * How good a switch target an account is, 0–1:
- * `0.6 × room + 0.4 × resetSoon`, where room is what is left before the
- * tighter of its two lines (1 − the larger of used ÷ line per window), and
- * resetSoon is how close that same window is to resetting (1 − time left ÷
- * window length). Little used wins; between similar ones, the one whose
- * limiting window frees up soonest. An account that never ran here counts as
+ * How good a switch target an account is, 0–1, built to even out the
+ * accounts' weekly use:
+ *
+ *   0.45 × weekRoom + 0.25 × weekRoom × weekResetSoon + 0.30 × fiveHourRoom
+ *
+ * - weekRoom = 1 − weekly used ÷ weekly line: the week is the scarce budget,
+ *   so the account with the most of it left goes first;
+ * - weekRoom × weekResetSoon (1 − time to the weekly reset ÷ 7 days): room
+ *   about to be lost at the reset — spend it first; multiplied so an account
+ *   with nothing left gains nothing from a near reset;
+ * - fiveHourRoom = 1 − 5-hour used ÷ 5-hour line: don't move to an account
+ *   that is about to hit its 5-hour line and move again.
+ *
+ * Room is measured against the account's own switch lines, and an account
+ * at or past either line scores 0: it is not a switch target until that
+ * window resets. All clamped to 0–1. An account that never ran here counts as
  * half full with no reset known, so a proven account with room comes first.
  */
 export function switchScore(windows: Record<WindowKind, AccountWindowView>, known: boolean): number {
-  if (!known) return SWITCH_SCORE_WEIGHTS.room * UNKNOWN_ROOM;
-  // The weekly window wins ties: with both empty, its reset is the one worth spending before.
-  let tight: WindowKind = 'five_hour';
-  let ratio = -1;
-  for (const kind of WINDOW_KINDS) {
-    const r = (windows[kind].usedPercent ?? 0) / windows[kind].line;
-    if (r >= ratio) {
-      ratio = r;
-      tight = kind;
-    }
-  }
-  const room = clamp01(1 - ratio);
-  const left = windows[tight].resetsInMs;
-  const soon = left === undefined ? 0 : clamp01(1 - left / WINDOW_MS[tight]);
-  return SWITCH_SCORE_WEIGHTS.room * room + SWITCH_SCORE_WEIGHTS.reset * soon;
+  const room = (kind: WindowKind): number =>
+    known ? clamp01(1 - (windows[kind].usedPercent ?? 0) / windows[kind].line) : UNKNOWN_ROOM;
+  if (WINDOW_KINDS.some((kind) => room(kind) === 0)) return 0;
+  const left = windows.seven_day.resetsInMs;
+  const weekSoon = !known || left === undefined ? 0 : clamp01(1 - left / WEEK_MS);
+  const weekRoom = room('seven_day');
+  return (
+    SWITCH_SCORE_WEIGHTS.weekRoom * weekRoom +
+    SWITCH_SCORE_WEIGHTS.weekExpiring * weekRoom * weekSoon +
+    SWITCH_SCORE_WEIGHTS.fiveHourRoom * room('five_hour')
+  );
 }
 
 /** Some run on the account reported one of its windows. */
