@@ -40,7 +40,7 @@ const ACCOUNT_REPORTS: Record<AgentKind, (profileDir: string) => Promise<string[
     if (!pool.multi) return undefined;
     const lines = pool.defaultLines;
     return [
-      `**订阅账户**（▶ 为新任务使用的账户。先按顺序用还没到切换线的账户；都到线后再按顺序把各账户用到额度耗尽；全部耗尽才暂停，到最早恢复的账户重置时自动续跑。默认切换线：5 小时 ${lines.five_hour}% · 本周 ${lines.seven_day}%）`,
+      `**订阅账户**（▶ 为新任务使用的账户。主账户没到切换线就一直用它，到线后换到没到线的账户里得分最高的一个，并把它设为主账户；都到线后同样按得分把各账户用到额度耗尽；全部耗尽才暂停，到最早恢复的账户重置时自动续跑。默认切换线：5 小时 ${lines.five_hour}% · 本周 ${lines.seven_day}%）`,
       ...accountsReport(pool, await claudeAccountName()),
     ];
   },
@@ -67,7 +67,7 @@ export async function agentAccountsTable(profileConfig: AccountProfile, profileD
   await pool.refresh();
   const rows = accountRows(pool, await claudeAccountName());
   return [
-    '**Claude 订阅账户**（✅ 为新任务正在用的账户；到切换线后自动按顺序换下一个）',
+    '**Claude 订阅账户**（✅ 为新任务正在用的账户；到切换线后自动换到得分最高的可用账户，并设为主账户）',
     '',
     accountsTable(rows),
     '',

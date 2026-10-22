@@ -27,10 +27,13 @@ export interface AccountFailoverDeps {
  *   Otherwise the held events go out unchanged and the run ends `paused`.
  * - **Past its line**: Claude reports the quota once per message, after the
  *   first request. When that report puts the account at or past a switch
- *   line and another account is still below its lines, the run moves at the
- *   next point where no tool call, subagent or background task is in flight —
- *   stopping there loses nothing. With every account past a line it stays
- *   put: accounts are then used up in order, and only a refusal moves it.
+ *   line and another account is still below its lines, the run moves — to
+ *   the one with the best switch score — at the next point where no tool
+ *   call, subagent or background task is in flight; stopping there loses
+ *   nothing. With every account past a line it stays put: accounts are then
+ *   used up one after another, and only a refusal moves it.
+ *
+ * The account a run ends up on becomes the main one (see the pool's rounds).
  *
  * A refusal the agent works past (extra usage, a fallback model) is passed
  * through as soon as work resumes. Nothing moves once the user's turn has
@@ -39,6 +42,7 @@ export interface AccountFailoverDeps {
 export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailoverDeps): AgentRun {
   let account = deps.pool.pick();
   if (!account) throw new Error('no Claude account to run on');
+  deps.pool.promote(account.id);
   let current = deps.spawn(opts, account);
   let stopped = false;
   const tried = new Set<string>();
@@ -123,6 +127,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         switchedFrom = label;
         reason = line ? `${WINDOW_LABELS[line.kind]}用量到了 ${line.line}% 的切换线` : '到了切换线';
         account = leave;
+        deps.pool.promote(leave.id);
         current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave);
         continue;
       }
@@ -147,6 +152,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       switchedFrom = label;
       reason = undefined;
       account = next;
+      deps.pool.promote(next.id);
       current = deps.spawn(
         { ...opts, ...(sessionId ? { sessionId } : {}), prompt: failoverPrompt(opts.prompt) },
         next,

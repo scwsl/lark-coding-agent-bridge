@@ -42,6 +42,12 @@ export interface ProfileAccess {
    */
   chatAllowedUsers?: Record<string, string[]>;
   /**
+   * Admin commands opened to everyone in some chats, keyed by command (with
+   * its `/`), e.g. `{ "/accounts": ["oc_x"] }`. There anyone may run it;
+   * elsewhere it stays owner/admin only. Omitted when empty.
+   */
+  commandChats?: Record<string, string[]>;
+  /**
    * open_ids allowed to stop *anyone's* run (the stop button and `/stop`), on
    * top of the owner, admins, and whoever started that run. Omitted when empty.
    */
@@ -511,6 +517,12 @@ function normalizeAccess(
 ): ProfileAccess {
   const chatRequireMention = normalizeChatMentionMap(access?.chatRequireMention);
   const chatAllowedUsers = normalizeChatUserMap(access?.chatAllowedUsers);
+  const commandChats = Object.fromEntries(
+    Object.entries(normalizeChatUserMap(access?.commandChats)).map(([cmd, chats]) => [
+      cmd.startsWith('/') ? cmd : `/${cmd}`,
+      chats,
+    ]),
+  );
   const stoppers = stringArray(access?.stoppers);
   const guestRoots = stringArray(access?.guestRoots);
   const guestReadOnlyRoots = stringArray(access?.guestReadOnlyRoots);
@@ -526,6 +538,7 @@ function normalizeAccess(
     // Omit when empty so configs without per-chat overrides stay clean.
     ...(Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}),
     ...(Object.keys(chatAllowedUsers).length > 0 ? { chatAllowedUsers } : {}),
+    ...(Object.keys(commandChats).length > 0 ? { commandChats } : {}),
     ...(stoppers.length > 0 ? { stoppers } : {}),
     ...(guestRoots.length > 0 ? { guestRoots } : {}),
     ...(guestReadOnlyRoots.length > 0 ? { guestReadOnlyRoots } : {}),

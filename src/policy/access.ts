@@ -20,6 +20,7 @@ export interface AccessDecision {
     | 'allowed-admin'
     | 'allowed-chat'
     | 'allowed-chat-user'
+    | 'allowed-command-chat'
     | 'comment-mention'
     | 'run-initiator'
     | 'allowed-stopper'
@@ -91,6 +92,23 @@ export function canRunAdminCommand(
   if (isCreator(controls, senderId)) return allow('owner');
   if (profile.access.admins.includes(senderId)) return allow('allowed-admin');
   return deny('denied-admin');
+}
+
+/**
+ * An admin command (`cmd` with its `/`) in `chatId`: the owner and admins
+ * anywhere, everyone else only in the chats `access.commandChats` opens it in.
+ */
+export function canRunCommandInChat(
+  profile: ProfileConfig,
+  controls: RuntimeControls,
+  cmd: string,
+  chatId: string,
+  senderId: string,
+): AccessDecision {
+  const admin = canRunAdminCommand(profile, controls, senderId);
+  if (admin.ok) return admin;
+  if (profile.access.commandChats?.[cmd]?.includes(chatId)) return allow('allowed-command-chat');
+  return admin;
 }
 
 /**

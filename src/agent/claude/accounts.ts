@@ -18,12 +18,17 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  * own login and is always on the list.
  *
  * Which account a run gets, in rounds:
- *   1. the first, in the list's order, still below its switch lines (one per
- *      window: 5-hour and weekly; per account or the profile's default);
- *   2. once every account is past a line: the first, in order again, that
- *      has not been refused — accounts are used up one after another;
+ *   1. of the accounts still below their switch lines (one per window:
+ *      5-hour and weekly; per account or the profile's default): the main
+ *      one (first on the list) while it is, else the one with the best
+ *      switch score ({@link switchScore});
+ *   2. once every account is past a line: of those not refused, the same
+ *      way — accounts are used up one after another;
  *   3. once every account has been refused: the run waits for the soonest
  *      reset (it pauses and resumes on its own).
+ * The account a run moves to becomes the main one (top of the list), so new
+ * runs stay on it until it reaches a line in turn instead of going back and
+ * forth as the scores shift.
  *
  * Files in the profile directory:
  *   - `claude-accounts.json`: the list, in order of preference, and the
@@ -361,13 +366,80 @@ export class ClaudeAccountPool {
   /** Round 1, else round 2: never an account that is still refused. */
   pickRunnable(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
-    return this.pickReady(exclude) ?? this.accounts().find((a) => !exclude?.has(a.id) && !this.isRefused(a.id, now));
+    return this.pickReady(exclude) ?? this.choose(exclude, (id) => !this.isRefused(id, now), now);
   }
 
   /** Round 1 only: an account below all its lines. */
   pickReady(exclude?: ReadonlySet<string>): PickedAccount | undefined {
     const now = this.now();
-    return this.accounts().find((a) => !exclude?.has(a.id) && this.underLinesAt(a.id, now) <= now);
+    return this.choose(exclude, (id) => this.underLinesAt(id, now) <= now, now);
+  }
+
+  /**
+   * Of the accounts `ok` lets through: the main one while it is among them,
+   * else the best switch score; ties keep the list's order.
+   */
+  private choose(
+    exclude: ReadonlySet<string> | undefined,
+    ok: (id: string) => boolean,
+    now: number,
+  ): PickedAccount | undefined {
+    const all = this.accounts();
+    const candidates = all.filter((a) => !exclude?.has(a.id) && ok(a.id));
+    if (candidates[0] && candidates[0].id === all[0]?.id) return candidates[0];
+    let best: PickedAccount | undefined;
+    let bestScore = -1;
+    for (const account of candidates) {
+      const score = this.score(account.id, now);
+      if (score > bestScore) {
+        best = account;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Put `id` at the top of the list once a run moved to it, so new runs stay
+   * on it until it reaches a line too. Takes effect at once; the file follows.
+   */
+  promote(id: string): void {
+    const accounts = this.config.accounts;
+    const entry = accounts.find((a) => a.id === id);
+    if (!entry || accounts[0]?.id === id) return;
+    this.config = { ...this.config, accounts: [entry, ...accounts.filter((a) => a.id !== id)] };
+    log.info('claude-accounts', 'promote', { id });
+    this.writing = this.writing
+      .then(() => reorderAccounts(this.opts.paths, [id]))
+      .then(() => undefined)
+      .catch((err: unknown) => log.warn('claude-accounts', 'promote-write-failed', { id, err: String(err) }));
+  }
+
+  /** Each window as the switch score and `/accounts` read it. */
+  windowViews(id: string, now = this.now()): Record<WindowKind, AccountWindowView> {
+    const state = this.loadState()[id];
+    const windows = {} as Record<WindowKind, AccountWindowView>;
+    for (const kind of WINDOW_KINDS) {
+      const window = state?.windows[kind];
+      const line = this.lineOf(id, kind);
+      if (!window) {
+        windows[kind] = { line };
+        continue;
+      }
+      const reset = window.resetsAt !== undefined && window.resetsAt <= now;
+      windows[kind] = {
+        line,
+        usedPercent: reset ? 0 : window.usedPercent,
+        ...(reset ? { reset: true } : window.resetsAt !== undefined ? { resetsInMs: window.resetsAt - now } : {}),
+      };
+    }
+    return windows;
+  }
+
+  /** The account's switch score, 0–1 ({@link switchScore}). */
+  score(id: string, now = this.now()): number {
+    const windows = this.windowViews(id, now);
+    return switchScore(windows, windowsKnown(windows));
   }
 
   /** The account is below all its lines and not refused right now. */
@@ -629,6 +701,11 @@ export function switchScore(windows: Record<WindowKind, AccountWindowView>, know
   return SWITCH_SCORE_WEIGHTS.room * room + SWITCH_SCORE_WEIGHTS.reset * soon;
 }
 
+/** Some run on the account reported one of its windows. */
+function windowsKnown(windows: Record<WindowKind, AccountWindowView>): boolean {
+  return WINDOW_KINDS.some((kind) => windows[kind].usedPercent !== undefined);
+}
+
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -636,23 +713,9 @@ function clamp01(value: number): number {
 /** Every account with its usage, resets, lines, state and switch score, in preference order. */
 export function accountRows(pool: ClaudeAccountPool, defaultLabel: string | undefined, now = Date.now()): AccountRow[] {
   const next = pool.pick()?.id;
-  return pool.status().map(({ account, state }, index) => {
-    const windows = {} as Record<WindowKind, AccountWindowView>;
-    for (const kind of WINDOW_KINDS) {
-      const window = state?.windows[kind];
-      const line = pool.lineOf(account.id, kind);
-      if (!window) {
-        windows[kind] = { line };
-        continue;
-      }
-      const reset = window.resetsAt !== undefined && window.resetsAt <= now;
-      windows[kind] = {
-        line,
-        usedPercent: reset ? 0 : window.usedPercent,
-        ...(reset ? { reset: true } : window.resetsAt !== undefined ? { resetsInMs: window.resetsAt - now } : {}),
-      };
-    }
-    const known = WINDOW_KINDS.some((kind) => windows[kind].usedPercent !== undefined);
+  return pool.accounts().map((account, index) => {
+    const windows = pool.windowViews(account.id, now);
+    const known = windowsKnown(windows);
     const refusedUntil = pool.refusedUntil(account.id, now);
     const pastLine = pool.pastLine(account.id, now)?.kind;
     return {

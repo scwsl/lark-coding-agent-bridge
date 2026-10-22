@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   accessPolicyDigest,
   canRunAdminCommand,
+  canRunCommandInChat,
   canStopRun,
   canUseDm,
   canUseGroup,
@@ -35,6 +36,20 @@ describe('canStopRun', () => {
       reason: 'denied-stop',
     });
     expect(canStopRun(profile, ownerControls, 'ou_starter', undefined).ok).toBe(false);
+  });
+});
+
+describe('canRunCommandInChat', () => {
+  it('opens a command to everyone in the chats commandChats lists, and only there', () => {
+    const profile = profileWithAccess({ commandChats: { accounts: ['oc_talk'] } });
+    expect(profile.access.commandChats).toEqual({ '/accounts': ['oc_talk'] });
+    expect(canRunCommandInChat(profile, ownerControls, '/accounts', 'oc_talk', 'ou_anyone')).toEqual({
+      ok: true,
+      reason: 'allowed-command-chat',
+    });
+    expect(canRunCommandInChat(profile, ownerControls, '/accounts', 'oc_other', 'ou_anyone').ok).toBe(false);
+    expect(canRunCommandInChat(profile, ownerControls, '/config', 'oc_talk', 'ou_anyone').ok).toBe(false);
+    expect(canRunCommandInChat(profile, ownerControls, '/accounts', 'oc_other', 'ou_owner').reason).toBe('owner');
   });
 });
 

@@ -518,7 +518,7 @@ describe('switch lines and rounds', () => {
     expect(pool.accounts().map((a) => a.id)).toEqual(['backup', 'default', 'backup2']);
   });
 
-  it('uses accounts below their lines in order, then each in order until refused, then the soonest reset', async () => {
+  it('keeps the main account below its lines, then the best score, then the best score not refused, then the soonest reset', async () => {
     const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
     expect(pool.pick()?.id).toBe('backup');
     pool.observe('backup', fiveHour(98));
@@ -530,10 +530,11 @@ describe('switch lines and rounds', () => {
     expect(pool.pickReady()).toBeUndefined();
     expect(pool.pick()?.id).toBe('backup');
     pool.observe('backup', limit({ blocked: true, resetsAt: NOW + 3 * HOUR }));
-    expect(pool.pick()?.id).toBe('default');
-    pool.observe('default', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
+    // Both left are at a line; Mia's 5-hour window frees up long before yu.ou's week.
     expect(pool.pick()?.id).toBe('backup2');
     pool.observe('backup2', limit({ blocked: true, resetsAt: NOW + 4 * HOUR }));
+    expect(pool.pick()?.id).toBe('default');
+    pool.observe('default', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
     // All refused: the soonest reset.
     expect(pool.pickRunnable()).toBeUndefined();
     expect(pool.nextRunnableAt()).toBe(NOW + 2 * HOUR);
@@ -691,8 +692,40 @@ describe('switch lines and rounds', () => {
       labelOf: async (account) => account.label ?? account.id,
     });
     const events = await collect(run);
-    expect(spawned).toEqual(['backup', 'default']);
-    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'default', switchedFrom: 'shilong.wang' }));
+    expect(spawned).toEqual(['backup', 'backup2']);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'account', label: 'Mia', switchedFrom: 'shilong.wang' }));
     expect(events.reduce(reduce, initialState).terminal).toBe('done');
+  });
+
+  it('past its line, a run moves to the best score rather than the next on the list, and makes it the main account', async () => {
+    const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('default', weekly(60));
+    pool.observe('backup2', weekly(10));
+    const spawned: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (_opts, account) => {
+        spawned.push(account.id);
+        return spawned.length === 1
+          ? fakeRun([
+              { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+              fiveHour(99),
+              { type: 'tool_result', id: 't1', output: '', isError: false },
+              { type: 'text', delta: 'never shown' },
+            ])
+          : fakeRun([{ type: 'done', terminationReason: 'normal' }]);
+      },
+      labelOf: async (account) => account.label ?? account.id,
+    });
+    await collect(run);
+    expect(spawned).toEqual(['backup', 'backup2']);
+    expect(pool.accounts().map((a) => a.id)).toEqual(['backup2', 'backup', 'default']);
+    await pool.flush();
+    expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['backup2', 'backup', 'default']);
+    // The new main account stays while it is below its lines, even when another scores higher.
+    pool.observe('backup2', weekly(50));
+    pool.observe('default', weekly(0));
+    expect(pool.score('default')).toBeGreaterThan(pool.score('backup2'));
+    expect(pool.pick()?.id).toBe('backup2');
   });
 });

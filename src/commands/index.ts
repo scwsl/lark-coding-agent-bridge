@@ -130,6 +130,7 @@ import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
 import { accessToClaudePermissionMode } from '../config/permissions';
 import {
   canRunAdminCommand,
+  canRunCommandInChat,
   canStopRun,
   canUseDm,
   canUseGroup,
@@ -334,7 +335,8 @@ const handlers: Record<string, Handler> = {
  */
 const ADMIN_COMMANDS = new Set([
   '/account',
-  // Shows the owner's subscription quotas and changes which account pays.
+  // Shows the owner's subscription quotas and changes which account pays;
+  // `access.commandChats` may open it to everyone in chosen chats.
   '/accounts',
   '/config',
   '/ps',
@@ -370,6 +372,11 @@ function isAdminCommand(cmd: string): boolean {
   return ADMIN_COMMANDS.has(cmd.startsWith('/') ? cmd : `/${cmd}`);
 }
 
+/** Owner/admin, or anyone in a chat `access.commandChats` opens the command in. */
+function canRunCommand(cmd: string, ctx: CommandContext): boolean {
+  return canRunCommandInChat(ctx.controls.profileConfig, ctx.controls, cmd, ctx.msg.chatId, ctx.msg.senderId).ok;
+}
+
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const trimmed = ctx.msg.content.trim();
   if (!trimmed.startsWith('/')) {
@@ -384,10 +391,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const args = parts.slice(1).join(' ');
   const h = handlers[cmd];
   if (!h) return false;
-  if (
-    isAdminCommand(cmd) &&
-    !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
-  ) {
+  if (isAdminCommand(cmd) && !canRunCommand(cmd, ctx)) {
     log.info('command', 'admin-deny', {
       cmd,
       sender: ctx.msg.senderId.slice(-6),
@@ -412,10 +416,7 @@ export async function runCommandHandler(
 ): Promise<boolean> {
   const h = handlers[`/${name}`];
   if (!h) return false;
-  if (
-    isAdminCommand(name) &&
-    !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
-  ) {
+  if (isAdminCommand(name) && !canRunCommand(`/${name}`, ctx)) {
     log.info('command', 'admin-deny', {
       cmd: name,
       sender: ctx.msg.senderId.slice(-6),
