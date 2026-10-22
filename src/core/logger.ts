@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
-import { open, readdir, rm, stat } from 'node:fs/promises';
+import { open, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { telemetry } from './telemetry';
 
@@ -19,6 +19,16 @@ const DEFAULT_RETENTION_DAYS = Math.max(
 
 const DEFAULT_MAX_TOTAL_BYTES =
   Math.max(10, Number(process.env.LARK_CHANNEL_LOG_MAX_MB ?? 200) || 200) * 1024 * 1024;
+
+/**
+ * The daemon's stdout / stderr (`<logsDir>/daemon/daemon-*.log`) are opened by
+ * launchd / systemd, not rotated by anyone: once one passes the limit it is cut
+ * back to its newest part. The service manager opens them for append, so
+ * cutting in place is safe — its next write lands at the new end.
+ */
+const DAEMON_LOG_FILES = ['daemon-stdout.log', 'daemon-stderr.log'];
+const DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024;
+const DAEMON_LOG_KEEP_BYTES = 1024 * 1024;
 
 /** How often a long-running bridge re-runs {@link gcOldLogs} (it also runs on start). */
 const LOG_GC_INTERVAL_MS = 6 * 3_600_000;
@@ -708,11 +718,13 @@ export async function gcOldLogs(): Promise<number> {
     }
   }
   const removed = expired + oversize;
-  if (removed > 0) {
+  const trimmed = await trimDaemonLogs(join(dir, 'daemon'));
+  if (removed > 0 || trimmed > 0) {
     log.info('logger', 'gc', {
       removed,
       expired,
       oversize,
+      trimmedDaemonLogs: trimmed,
       retentionDays: loggerOptions.retentionDays,
       maxTotalMb: Math.round(loggerOptions.maxTotalBytes / 1024 / 1024),
     });
@@ -740,6 +752,24 @@ export function scheduleLogGc(intervalMs: number = LOG_GC_INTERVAL_MS): () => vo
     if (gcTimer) clearInterval(gcTimer);
     gcTimer = undefined;
   };
+}
+
+/** Cut each oversized daemon log back to its newest whole lines. Returns how many were cut. */
+async function trimDaemonLogs(dir: string): Promise<number> {
+  let trimmed = 0;
+  for (const name of DAEMON_LOG_FILES) {
+    const path = join(dir, name);
+    try {
+      if ((await stat(path)).size <= DAEMON_LOG_MAX_BYTES) continue;
+      const tail = await readTail(path, DAEMON_LOG_KEEP_BYTES);
+      const at = loggerOptions.now().toISOString();
+      await writeFile(path, `[${at}] (earlier output trimmed by the bridge's log cleanup)\n${tail}`);
+      trimmed++;
+    } catch {
+      /* absent, or held in a way that cannot be rewritten — skip */
+    }
+  }
+  return trimmed;
 }
 
 async function removeQuietly(path: string): Promise<boolean> {
