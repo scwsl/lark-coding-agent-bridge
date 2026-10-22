@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { agentAccountsReport } from '../agent/account';
+import { agentAccountsReport, agentAccountsTable, switchAgentAccount } from '../agent/account';
 import { agentCapability } from '../agent/capability';
 import { agentDescriptor, type AgentKind } from '../agent/registry';
 import {
@@ -297,6 +297,7 @@ const handlers: Record<string, Handler> = {
   '/status': handleStatus,
   '/help': handleHelp,
   '/account': handleAccount,
+  '/accounts': handleAccounts,
   '/config': handleConfig,
   '/stop': handleStop,
   '/copycode': handleCopyCode,
@@ -333,6 +334,8 @@ const handlers: Record<string, Handler> = {
  */
 const ADMIN_COMMANDS = new Set([
   '/account',
+  // Shows the owner's subscription quotas and changes which account pays.
+  '/accounts',
   '/config',
   '/ps',
   '/exit',
@@ -1692,6 +1695,34 @@ async function handlePlanQuota(ctx: CommandContext): Promise<void> {
     accounts ? [`**CLI 登录账户**`, body, '', ...accounts, '_各账户用量取自它最近一次运行的报告。_'].join('\n') : body,
   );
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
+
+// ─── /accounts ────────────────────────────────────────────────────────────
+
+/**
+ * The profile's Claude subscription accounts: `/accounts` lists them as a
+ * table (usage, resets, switch lines); `/accounts switch [name]` makes one the
+ * main account — the best-scoring one with room when no name is given.
+ */
+async function handleAccounts(args: string, ctx: CommandContext): Promise<void> {
+  const [sub = '', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const profileDir = commandProfilePaths(ctx).profileDir;
+  try {
+    if (sub === '' || sub === 'list') {
+      const table = await agentAccountsTable(ctx.controls.profileConfig, profileDir);
+      await reply(ctx, table ?? '`/accounts` 目前只支持 Claude profile。');
+      return;
+    }
+    if (sub === 'switch' || sub === '切换') {
+      await reply(ctx, await switchAgentAccount(ctx.controls.profileConfig, profileDir, rest.join(' ')));
+      return;
+    }
+  } catch (err) {
+    log.fail('command', err, { cmd: '/accounts', sub });
+    await reply(ctx, `❌ ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  await reply(ctx, '用法：`/accounts` 查看账户；`/accounts switch` 自动切到得分最高的可用账户；`/accounts switch <名字或 id>` 切到指定账户。');
 }
 
 // ─── /coffee ──────────────────────────────────────────────────────────────

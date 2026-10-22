@@ -1,8 +1,13 @@
 import { tmpdir } from 'node:os';
 import { claudeAccountName } from '../../agent/claude/account';
 import {
+  accountRows,
   accountsReport,
+  accountsTable,
+  bestSwitchTarget,
   claudeAccountsPaths,
+  findAccountRow,
+  switchToAccount,
   ClaudeAccountPool,
   deleteAccount,
   isValidAccountId,
@@ -130,6 +135,25 @@ export async function runClaudeAccountOrder(ids: string[], opts: AccountCliOptio
   await reorderAccounts(claudeAccountsPaths(appPaths.profileDir), ids);
   console.log('✓ 已调整顺序，运行中的 bridge 下一次运行前生效\n');
   await runClaudeAccountList(opts);
+}
+
+/** Make an account the main one: the named one, or the best-scoring one with room. */
+export async function runClaudeAccountSwitch(query: string | undefined, opts: AccountCliOptions = {}): Promise<void> {
+  const appPaths = await resolveSecretProfilePaths(opts);
+  const paths = claudeAccountsPaths(appPaths.profileDir);
+  const pool = new ClaudeAccountPool({ paths });
+  await pool.refresh();
+  const label = await claudeAccountName();
+  const rows = accountRows(pool, label);
+  const target = query ? findAccountRow(rows, query) : bestSwitchTarget(rows);
+  if (!target) {
+    console.error(query ? `✗ 没有叫「${query}」的账户` : '✗ 其他账户都已到切换线或额度用尽，暂时没有可切换的');
+    process.exit(1);
+  }
+  await switchToAccount(paths, target.id);
+  await pool.refresh();
+  console.log(`✓ 已把 ${target.name}（${target.id}）设为主账户，运行中的 bridge 下一次运行前生效\n`);
+  console.log(accountsTable(accountRows(pool, label)).replace(/\*\*/g, ''));
 }
 
 /** `--five-hour 98` / `--weekly 90%`; `0` (when allowed) drops an account's own line. Anything else exits. */

@@ -563,3 +563,172 @@ function formatClock(at: number): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+// ─── Account table and switching (`/accounts`, `claude-account switch`) ─────
+
+/** Weights of the switch score: room left first, then how soon the tighter window resets. */
+export const SWITCH_SCORE_WEIGHTS = { room: 0.7, reset: 0.3 } as const;
+/** Room assumed for an account that has never run here (its token is untested). */
+const UNKNOWN_ROOM = 0.5;
+const WINDOW_MS: Record<WindowKind, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
+
+export interface AccountWindowView {
+  /** 0–100; undefined when no run reported this window yet. */
+  usedPercent?: number;
+  /** Until the window resets; undefined when unknown. */
+  resetsInMs?: number;
+  /** The window reset since the last report, so the usage reads 0. */
+  reset?: boolean;
+  /** The account's switch line for this window (1–100). */
+  line: number;
+}
+
+export interface AccountRow {
+  id: string;
+  /** The label, or the CLI login's name for `default`. */
+  name: string;
+  /** Position in the preference order: 0 is the main account. */
+  index: number;
+  /** New runs go to this account (▶). */
+  next: boolean;
+  /** Some run on this account reported its quota. */
+  known: boolean;
+  windows: Record<WindowKind, AccountWindowView>;
+  refusedUntil?: number;
+  pastLine?: WindowKind;
+  /** Below all its lines and not refused: a run would use it right now. */
+  ready: boolean;
+  /** 0–1, see {@link switchScore}. */
+  score: number;
+}
+
+/**
+ * How good a switch target an account is, 0–1:
+ * `0.7 × room + 0.3 × resetSoon`, where room is what is left before the
+ * tighter of its two lines (1 − the larger of used ÷ line per window), and
+ * resetSoon is how close that same window is to resetting (1 − time left ÷
+ * window length). Little used wins; between similar ones, the one whose
+ * limiting window frees up soonest. An account that never ran here counts as
+ * half full with no reset known, so a proven account with room comes first.
+ */
+export function switchScore(windows: Record<WindowKind, AccountWindowView>, known: boolean): number {
+  if (!known) return SWITCH_SCORE_WEIGHTS.room * UNKNOWN_ROOM;
+  // The weekly window wins ties: with both empty, its reset is the one worth spending before.
+  let tight: WindowKind = 'five_hour';
+  let ratio = -1;
+  for (const kind of WINDOW_KINDS) {
+    const r = (windows[kind].usedPercent ?? 0) / windows[kind].line;
+    if (r >= ratio) {
+      ratio = r;
+      tight = kind;
+    }
+  }
+  const room = clamp01(1 - ratio);
+  const left = windows[tight].resetsInMs;
+  const soon = left === undefined ? 0 : clamp01(1 - left / WINDOW_MS[tight]);
+  return SWITCH_SCORE_WEIGHTS.room * room + SWITCH_SCORE_WEIGHTS.reset * soon;
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+/** Every account with its usage, resets, lines, state and switch score, in preference order. */
+export function accountRows(pool: ClaudeAccountPool, defaultLabel: string | undefined, now = Date.now()): AccountRow[] {
+  const next = pool.pick()?.id;
+  return pool.status().map(({ account, state }, index) => {
+    const windows = {} as Record<WindowKind, AccountWindowView>;
+    for (const kind of WINDOW_KINDS) {
+      const window = state?.windows[kind];
+      const line = pool.lineOf(account.id, kind);
+      if (!window) {
+        windows[kind] = { line };
+        continue;
+      }
+      const reset = window.resetsAt !== undefined && window.resetsAt <= now;
+      windows[kind] = {
+        line,
+        usedPercent: reset ? 0 : window.usedPercent,
+        ...(reset ? { reset: true } : window.resetsAt !== undefined ? { resetsInMs: window.resetsAt - now } : {}),
+      };
+    }
+    const known = WINDOW_KINDS.some((kind) => windows[kind].usedPercent !== undefined);
+    const refusedUntil = pool.refusedUntil(account.id, now);
+    const pastLine = pool.pastLine(account.id, now)?.kind;
+    return {
+      id: account.id,
+      name: account.id === DEFAULT_ACCOUNT_ID ? (defaultLabel ?? 'CLI 登录') : (account.label ?? account.id),
+      index,
+      next: account.id === next,
+      known,
+      windows,
+      ...(refusedUntil !== undefined ? { refusedUntil } : {}),
+      ...(pastLine ? { pastLine } : {}),
+      ready: pool.underLinesAt(account.id, now) <= now,
+      score: switchScore(windows, known),
+    };
+  });
+}
+
+/** `4h32m` — for the 5-hour window. */
+export function formatHoursMinutes(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+/** `2d22h` — for the weekly window. */
+export function formatDaysHours(ms: number): string {
+  const hours = Math.max(0, Math.round(ms / 3_600_000));
+  return `${Math.floor(hours / 24)}d${hours % 24}h`;
+}
+
+function usedCell(view: AccountWindowView): string {
+  return view.usedPercent === undefined ? '—' : `${Math.round(view.usedPercent)}%`;
+}
+
+function resetCell(view: AccountWindowView, format: (ms: number) => string): string {
+  if (view.reset) return '已重置';
+  return view.resetsInMs === undefined ? '—' : format(view.resetsInMs);
+}
+
+function stateCell(row: AccountRow): string {
+  if (row.refusedUntil !== undefined) return `⛔ 额度用尽，${formatClock(row.refusedUntil)} 恢复`;
+  if (row.pastLine) return `⚠️ 已过${WINDOW_LABELS[row.pastLine]}切换线`;
+  if (!row.known) return '还没运行过';
+  return row.next ? '使用中' : '可用';
+}
+
+/** The accounts as one Markdown table, one column per figure. */
+export function accountsTable(rows: AccountRow[]): string {
+  const out = [
+    '| | 账户 | 5 小时用量 | 5 小时重置 | 本周用量 | 本周重置 | 5 小时切换线 | 本周切换线 | 得分 | 状态 |',
+    '|---|---|---|---|---|---|---|---|---|---|',
+  ];
+  for (const row of rows) {
+    const five = row.windows.five_hour;
+    const week = row.windows.seven_day;
+    const role = row.index === 0 ? '主' : `备 ${row.index}`;
+    out.push(
+      `| ${row.next ? '▶' : ''} | **${row.name}**（${role}，${row.id}） | ${usedCell(five)} | ${resetCell(five, formatHoursMinutes)} | ${usedCell(week)} | ${resetCell(week, formatDaysHours)} | ${five.line}% | ${week.line}% | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
+    );
+  }
+  return out.join('\n');
+}
+
+/** The account a switch without a name goes to: the best-scoring ready one other than the current. */
+export function bestSwitchTarget(rows: AccountRow[]): AccountRow | undefined {
+  return rows
+    .filter((row) => !row.next && row.ready)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+}
+
+/** An account by id, its label or (for `default`) the CLI login's name; case-insensitive. */
+export function findAccountRow(rows: AccountRow[], query: string): AccountRow | undefined {
+  const q = query.trim().toLowerCase();
+  return rows.find((row) => row.id.toLowerCase() === q) ?? rows.find((row) => row.name.toLowerCase() === q);
+}
+
+/** Make `id` the main account: new runs use it first; the rest keep their order. */
+export async function switchToAccount(paths: ClaudeAccountsPaths, id: string): Promise<ClaudeAccountsConfig> {
+  return reorderAccounts(paths, [id]);
+}

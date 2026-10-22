@@ -9,6 +9,7 @@ import {
   runClaudeAccountOrder,
   runClaudeAccountRemove,
   runClaudeAccountSet,
+  runClaudeAccountSwitch,
 } from './commands/claude-account';
 import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
@@ -335,6 +336,14 @@ claudeAccount
   .option('--profile <name>', 'profile name (defaults to active profile)')
   .action(async (ids: string[], opts: { profile?: string }) => {
     await runClaudeAccountOrder(ids, { profile: opts.profile });
+  });
+
+claudeAccount
+  .command('switch [id]')
+  .description('Make an account the main one: the one named (id or name), or the best-scoring one with room')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string | undefined, opts: { profile?: string }) => {
+    await runClaudeAccountSwitch(id, { profile: opts.profile });
   });
 
 claudeAccount

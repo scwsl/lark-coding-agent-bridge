@@ -4,8 +4,16 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { failoverPrompt, runWithAccountFailover, SWITCH_LINE_PROMPT } from '../../../src/agent/claude/account-failover.js';
 import {
+  accountRows,
   accountsReport,
+  accountsTable,
   accountSecretId,
+  bestSwitchTarget,
+  findAccountRow,
+  formatDaysHours,
+  formatHoursMinutes,
+  switchScore,
+  switchToAccount,
   reorderAccounts,
   updateDefaultLines,
   claudeAccountsPaths,
@@ -182,6 +190,71 @@ describe('ClaudeAccountPool', () => {
     expect(lines[0]).toContain('额度用尽');
     expect(lines[1]).toContain('▶ **b-name**（备用 1，b；');
     expect(lines[1]).toContain('还没有运行记录');
+  });
+});
+
+describe('account table and switching (/accounts)', () => {
+  const DAY = 24 * HOUR;
+  const MIN = 60_000;
+
+  it('formats resets as hours+minutes for 5 hours and days+hours for the week', () => {
+    expect(formatHoursMinutes(4 * HOUR + 32 * MIN)).toBe('4h32m');
+    expect(formatHoursMinutes(59 * MIN)).toBe('0h59m');
+    expect(formatDaysHours(2 * DAY + 22 * HOUR)).toBe('2d22h');
+    expect(formatDaysHours(5 * HOUR)).toBe('0d5h');
+  });
+
+  it('scores room first and a sooner reset second; an account that never ran counts half full', () => {
+    const view = (five: number, week: number, weekResetIn?: number) => ({
+      five_hour: { usedPercent: five, line: 98 },
+      seven_day: { usedPercent: week, line: 90, ...(weekResetIn !== undefined ? { resetsInMs: weekResetIn } : {}) },
+    });
+    const empty = switchScore(view(0, 10, 6 * DAY), true);
+    const full = switchScore(view(0, 86, 6 * DAY), true);
+    expect(empty).toBeGreaterThan(full);
+    // Same usage: the week that resets sooner wins.
+    expect(switchScore(view(0, 50, DAY), true)).toBeGreaterThan(switchScore(view(0, 50, 6 * DAY), true));
+    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.35);
+    // Past the line: no room left.
+    expect(switchScore(view(0, 95, 6 * DAY), true)).toBeLessThan(0.3);
+  });
+
+  it('lists every account in one table, one column per figure', async () => {
+    const { pool } = await poolWith(['b', 'c']);
+    pool.observe('default', limit({ windows: [
+      { kind: 'five_hour', usedPercent: 46, resetsAt: NOW + 4 * HOUR + 32 * MIN },
+      { kind: 'seven_day', usedPercent: 55, resetsAt: NOW + 2 * DAY + 22 * HOUR },
+    ] }));
+    pool.observe('b', limit({ windows: [{ kind: 'seven_day', usedPercent: 10, resetsAt: NOW + 5 * DAY }] }));
+    const rows = accountRows(pool, 'shilong.wang', NOW);
+    const table = accountsTable(rows);
+    expect(table.split('\n')[0]).toBe('| | 账户 | 5 小时用量 | 5 小时重置 | 本周用量 | 本周重置 | 5 小时切换线 | 本周切换线 | 得分 | 状态 |');
+    expect(table).toContain('| ▶ | **shilong.wang**（主，default） | 46% | 4h32m | 55% | 2d22h | 98% | 98% |');
+    expect(table).toContain('**c-name**（备 2，c） | — | — | — | — | 98% | 98% | 35 | 还没运行过 |');
+  });
+
+  it('switches without a name to the best-scoring account with room, never the current one', async () => {
+    const { pool, paths } = await poolWith(['b', 'c', 'd']);
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 50, resetsAt: NOW + 3 * DAY }] }));
+    pool.observe('b', limit({ windows: [{ kind: 'seven_day', usedPercent: 99, resetsAt: NOW + DAY }] }));
+    pool.observe('c', limit({ windows: [{ kind: 'seven_day', usedPercent: 20, resetsAt: NOW + 6 * DAY }] }));
+    pool.observe('d', limit({ windows: [{ kind: 'seven_day', usedPercent: 20, resetsAt: NOW + DAY }] }));
+    const target = bestSwitchTarget(accountRows(pool, undefined, NOW));
+    // b is past its line; c and d are equally full, d resets sooner.
+    expect(target?.id).toBe('d');
+    await switchToAccount(paths, target!.id);
+    await pool.refresh();
+    expect(pool.pick()?.id).toBe('d');
+    expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['d', 'default', 'b', 'c']);
+  });
+
+  it('finds an account by id, name or the CLI login, ignoring case', async () => {
+    const { pool } = await poolWith(['b']);
+    const rows = accountRows(pool, 'Shilong.Wang', NOW);
+    expect(findAccountRow(rows, 'B')?.id).toBe('b');
+    expect(findAccountRow(rows, 'b-NAME')?.id).toBe('b');
+    expect(findAccountRow(rows, 'shilong.wang')?.id).toBe('default');
+    expect(findAccountRow(rows, 'nobody')).toBeUndefined();
   });
 });
 
