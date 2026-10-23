@@ -47,6 +47,43 @@ describe('logger redaction', () => {
     expect(text).toContain('[REDACTED_PATH]');
   });
 
+  it('survives a failed streamed download: cycles, sockets and depth never throw', async () => {
+    // An axios error from a streamed download: response.data is the response
+    // stream, whose socket points back at itself (2026-10-23 a merge_forward
+    // image download took a whole message batch down this way).
+    class TLSSocket {
+      self: unknown;
+      on() {}
+      emit() {}
+      constructor() {
+        this.self = this;
+      }
+    }
+    class IncomingMessage {
+      socket = new TLSSocket();
+      pipe() {}
+    }
+    const err = Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: new IncomingMessage() },
+    });
+    const circular: Record<string, unknown> = { name: 'loop' };
+    circular.me = circular;
+    let deep: Record<string, unknown> = { leaf: true };
+    for (let i = 0; i < 20; i++) deep = { next: deep };
+
+    expect(() => log.fail('media', err, { circular, deep, cause: new Error('inner'), when: new Date(0) })).not.toThrow();
+    expect(() => log.warn('sdk', 'error', { args: [err, { data: new IncomingMessage() }] })).not.toThrow();
+    await flushLogger();
+
+    const text = await readTodayLog();
+    expect(text).toContain('Request failed with status code 400');
+    expect(text).toContain('[IncomingMessage]');
+    expect(text).toContain('[Circular]');
+    expect(text).toContain('[MaxDepth]');
+    expect(text).toContain('"message":"inner"');
+    expect(text).toContain('1970-01-01T00:00:00.000Z');
+  });
+
   it('redacts nested sdk args after stringify-style recursion', async () => {
     log.warn('sdk', 'error', {
       args: [

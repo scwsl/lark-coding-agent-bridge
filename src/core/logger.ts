@@ -212,10 +212,26 @@ function sanitizeLogEntry(
   return out;
 }
 
+/** Deeper than this a value is cut off: log fields are meant to be small. */
+const MAX_LOG_DEPTH = 8;
+
+/**
+ * Sockets, streams and other emitters are not data: following their fields
+ * walks into the TLS socket's own cycles (an axios error from a streamed
+ * download carries one at `response.data`) and overflows the stack, which
+ * once took a whole message batch down with it.
+ */
+function isOpaqueObject(value: object): boolean {
+  const v = value as { pipe?: unknown; on?: unknown; emit?: unknown };
+  return typeof v.pipe === 'function' || (typeof v.on === 'function' && typeof v.emit === 'function');
+}
+
 function sanitizeLogValue(
   key: string,
   value: unknown,
   options: SanitizeOptions = EXTERNAL_SANITIZE,
+  depth = 0,
+  ancestors: WeakSet<object> = new WeakSet(),
 ): unknown {
   const normalizedKey = key.startsWith('_') ? key.slice(1) : key;
   if (value === undefined) return undefined;
@@ -226,15 +242,34 @@ function sanitizeLogValue(
   }
   if (RESOURCE_ID_KEYS.has(normalizedKey)) return '[REDACTED_RESOURCE]';
   if (options.redactIds && ID_KEYS.has(normalizedKey)) return redactId(value);
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeLogValue(key, item, options));
-  }
   if (value && typeof value === 'object') {
-    const nested: Record<string, unknown> = {};
-    for (const [nestedKey, nestedValue] of Object.entries(value)) {
-      nested[nestedKey] = sanitizeLogValue(nestedKey, nestedValue, options);
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? String(value) : value.toISOString();
+    if (ArrayBuffer.isView(value)) return `[${value.constructor?.name ?? 'Binary'} ${value.byteLength} bytes]`;
+    if (value instanceof Error) {
+      const e = value as Error & { code?: unknown; status?: unknown };
+      return {
+        name: e.name,
+        message: redactDiagnosticText(String(e.message)),
+        ...(e.code !== undefined ? { code: sanitizeLogValue('code', e.code, options, depth + 1, ancestors) } : {}),
+        ...(e.status !== undefined ? { status: sanitizeLogValue('status', e.status, options, depth + 1, ancestors) } : {}),
+      };
     }
-    return nested;
+    if (isOpaqueObject(value)) return `[${value.constructor?.name ?? 'Object'}]`;
+    if (ancestors.has(value)) return '[Circular]';
+    if (depth >= MAX_LOG_DEPTH) return '[MaxDepth]';
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        return value.map((item) => sanitizeLogValue(key, item, options, depth + 1, ancestors));
+      }
+      const nested: Record<string, unknown> = {};
+      for (const [nestedKey, nestedValue] of Object.entries(value)) {
+        nested[nestedKey] = sanitizeLogValue(nestedKey, nestedValue, options, depth + 1, ancestors);
+      }
+      return nested;
+    } finally {
+      ancestors.delete(value);
+    }
   }
   if (typeof value === 'string') {
     const redacted = redactDiagnosticText(value);
@@ -253,6 +288,27 @@ function redactId(value: unknown): unknown {
 }
 
 function emit(level: Level, phase: string, event: string, fields: LogFields = {}): void {
+  try {
+    emitUnsafe(level, phase, event, fields);
+  } catch (err) {
+    // Logging must never take the caller down; leave a trace of what was lost.
+    try {
+      getStream()?.write(
+        `${JSON.stringify({
+          ts: formatLocalTimestamp(loggerOptions.now()),
+          level,
+          phase,
+          event,
+          logError: err instanceof Error ? err.message : String(err),
+        })}\n`,
+      );
+    } catch {
+      /* nothing left to do */
+    }
+  }
+}
+
+function emitUnsafe(level: Level, phase: string, event: string, fields: LogFields = {}): void {
   const ctx = als.getStore() ?? {};
   const entry = sanitizeLogEntry({
     ts: formatLocalTimestamp(loggerOptions.now()),
