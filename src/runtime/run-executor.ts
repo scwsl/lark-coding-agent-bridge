@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, AgentEvent, AgentRun, RunApprovals } from '../agent/types';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, RunApprovals } from '../agent/types';
 import { ActiveRuns, type RunHandle } from '../bot/active-runs';
 import { ProcessPool } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
@@ -65,6 +65,8 @@ export interface SubmitRunInput {
   guard?: RunGuard;
   /** See AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
+  /** See AgentRunOptions.accountLineCap. */
+  accountLineCap?: AgentRunOptions['accountLineCap'];
   nowait?: boolean;
   /** Who this run is for — the person its usage is booked against. */
   actor?: { id: string; name?: string };
@@ -197,6 +199,7 @@ export class RunExecutor {
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      ...(input.accountLineCap ? { accountLineCap: input.accountLineCap } : {}),
     };
     const compatKey = runCompatKey({ ...runOptions, gated: Boolean(input.gate) });
     const dimensions = {
@@ -616,6 +619,7 @@ function runCompatKey(opts: {
   permissionMode?: string;
   images?: readonly string[];
   compactWindowTokens?: number;
+  accountLineCap?: AgentRunOptions['accountLineCap'];
 }): string {
   return JSON.stringify([
     opts.gated ?? false,
@@ -628,6 +632,8 @@ function runCompatKey(opts: {
     opts.images?.length ? opts.images : null,
     // The compaction window rides on the process environment.
     opts.compactWindowTokens ?? null,
+    // The account was picked under the cap: an uncapped turn needs its own pick.
+    opts.accountLineCap ?? null,
   ]);
 }
 

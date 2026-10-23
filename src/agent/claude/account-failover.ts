@@ -35,14 +35,24 @@ export interface AccountFailoverDeps {
  *
  * The account a run ends up on becomes the main one (see the pool's rounds).
  *
+ * A run with `accountLineCap` (课堂精练) sees every line lowered to the cap:
+ * it starts on, and moves only to, an account below it; with none left it
+ * stays where it is until its turn ends and lets its caller stop there. It
+ * never changes which account is the main one.
+ *
  * A refusal the agent works past (extra usage, a fallback model) is passed
  * through as soon as work resumes. Nothing moves once the user's turn has
  * ended or the run was stopped.
  */
 export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailoverDeps): AgentRun {
-  let account = deps.pool.pick();
+  const cap = opts.accountLineCap;
+  let account = deps.pool.pick(undefined, cap);
   if (!account) throw new Error('no Claude account to run on');
-  deps.pool.promote(account.id);
+  // A capped run (课堂精练) borrows an account; chats keep their main one.
+  const promote = (id: string): void => {
+    if (!cap) deps.pool.promote(id);
+  };
+  promote(account.id);
   let current = deps.spawn(opts, account);
   let stopped = false;
   const tried = new Set<string>();
@@ -87,7 +97,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
             refusal = mergeRefusal(refusal, evt);
             continue;
           }
-          if (!evt.blocked && !turnEnded && !stopped && !deps.pool.hasRoom(on.id)) pastLine = true;
+          if (!evt.blocked && !turnEnded && !stopped && !deps.pool.hasRoom(on.id, cap)) pastLine = true;
         }
         if (evt.type === 'system' && evt.sessionId) sessionId = evt.sessionId;
         if (evt.type === 'background') background = evt.count;
@@ -108,7 +118,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         if (evt.type === 'tool_result') {
           inFlight.delete(evt.id);
           if (pastLine && !refusal && !stopped && !turnEnded && inFlight.size === 0 && background === 0) {
-            leave = deps.pool.pickReady(new Set([...tried, on.id]));
+            leave = deps.pool.pickReady(new Set([...tried, on.id]), cap);
             if (leave) break;
             // Every other account is past a line too: use this one up.
             pastLine = false;
@@ -117,7 +127,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       }
 
       if (leave) {
-        const line = deps.pool.pastLine(on.id);
+        const line = deps.pool.pastLine(on.id, undefined, cap);
         log.info('agent', 'account-leave', { runId: opts.runId, from: on.id, to: leave.id, window: line?.kind ?? null });
         await attempt.stop();
         if (stopped) {
@@ -127,7 +137,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         switchedFrom = label;
         reason = line ? `${WINDOW_LABELS[line.kind]}用量到了 ${line.line}% 的切换线` : '到了切换线';
         account = leave;
-        deps.pool.promote(leave.id);
+        promote(leave.id);
         current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave);
         continue;
       }
@@ -136,7 +146,13 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         yield* held;
         return;
       }
-      const next = stopped || wasInterrupted(held) ? undefined : deps.pool.pickRunnable(tried);
+      // A capped run moves only to an account below its cap, never one past it.
+      const next =
+        stopped || wasInterrupted(held)
+          ? undefined
+          : cap
+            ? deps.pool.pickReady(tried, cap)
+            : deps.pool.pickRunnable(tried);
       if (!next) {
         yield soonestReset(refusal, deps.pool);
         yield* held;
@@ -152,7 +168,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       switchedFrom = label;
       reason = undefined;
       account = next;
-      deps.pool.promote(next.id);
+      promote(next.id);
       current = deps.spawn(
         { ...opts, ...(sessionId ? { sessionId } : {}), prompt: failoverPrompt(opts.prompt) },
         next,

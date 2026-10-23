@@ -51,6 +51,13 @@ export const WINDOW_LABELS: Record<WindowKind, string> = { five_hour: '5 小时�
 
 /** Fill (1–100%) per window at which runs move to another account. */
 export type SwitchLines = Record<WindowKind, number>;
+
+/**
+ * A ceiling one run puts on every account's lines (课堂精练 stops using an
+ * account at 80% even where chats go on to 98%). A window left out keeps the
+ * account's own line; a cap never raises one.
+ */
+export type LineCap = Partial<Record<WindowKind, number>>;
 export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
 /** How far a switch by name (`/accounts switch <name>`) raises the account's lines, for a while. */
 export const SWITCH_BOOST_LINE = 98;
@@ -361,11 +368,13 @@ export class ClaudeAccountPool {
     return { ...this.config.lines };
   }
 
-  /** The line (1–100) at which runs leave the account in `kind`'s window, a raised one included. */
-  lineOf(id: string, kind: WindowKind, now = this.now()): number {
-    const line = this.baseLineOf(id, kind);
+  /** The line (1–100) at which runs leave the account in `kind`'s window, a raised one included, under `cap`. */
+  lineOf(id: string, kind: WindowKind, now = this.now(), cap?: LineCap): number {
+    const base = this.baseLineOf(id, kind);
     const boost = this.config.accounts.find((a) => a.id === id)?.boost?.[kind];
-    return boost && boost.until > now ? Math.max(line, boost.line) : line;
+    const line = boost && boost.until > now ? Math.max(base, boost.line) : base;
+    const ceiling = cap?.[kind];
+    return ceiling !== undefined ? Math.min(line, ceiling) : line;
   }
 
   /** The account's own line, or the profile's, without any raise. */
@@ -395,10 +404,10 @@ export class ClaudeAccountPool {
    * below its lines, else not refused, else the one whose refusal ends first —
    * tried anyway, the refusal may be over (the run pauses if it is not).
    */
-  pick(exclude?: ReadonlySet<string>): PickedAccount | undefined {
+  pick(exclude?: ReadonlySet<string>, cap?: LineCap): PickedAccount | undefined {
     const now = this.now();
     return (
-      this.pickRunnable(exclude) ??
+      this.pickRunnable(exclude, cap) ??
       this.accounts()
         .filter((a) => !exclude?.has(a.id))
         .sort((a, b) => (this.refusedUntil(a.id, now) ?? now) - (this.refusedUntil(b.id, now) ?? now))[0]
@@ -406,15 +415,15 @@ export class ClaudeAccountPool {
   }
 
   /** Round 1, else round 2: never an account that is still refused. */
-  pickRunnable(exclude?: ReadonlySet<string>): PickedAccount | undefined {
+  pickRunnable(exclude?: ReadonlySet<string>, cap?: LineCap): PickedAccount | undefined {
     const now = this.now();
-    return this.pickReady(exclude) ?? this.choose(exclude, (id) => !this.isRefused(id, now), now);
+    return this.pickReady(exclude, cap) ?? this.choose(exclude, (id) => !this.isRefused(id, now), now, cap);
   }
 
-  /** Round 1 only: an account below all its lines. */
-  pickReady(exclude?: ReadonlySet<string>): PickedAccount | undefined {
+  /** Round 1 only: an account below all its lines (under `cap`). */
+  pickReady(exclude?: ReadonlySet<string>, cap?: LineCap): PickedAccount | undefined {
     const now = this.now();
-    return this.choose(exclude, (id) => this.underLinesAt(id, now) <= now, now);
+    return this.choose(exclude, (id) => this.underLinesAt(id, now, cap) <= now, now, cap);
   }
 
   /**
@@ -425,6 +434,7 @@ export class ClaudeAccountPool {
     exclude: ReadonlySet<string> | undefined,
     ok: (id: string) => boolean,
     now: number,
+    cap?: LineCap,
   ): PickedAccount | undefined {
     const all = this.accounts();
     const candidates = all.filter((a) => !exclude?.has(a.id) && ok(a.id));
@@ -432,7 +442,7 @@ export class ClaudeAccountPool {
     let best: PickedAccount | undefined;
     let bestScore = -1;
     for (const account of candidates) {
-      const score = this.score(account.id, now);
+      const score = this.score(account.id, now, cap);
       if (score > bestScore) {
         best = account;
         bestScore = score;
@@ -459,12 +469,12 @@ export class ClaudeAccountPool {
   }
 
   /** Each window as the switch score and `/accounts` read it. */
-  windowViews(id: string, now = this.now()): Record<WindowKind, AccountWindowView> {
+  windowViews(id: string, now = this.now(), cap?: LineCap): Record<WindowKind, AccountWindowView> {
     const state = this.loadState()[id];
     const windows = {} as Record<WindowKind, AccountWindowView>;
     for (const kind of WINDOW_KINDS) {
       const window = state?.windows[kind];
-      const line = this.lineOf(id, kind, now);
+      const line = this.lineOf(id, kind, now, cap);
       if (!window) {
         windows[kind] = { line };
         continue;
@@ -480,15 +490,15 @@ export class ClaudeAccountPool {
   }
 
   /** The account's switch score, 0–1 ({@link switchScore}). */
-  score(id: string, now = this.now()): number {
-    const windows = this.windowViews(id, now);
+  score(id: string, now = this.now(), cap?: LineCap): number {
+    const windows = this.windowViews(id, now, cap);
     return switchScore(windows, windowsKnown(windows));
   }
 
-  /** The account is below all its lines and not refused right now. */
-  hasRoom(id: string): boolean {
+  /** The account is below all its lines (under `cap`) and not refused right now. */
+  hasRoom(id: string, cap?: LineCap): boolean {
     const now = this.now();
-    return this.underLinesAt(id, now) <= now;
+    return this.underLinesAt(id, now, cap) <= now;
   }
 
   /** A request on the account was refused and its window has not reset yet. */
@@ -515,12 +525,12 @@ export class ClaudeAccountPool {
   }
 
   /** The first window the account is at or past its line in, with that line. */
-  pastLine(id: string, now = this.now()): { kind: WindowKind; line: number } | undefined {
+  pastLine(id: string, now = this.now(), cap?: LineCap): { kind: WindowKind; line: number } | undefined {
     const state = this.loadState()[id];
     if (!state) return undefined;
     for (const kind of WINDOW_KINDS) {
       const window = state.windows[kind];
-      const line = this.lineOf(id, kind, now);
+      const line = this.lineOf(id, kind, now, cap);
       if (!window || window.usedPercent < line) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > now) return { kind, line };
@@ -529,17 +539,40 @@ export class ClaudeAccountPool {
   }
 
   /** When the account is below all its lines and not refused: now, or the reset that gets it there. */
-  underLinesAt(id: string, now = this.now()): number {
+  underLinesAt(id: string, now = this.now(), cap?: LineCap): number {
     const state = this.loadState()[id];
     if (!state) return now;
     let at = this.refusedUntil(id, now) ?? now;
     for (const kind of WINDOW_KINDS) {
       const window = state.windows[kind];
-      if (!window || window.usedPercent < this.lineOf(id, kind, now)) continue;
+      if (!window || window.usedPercent < this.lineOf(id, kind, now, cap)) continue;
       const until = window.resetsAt ?? state.updatedAt + UNKNOWN_RESET_MS;
       if (until > at) at = until;
     }
     return at;
+  }
+
+  /**
+   * Record a fresh `/usage` reading of `id` (windows by kind, reset as epoch
+   * ms). Leaves a refusal alone: `/usage` does not say whether requests go
+   * through.
+   */
+  observeUsage(id: string, windows: Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>>): void {
+    const kinds = WINDOW_KINDS.filter((kind) => windows[kind] !== undefined);
+    if (kinds.length === 0) return;
+    const now = this.now();
+    const all = this.loadState();
+    const state: AccountQuotaState = all[id] ?? { windows: {}, updatedAt: now };
+    for (const kind of kinds) {
+      const window = windows[kind]!;
+      state.windows[kind] = {
+        usedPercent: window.usedPercent,
+        ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
+      };
+    }
+    state.updatedAt = now;
+    all[id] = state;
+    this.persist();
   }
 
   /** Record what a run on `id` reported about its quota. */
