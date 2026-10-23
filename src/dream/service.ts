@@ -236,6 +236,12 @@ interface CurrentRun {
   execution?: RunExecution;
   /** Why it was stopped, in words: an admin, a user task, shutdown. */
   stopped?: string;
+  /**
+   * A user task showed up before the checkpoint of an automatic run: the
+   * agent turn in flight is stopped and no new one starts, but what is
+   * already done is drafted and published — the rest waits for the next run.
+   */
+  yielding?: string;
 }
 
 const KEEP_CHECKOUT_RUNS = 5;
@@ -248,6 +254,8 @@ const AUTO_CHECK_MS = 30 * 60_000;
 const WATCHDOG_MS = 15_000;
 const UNKNOWN_QUOTA_BUDGET = 0.5;
 const AUTO_ACTOR: DreamActor = { id: 'dream-auto', name: '自动整理' };
+/** Deferral reason of the conversations an automatic run left to a user task. */
+export const YIELD_REASON = '让位给用户任务';
 
 export class DreamService {
   private readonly state: DreamStateStore;
@@ -445,10 +453,13 @@ export class DreamService {
    */
   preempt(reason: string): boolean {
     const current = this.current;
-    if (!current || current.trigger !== 'auto' || current.abort.signal.aborted) return false;
+    if (!current || current.trigger !== 'auto' || current.abort.signal.aborted || current.yielding) return false;
     if (this.state.run(current.id)?.checkpointAt !== undefined) return false;
     log.info('dream', 'preempted', { batch: current.id, reason });
-    return this.stop(`让位给用户任务（${reason}）`);
+    // Not a cancel: what is done is kept, only the turn in flight and the rest give way.
+    current.yielding = `${YIELD_REASON}（${reason}）`;
+    void current.execution?.stop().catch(() => undefined);
+    return true;
   }
 
   /** Wait for the running batch, if any (tests, shutdown). */
@@ -660,7 +671,8 @@ export class DreamService {
       const run = runs[i]!;
       const interrupted =
         run.checkpointAt === undefined &&
-        ((run.status === 'cancelled' && !(run.note ?? '').startsWith('已取消')) ||
+        (run.yielded === true ||
+          (run.status === 'cancelled' && !(run.note ?? '').startsWith('已取消')) ||
           (run.status === 'failed' && (run.note ?? '').startsWith('进程重启时中断')));
       if (!interrupted) return nextDrainRound(run, maxRounds);
     }
@@ -791,7 +803,7 @@ export class DreamService {
     if (run.status === 'succeeded') {
       patch.consecutiveFailures = 0;
       patch.lastFailedAt = undefined;
-    } else if (run.trigger === 'auto' && (run.status === 'failed' || (run.status === 'deferred' && run.scopes > 0))) {
+    } else if (run.trigger === 'auto' && !run.yielded && (run.status === 'failed' || (run.status === 'deferred' && run.scopes > 0))) {
       patch.consecutiveFailures = this.state.autoLedger().consecutiveFailures + 1;
       patch.lastFailedAt = run.endedAt ?? this.now();
     }
@@ -845,6 +857,14 @@ export class DreamService {
       this.state.updateRun(run.id, { external: learning.report, ...(learning.error ? { learnFailed: true } : {}) });
     }
     const learned = learning.additions.length + learning.skills.length > 0;
+    if (current.yielding && !learned) {
+      // Gave way during 课前学习 with nothing to keep: no cursor moves, the next run reads it all again.
+      for (const scope of selection.scopes) {
+        for (const session of scope.sessions) deferred.push({ key: session.record.key, reason: YIELD_REASON });
+      }
+      this.state.updateRun(run.id, { deferred, yielded: true });
+      return this.finish(run.id, 'deferred', `${current.yielding}，游标未移动；空闲后接着整理`);
+    }
 
     if (selection.scopes.length === 0 && !learned) {
       // Read, nothing worth keeping: the libraries' cursors move all the same.
@@ -870,6 +890,10 @@ export class DreamService {
 
     for (const scope of selection.scopes) {
       if (signal.aborted) return stopped('游标未移动');
+      if (current.yielding) {
+        for (const session of scope.sessions) deferred.push({ key: session.record.key, reason: YIELD_REASON });
+        continue;
+      }
       const off = this.switchedOff(run);
       if (off) return this.finish(run.id, 'cancelled', `${off}，游标未移动`);
       const remaining = deadline - this.now();
@@ -904,9 +928,16 @@ export class DreamService {
       memoryItems: additions.length + flags.length,
       skillItems: skillProposals.length,
       rejected: rejected.length,
+      ...(current.yielding ? { yielded: true } : {}),
     });
     if (done.length === 0 && !learned) {
-      return this.finish(run.id, 'deferred', `${deferred.length} 个会话延后：${deferred[0]?.reason ?? ''}`);
+      return this.finish(
+        run.id,
+        'deferred',
+        current.yielding
+          ? `${current.yielding}，游标未移动；空闲后接着整理`
+          : `${deferred.length} 个会话延后：${deferred[0]?.reason ?? ''}`,
+      );
     }
 
     // Draft: a local commit in every target repository, or the batch is dropped.
@@ -965,6 +996,7 @@ export class DreamService {
     const problems = targets.filter((target) => target.error);
     const summary = [
       lead,
+      current.yielding ? `${current.yielding}：已完成的部分照常提交，其余空闲后接着整理` : undefined,
       budget < 1 ? '读不到额度，按一半预算运行' : undefined,
       resumed,
       learning.error,
@@ -1203,7 +1235,7 @@ export class DreamService {
     }
     if (this.current) this.current.execution = execution;
     // Stopped in the meantime (a user task, a cancel): the stop above found no execution yet.
-    if (signal.aborted) void execution.stop().catch(() => undefined);
+    if (signal.aborted || this.current?.yielding) void execution.stop().catch(() => undefined);
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -1230,6 +1262,7 @@ export class DreamService {
     }
     if (timedOut) return { error: '超出本轮运行时间' };
     if (signal.aborted) return { error: '已取消' };
+    if (this.current?.yielding && failure) return { error: YIELD_REASON };
     const text = finalText ?? streamed;
     if (failure && !text.trim()) return { error: `整理 agent 运行失败：${failure.slice(0, 200)}` };
     return { text };

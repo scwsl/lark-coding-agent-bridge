@@ -8,8 +8,11 @@ import type { DreamRun } from './state';
  * whether the profile is idle and the quota allows it.
  */
 
-/** Deferral reasons that are about this run's limits, not about the conversation itself. */
-const LIMIT_REASONS: ReadonlySet<string> = new Set(['超出本轮输入预算', '超出本轮会话数上限', '超出本轮运行时间']);
+/**
+ * Deferral reasons that are about this run, not about the conversation itself:
+ * its limits, or giving way to a user task (see DreamService#preempt).
+ */
+const LIMIT_REASONS: ReadonlySet<string> = new Set(['超出本轮输入预算', '超出本轮会话数上限', '超出本轮运行时间', '让位给用户任务']);
 
 export interface DreamLeftover {
   /** External library files that did not fit this run's budget. */

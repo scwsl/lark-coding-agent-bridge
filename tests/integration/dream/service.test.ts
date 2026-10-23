@@ -397,7 +397,9 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     busy = true; // the watchdog notices on its own
     await h.service.idle();
     const run = h.service.runs()[0]!;
-    expect(run).toMatchObject({ status: 'cancelled', note: expect.stringContaining('让位给用户任务') });
+    // Nothing was done yet: no cursor moves, the input is read again later. Not a failure.
+    expect(run).toMatchObject({ status: 'deferred', yielded: true, note: expect.stringContaining('让位给用户任务') });
+    expect(run.deferred).toEqual([{ key: expect.any(String), reason: '让位给用户任务' }]);
     expect(run.checkpointAt).toBeUndefined();
     const status = await h.service.status();
     // not a failure, but the window is spent
@@ -414,6 +416,37 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     await h.service.idle();
     expect(h.service.runs()[0]).toMatchObject({ trigger: 'manual', status: 'succeeded' });
     expect(h.service.runs()[0]!.checkpointAt).toBeDefined();
+  });
+
+  it('giving way halfway keeps what is done and picks up the rest once the profile is idle', async () => {
+    let busy = false;
+    const h = await harness({ auto: { minScopes: 1 }, hold: true, busy: () => busy });
+    talk(h, 'sess-1');
+    talk(h, 'sess-2', 'oc_other');
+    expect((await h.service.checkAuto()).started).toBeDefined();
+    await vi.waitFor(() => expect(h.submits).toHaveLength(1));
+    h.release(); // the first conversation is read through
+    await vi.waitFor(() => expect(h.submits).toHaveLength(2));
+    busy = true; // a user shows up while the second one is being read
+    await h.service.idle();
+    const first = h.service.runs()[0]!;
+    expect(first).toMatchObject({ status: 'succeeded', yielded: true, note: expect.stringContaining('已完成的部分照常提交') });
+    expect(first.checkpointAt).toBeDefined();
+    expect(first.deferred).toEqual([{ key: expect.any(String), reason: '让位给用户任务' }]);
+    expect((await h.service.status()).auto.ledger).toMatchObject({ consecutiveFailures: 0 });
+
+    // Still busy: nothing starts. Idle again: the rest is read, not the first conversation a second time.
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'busy' });
+    busy = false;
+    const resumed = await h.service.checkAuto();
+    expect(resumed.started).toBeDefined();
+    await vi.waitFor(() => expect(h.submits).toHaveLength(3));
+    h.release();
+    await h.service.idle();
+    const second = h.service.runs()[0]!;
+    expect(second).toMatchObject({ status: 'succeeded', round: 2, scopes: 1 });
+    expect(second.note).toContain('续跑第 2 轮');
+    expect(h.submits[2]!.scopeId).not.toBe(h.submits[0]!.scopeId);
   });
 
   it('counts failed automatic runs, backs off and pauses until a manual run succeeds', async () => {

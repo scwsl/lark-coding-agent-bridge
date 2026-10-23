@@ -100,6 +100,8 @@ export interface DreamRun {
   learnFailed?: boolean;
   /** 续跑: the how-manieth run in a row of one start (absent: the first). */
   round?: number;
+  /** An automatic run gave way to a user task before its checkpoint; what was done is kept, the rest deferred. */
+  yielded?: boolean;
 }
 
 interface DreamStateData {
