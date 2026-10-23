@@ -64,7 +64,7 @@ import { resolveAppSecret } from '../config/secret-resolver';
 import { tmpdir } from 'node:os';
 import { overloadCard } from '../card/templates';
 import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
-import { log, reportMetric, withTrace } from '../core/logger';
+import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
   toPolicyAttachment,
@@ -594,6 +594,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         });
       } catch (err) {
         log.fail('flush', err);
+        // Unexpected: the batch never reached the agent. Say so instead of staying silent.
+        await notifyBatchFailed(channel, batch.at(-1) ?? firstMsg, err).catch((notifyErr: unknown) =>
+          log.fail('flush', notifyErr, { step: 'notify-failed' }),
+        );
       } finally {
         pending.unblock(scope);
         log.info('flush', 'end');
@@ -1083,6 +1087,17 @@ async function sendNonAllowedGroupHint(
     await channel.send(chatId, { text }, { replyTo: replyToMessageId });
   } catch {
     await channel.send(chatId, { text });
+  }
+}
+
+/** A batch failed before reaching the agent: tell the sender, so the message is not silently lost. */
+async function notifyBatchFailed(channel: LarkChannel, msg: NormalizedMessage, err: unknown): Promise<void> {
+  const reason = redactDiagnosticText(err instanceof Error ? err.message : String(err)).slice(0, 200);
+  const text = `⚠️ 这条消息处理时出错，没有交给 agent（${reason}）。请重新发送一次；反复出现请告诉 bot 主人。`;
+  try {
+    await channel.send(msg.chatId, { text }, { replyTo: msg.messageId });
+  } catch {
+    await channel.send(msg.chatId, { text });
   }
 }
 
