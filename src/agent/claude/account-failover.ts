@@ -172,6 +172,8 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
     },
     waitForExit: (timeoutMs) => current.waitForExit(timeoutMs),
     inject: (prompt, preview) => current.inject?.(prompt, preview) ?? false,
+    // The next user turn for a process kept for its background tasks.
+    send: (prompt) => current.send?.(prompt) ?? false,
   };
 }
 

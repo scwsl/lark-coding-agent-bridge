@@ -312,6 +312,52 @@ describe('ClaudeAdapter process contract', () => {
     ]);
   });
 
+  it('keeps taking input after a turn that left background tasks running', async () => {
+    // The turn ends with a background sub-agent still at work: the process
+    // must live on (stdin open) so the next message can be handed to it
+    // instead of the bridge killing that work.
+    const fake = await createFakeClaude({
+      lines: [
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: 'agent-1' }] },
+        { type: 'result', session_id: 'sess-bg' },
+      ],
+      followUps: [
+        [
+          { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+          { type: 'assistant', message: { content: [{ type: 'text', text: 'next' }] } },
+          { type: 'result', session_id: 'sess-bg' },
+        ],
+      ],
+    });
+    cleanup.push(fake.dir);
+
+    const run = new ClaudeAdapter({ binary: fake.path }).run({
+      runId: 'run-bg',
+      prompt: 'task',
+      cwd: fake.dir,
+    });
+
+    const events: AgentEvent[] = [];
+    let handedOver: boolean | undefined;
+    for await (const event of run.events) {
+      events.push(event);
+      if (event.type === 'done' && handedOver === undefined) handedOver = run.send?.('next message');
+    }
+
+    expect(handedOver).toBe(true);
+    expect(events).toEqual([
+      { type: 'background', count: 1 },
+      { type: 'done', sessionId: 'sess-bg', terminationReason: 'normal' },
+      { type: 'background', count: 0 },
+      { type: 'text', delta: 'next' },
+      { type: 'done', sessionId: 'sess-bg', terminationReason: 'normal' },
+    ]);
+    // No background task left after the second turn: input closed, process gone.
+    expect(run.send?.('too late')).toBe(false);
+    const record = await readRecord(fake.recordPath);
+    expect(record.messages).toEqual(['task', 'next message']);
+  });
+
   it('ends on an error result even with input still unread', async () => {
     const fake = await createFakeClaude({
       lines: [{ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'sess-err' }],

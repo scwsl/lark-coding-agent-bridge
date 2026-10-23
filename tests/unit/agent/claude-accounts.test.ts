@@ -355,6 +355,25 @@ describe('account failover', () => {
     expect((await collect(run)).map((e) => e.type)).toEqual(['done']);
   });
 
+  it('hands the next turn to the current process, so background work is not killed', async () => {
+    const { pool } = await poolWith(['b']);
+    const sent: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: () => ({
+        ...fakeRun([{ type: 'done', terminationReason: 'normal' }]),
+        send: (prompt: string) => {
+          sent.push(prompt);
+          return true;
+        },
+      }),
+      labelOf: async () => 'me',
+    });
+    await collect(run);
+    expect(run.send?.('next')).toBe(true);
+    expect(sent).toEqual(['next']);
+  });
+
   it('moves a refused run to the next account and resumes the same session there', async () => {
     const { pool } = await poolWith(['b']);
     const calls: Array<{ account: PickedAccount; opts: AgentRunOptions }> = [];

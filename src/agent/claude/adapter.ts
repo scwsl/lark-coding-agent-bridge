@@ -103,7 +103,10 @@ export class ClaudeAdapter implements AgentAdapter {
     // stdin stays open (`--input-format stream-json`) so mid-run supplements
     // can be fed in through `inject`; `--replay-user-messages` echoes each
     // message back once claude has consumed it, which is what tells a real
-    // end of run apart from an intermediate turn (see ClaudeInput).
+    // end of run apart from an intermediate turn (see ClaudeInput). A turn
+    // that ends with background tasks still running keeps it open too: the
+    // process lives on to run the turns those tasks trigger, and the bridge
+    // hands it the next user message (`send`) instead of killing that work.
     const args = [
       '-p',
       '--input-format',
@@ -217,6 +220,11 @@ export class ClaudeAdapter implements AgentAdapter {
       runId: opts.runId,
       pid: child.pid,
       events: createEventStream(child, stderrChunks, () => runtimeError, input, () => stopRequested, costBaseline),
+      send(prompt: string): boolean {
+        const ok = input.write(prompt);
+        log.info('agent', ok ? 'send' : 'send-refused', { pid: child.pid ?? null, promptChars: prompt.length });
+        return ok;
+      },
       inject(prompt: string, preview: string): boolean {
         const ok = input.write(prompt, preview);
         log.info('agent', ok ? 'inject' : 'inject-refused', {
@@ -407,6 +415,12 @@ async function* createEventStream(
   child.once('exit', closeSilentStdout);
   let sawResult = false;
   let finished = false;
+  // Background tasks claude last reported: stdin stays open while any run.
+  let background = 0;
+  const track = (evt: AgentEvent): AgentEvent => {
+    if (evt.type === 'background') background = evt.count;
+    return perTurnCost(evt);
+  };
   // The `done` of the last turn that was not taken as the end: replayed if
   // claude exits without a final one, so the session id is not lost.
   let heldDone: AgentEvent | undefined;
@@ -443,7 +457,7 @@ async function* createEventStream(
           });
           for (const evt of translateEvent(parsed)) {
             if (evt.type === 'done') heldDone = evt;
-            else yield perTurnCost(evt);
+            else yield track(evt);
           }
           nextTurnGuard = setTimeout(() => {
             log.warn('agent', 'next-turn-guard-expired', {
@@ -455,10 +469,13 @@ async function* createEventStream(
           }, NEXT_TURN_GUARD_MS);
           continue;
         }
-        input.close();
+        // Background tasks still running: they report back as further turns
+        // of this process, so keep it taking input (see RunExecutor linger).
+        if (background === 0) input.close();
+        else log.info('agent', 'turn-result-background', { pid: child.pid ?? null, background });
         finished = true;
       }
-      for (const evt of translateEvent(parsed)) yield perTurnCost(evt);
+      for (const evt of translateEvent(parsed)) yield track(evt);
     }
   } finally {
     clearNextTurnGuard();
