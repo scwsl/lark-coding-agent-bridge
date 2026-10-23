@@ -884,6 +884,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         activeRuns.scopes().some(notDream) ||
         activeRuns.lingeringScopes().some(notDream) ||
         pending.totalDepth() > 0,
+      // 课堂精练 gives way only when a user task would wait for a slot, not whenever anything runs.
+      isCapacityTight: () => {
+        const slots = pool.snapshot();
+        return slots.waiting > 0 || slots.active >= slots.cap;
+      },
       // publish: push — what was just pushed takes effect now, not at the next periodic sync.
       afterPublish: async (repo) => {
         if (repo === 'knowledge') {

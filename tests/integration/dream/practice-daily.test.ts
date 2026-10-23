@@ -157,6 +157,8 @@ interface HarnessOptions {
   tuning?: Record<string, unknown>;
   /** The profile has a task running. Default never. */
   busy?: () => boolean;
+  /** The agent pool is full. Absent: the service goes by {@link busy} alone. */
+  tight?: () => boolean;
 }
 
 async function harness(opts: HarnessOptions) {
@@ -240,6 +242,7 @@ async function harness(opts: HarnessOptions) {
     isScopeBusy: () => false,
     readTranscript: async () => undefined,
     isProfileBusy: opts.busy ?? (() => false),
+    ...(opts.tight ? { isCapacityTight: opts.tight } : {}),
     readQuota: async () => opts.quota ?? { windows: [{ label: '5 小时窗口', usedPercent: 95 }, { label: '本周', usedPercent: 40 }] },
     countOpenPrs: async () => opts.openPrs ?? 5,
     afterPublish: async (repo) => {
@@ -531,6 +534,40 @@ describe('课堂精练 续跑', { timeout: TIMEOUT }, () => {
     // Done: back to one run per window, and the window was not used up by the 续跑.
     expect(await h.service.checkAuto()).toMatchObject({ block: 'window-used' });
     expect(h.told.map((item) => item.text.split('\n')[0])).toHaveLength(2);
+  });
+
+  it('going by the pool, a busy profile does not hold it back; only a full pool does', async () => {
+    const big = await bareRemote('big', notes(6, 2_000));
+    let tight = false;
+    let turns = 0;
+    const h = await harness({
+      answer: () => {
+        // The pool fills up during the second run.
+        if (++turns === 2) tight = true;
+        return NOTHING;
+      },
+      busy: () => true, // topics, groups, scheduled jobs: always something running
+      tight: () => tight,
+      tuning: { maxInputChars: 10_000, externalLibraries: [{ name: 'big', url: big }] },
+    });
+    const check = await h.service.checkAuto();
+    expect(check.started).toBeDefined();
+    await h.service.idle();
+    const runs = [...h.service.runs()].reverse();
+    // The first run and its 续跑 ran although the profile was busy; the full pool stopped the chain after the second.
+    expect(runs.map((run) => [run.status, run.round ?? 1, run.external?.[0]?.pending])).toEqual([
+      ['succeeded', 1, 4],
+      ['succeeded', 2, 2],
+    ]);
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'busy', reason: expect.stringContaining('进程池已满') });
+    // Room again: the rest is read.
+    tight = false;
+    expect((await h.service.checkAuto()).started).toBeDefined();
+    await h.service.idle();
+    expect(h.service.runs()[0]).toMatchObject({ status: 'succeeded', round: 3 });
+    expect(h.service.runs()[0]!.external?.[0]?.pending).toBe(0);
+    // A user message does not stop a run while slots are free.
+    expect(h.service.preempt('有新的用户消息')).toBe(false);
   });
 
   it('a run cancelled by hand ends the chain', async () => {

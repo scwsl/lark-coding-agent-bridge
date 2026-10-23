@@ -140,6 +140,14 @@ export interface DreamServiceDeps {
    * Absent: never busy.
    */
   isProfileBusy?: () => boolean;
+  /**
+   * User work would have to wait for an agent slot: the process pool is full
+   * or has waiters. When given, automatic runs go by this instead of
+   * {@link isProfileBusy}: they start, chain and keep running alongside user
+   * tasks, and give way only when a slot is actually short — a bot that is
+   * busy all day (topics, groups, scheduled jobs) otherwise never finishes.
+   */
+  isCapacityTight?: () => boolean;
   /** Host-wide directory of the per-repository locks every profile shares. Default: inside {@link workDir}. */
   lockDir?: string;
   /** The profile's state directory (where a profile-local CODEX_HOME lives). */
@@ -452,6 +460,8 @@ export class DreamService {
    * later). Manual runs, and a batch already publishing, are left alone.
    */
   preempt(reason: string): boolean {
+    // With a pool to go by, a user task that gets its slot anyway is no reason to stop.
+    if (this.deps.isCapacityTight && !this.deps.isCapacityTight()) return false;
     const current = this.current;
     if (!current || current.trigger !== 'auto' || current.abort.signal.aborted || current.yielding) return false;
     if (this.state.run(current.id)?.checkpointAt !== undefined) return false;
@@ -577,11 +587,11 @@ export class DreamService {
     const resume =
       cheap && (cheap.block === 'window-used' || cheap.block === 'outside-window') ? this.pendingDrain(settings.drainRounds) : undefined;
     if (cheap && !resume) return this.noteCheck({ at: now, ...cheap });
-    if (this.deps.isProfileBusy?.()) {
-      return this.noteCheck({ at: now, block: 'busy', reason: '有任务在跑或有消息在排队，用户任务优先' });
-    }
+    const held = this.holdBack();
+    if (held.block) return this.noteCheck({ at: now, block: 'busy', reason: held.reason });
     const lastActive = this.state.sessions().reduce((latest, record) => Math.max(latest, record.lastSeenAt), 0);
-    if (now - lastActive < settings.minIdleMinutes * 60_000) {
+    // Going by the pool, a conversation still going on is skipped on its own (仍在进行); the rest need not wait for it.
+    if (!this.deps.isCapacityTight && now - lastActive < settings.minIdleMinutes * 60_000) {
       return this.noteCheck({ at: now, block: 'recent-activity', reason: `最近 ${settings.minIdleMinutes} 分钟内有对话，等空闲后再看` });
     }
     const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
@@ -624,9 +634,8 @@ export class DreamService {
       return this.noteCheck({ at: now, block: 'quota', reason, ...context });
     }
     // The checks above took a while: a user may have shown up meanwhile.
-    if (this.deps.isProfileBusy?.()) {
-      return this.noteCheck({ at: now, block: 'busy', reason: '有任务在跑或有消息在排队，用户任务优先', ...context });
-    }
+    const heldLate = this.holdBack();
+    if (heldLate.block) return this.noteCheck({ at: now, block: 'busy', reason: heldLate.reason, ...context });
     const notifyChat = settings.notifyChat;
     const started = await this.start(AUTO_ACTOR, notifyChat ? (run) => this.tell(notifyChat, formatDreamRun(run)) : undefined, {
       trigger: 'auto',
@@ -697,12 +706,20 @@ export class DreamService {
     if (!next) return;
     if (run.trigger === 'auto') {
       const auto = getDreamAuto(this.deps.appConfig())?.auto;
-      if (!auto || this.deps.isProfileBusy?.()) return;
+      if (!auto || this.holdBack().block) return;
       const { block } = await this.quotaGate(auto, this.now());
-      if (block || this.disposed || this.deps.isProfileBusy?.()) return;
+      if (block || this.disposed || this.holdBack().block) return;
     }
     const started = await this.start(actor, onFinish, { ...options, round: next.round, note: next.note });
     if ('error' in started) log.info('dream', 'drain-not-started', { after: run.id, reason: started.error });
+  }
+
+  /** Automatic runs must hold back: slots are short, or (without a pool to go by) anything else runs. */
+  private holdBack(): { block: boolean; reason: string } {
+    if (this.deps.isCapacityTight) {
+      return { block: this.deps.isCapacityTight(), reason: '进程池已满、有用户任务在等位，用户任务优先' };
+    }
+    return { block: this.deps.isProfileBusy?.() ?? false, reason: '有任务在跑或有消息在排队，用户任务优先' };
   }
 
   /** Keep the latest check; the stored one is rewritten only when the outcome changes. */
@@ -763,12 +780,11 @@ export class DreamService {
       : { unknown: true };
   }
 
-  /** While an automatic batch drafts, anything else the profile starts stops it. */
+  /** While an automatic batch drafts, it gives way when user work needs room (see {@link holdBack}). */
   private watch(current: CurrentRun): () => void {
-    const isBusy = this.deps.isProfileBusy;
-    if (current.trigger !== 'auto' || !isBusy) return () => undefined;
+    if (current.trigger !== 'auto' || (!this.deps.isCapacityTight && !this.deps.isProfileBusy)) return () => undefined;
     const timer = setInterval(() => {
-      if (isBusy()) this.preempt('profile 有新任务');
+      if (this.holdBack().block) this.preempt(this.deps.isCapacityTight ? '进程池已满' : 'profile 有新任务');
     }, this.deps.watchdogMs ?? WATCHDOG_MS);
     timer.unref?.();
     return () => clearInterval(timer);
