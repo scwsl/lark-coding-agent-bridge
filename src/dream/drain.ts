@@ -12,7 +12,16 @@ import type { DreamRun } from './state';
  * Deferral reasons that are about this run, not about the conversation itself:
  * its limits, or giving way to a user task (see DreamService#preempt).
  */
-const LIMIT_REASONS: ReadonlySet<string> = new Set(['超出本轮输入预算', '超出本轮会话数上限', '超出本轮运行时间', '让位给用户任务']);
+/** Deferral reason when every account is at 自动整理's quota ceiling; counts as leftover for 续跑. */
+export const ACCOUNTS_FULL_REASON = '各账户额度都到了课堂精练的上限';
+
+const LIMIT_REASONS: ReadonlySet<string> = new Set([
+  '超出本轮输入预算',
+  '超出本轮会话数上限',
+  '超出本轮运行时间',
+  '让位给用户任务',
+  ACCOUNTS_FULL_REASON,
+]);
 
 export interface DreamLeftover {
   /** External library files that did not fit this run's budget. */

@@ -4,7 +4,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
-import { fullestQuotaWindow, quotaResetAt, readAgentQuota, type QuotaReading } from '../agent/quota';
+import {
+  accountRoomUnderCap,
+  fullestQuotaWindow,
+  quotaResetAt,
+  readAgentQuota,
+  type AccountLineCap,
+  type QuotaReading,
+} from '../agent/quota';
 import { agentDescriptor, isAgentKind } from '../agent/registry';
 import { readAgentTranscript, type AgentTranscript } from '../agent/session-transcript';
 import type { ProfileConfig, SkillLibraryConfig } from '../config/profile-schema';
@@ -31,7 +38,7 @@ import {
   type ExternalCursor,
   type ExternalMaterial,
 } from './external';
-import { nextDrainRound } from './drain';
+import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
@@ -154,6 +161,12 @@ export interface DreamServiceDeps {
   profileDir?: string;
   readTranscript?: (record: DreamSessionRecord) => Promise<AgentTranscript | undefined>;
   readQuota?: () => Promise<QuotaReading | undefined>;
+  /**
+   * Whether some account is still below `cap` (several Claude accounts only);
+   * undefined when it cannot be told or there is a single account — the quota
+   * check before the run decided then. Injected in tests.
+   */
+  accountRoom?: (cap: AccountLineCap) => Promise<boolean | undefined>;
   /** Open `dream/*` PRs on a repository; undefined when it cannot be told. */
   countOpenPrs?: (url: string) => Promise<number | undefined>;
   /** How often 自动整理 looks; 0: never on its own (tests call {@link DreamService.checkAuto}). */
@@ -179,6 +192,12 @@ export interface DreamStartOptions {
   note?: string;
   /** 续跑: the how-manieth run in a row (default 1). */
   round?: number;
+  /**
+   * 自动整理's quota ceiling on every account (see AgentRunOptions.accountLineCap):
+   * the agent moves off an account once it is past it, and with every account
+   * past it no further agent turn starts — what is done is still published.
+   */
+  accountLineCap?: AccountLineCap;
 }
 
 export type DreamStartResult =
@@ -250,6 +269,8 @@ interface CurrentRun {
    * already done is drafted and published — the rest waits for the next run.
    */
   yielding?: string;
+  /** See DreamStartOptions.accountLineCap. */
+  accountLineCap?: AccountLineCap;
 }
 
 const KEEP_CHECKOUT_RUNS = 5;
@@ -409,7 +430,13 @@ export class DreamService {
         ...(options.round !== undefined && options.round > 1 ? { round: options.round } : {}),
       };
       this.state.addRun(run);
-      const current: CurrentRun = { id, trigger, abort: new AbortController(), done: Promise.resolve() };
+      const current: CurrentRun = {
+        id,
+        trigger,
+        abort: new AbortController(),
+        done: Promise.resolve(),
+        ...(options.accountLineCap ? { accountLineCap: options.accountLineCap } : {}),
+      };
       this.current = current;
       const release = locks.release;
       locks = undefined;
@@ -642,6 +669,9 @@ export class DreamService {
       budget: 'unknown' in quota ? UNKNOWN_QUOTA_BUDGET : 1,
       ...(lead ? { note: lead } : {}),
       ...(resume ? { round: resume.round } : {}),
+      // Over the limit but the window resets before quotaResetBefore: what is
+      // left would go unused anyway, so no account is held back either.
+      ...(quotaLead ? {} : { accountLineCap: autoLineCap(auto) }),
     });
     if ('error' in started) {
       return this.noteCheck({ at: now, block: started.code === 'locked' ? 'locked' : 'running', reason: started.error, ...context });
@@ -756,6 +786,12 @@ export class DreamService {
     void this.deps.notify(chatId, text).catch((err: unknown) => log.fail('dream', err, { step: 'notify' }));
   }
 
+  /** Some account is below `cap`; undefined when it cannot be told (one account, another agent). */
+  private async accountHasRoom(cap: AccountLineCap): Promise<boolean | undefined> {
+    if (this.deps.accountRoom) return this.deps.accountRoom(cap).catch(() => undefined);
+    return accountRoomUnderCap(this.deps.profileConfig(), this.deps.profileDir, cap);
+  }
+
   private async readQuota(
     window: 'any' | 'week' = 'any',
   ): Promise<{ percent: number; label: string; resets?: string } | { unknown: true }> {
@@ -767,6 +803,7 @@ export class DreamService {
         return readAgentQuota(this.deps.profileConfig(), {
           cwd,
           ...(this.deps.profileDir ? { profileDir: this.deps.profileDir } : {}),
+          window,
         });
       });
     const reading = await read().catch(() => undefined);
@@ -1230,6 +1267,10 @@ export class DreamService {
     await mkdir(scratch, { recursive: true, mode: 0o700 });
     const policy = this.readOnlyPolicy(prompt, actor, await realpath(scratch));
     if (!policy) return { error: '无法保证只读执行，已跳过' };
+    // Every account at the ceiling: start nothing more; the turn in flight
+    // (if any) was let finish on its account, and what is done gets published.
+    const cap = this.current?.accountLineCap;
+    if (cap && (await this.accountHasRoom(cap)) === false) return { error: ACCOUNTS_FULL_REASON };
     let execution: RunExecution;
     try {
       execution = await this.deps.executor.submit({
@@ -1239,6 +1280,7 @@ export class DreamService {
         effort: resolveEffortArg(profileConfig.agentKind, profileConfig.preferences.effort),
         nowait: true,
         actor,
+        ...(cap ? { accountLineCap: cap } : {}),
         observability: {
           profile: this.deps.profile,
           agent: agentCapability(profileConfig).agentId,
@@ -1807,3 +1849,13 @@ function batchId(now: number): string {
 }
 
 export { sessionKey };
+
+/**
+ * 自动整理's ceiling as a per-window cap: the weekly window only, or both
+ * when `quotaWindow` is `any`.
+ */
+function autoLineCap(auto: { maxQuotaPercent: number; quotaWindow: 'any' | 'week' }): AccountLineCap {
+  return auto.quotaWindow === 'week'
+    ? { seven_day: auto.maxQuotaPercent }
+    : { five_hour: auto.maxQuotaPercent, seven_day: auto.maxQuotaPercent };
+}

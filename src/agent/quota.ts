@@ -1,7 +1,9 @@
 import type { ProfileConfig } from '../config/profile-schema';
+import { claudeAccountPool } from './claude/accounts';
 import { readClaudeQuota } from './claude/quota';
 import { readCodexQuota } from './codex/quota';
 import type { AgentKind } from './registry';
+import type { AgentRunOptions } from './types';
 
 /**
  * How full the agent account's subscription windows are, for work the bridge
@@ -29,12 +31,49 @@ export interface QuotaReadOptions {
   /** The profile's state directory (profile-local CODEX_HOME). */
   profileDir?: string;
   timeoutMs?: number;
+  /**
+   * With several accounts, which window "most room" is judged by: the fullest
+   * one (default) or the weekly one — what a caller that only minds the week
+   * (课堂精练's `quotaWindow: week`) needs, or it is shown the wrong account.
+   */
+  window?: 'any' | 'week';
 }
 
 const QUOTA_READERS: Record<AgentKind, (profileConfig: ProfileConfig, opts: QuotaReadOptions) => Promise<QuotaReading | undefined>> = {
   claude: (_profileConfig, opts) => readClaudeQuota(opts),
   codex: (profileConfig, opts) => readCodexQuota(profileConfig.codex, opts),
 };
+
+/** A per-window ceiling on account switch lines (AgentRunOptions.accountLineCap). */
+export type AccountLineCap = NonNullable<AgentRunOptions['accountLineCap']>;
+
+/**
+ * Whether some account of the profile is still below `cap` in every capped
+ * window, by what the accounts last reported. Undefined when it cannot be
+ * told: a single account, or an agent without several accounts. Never throws.
+ */
+const ACCOUNT_ROOM: Partial<Record<AgentKind, (profileDir: string, cap: AccountLineCap) => Promise<boolean | undefined>>> = {
+  claude: async (profileDir, cap) => {
+    const pool = claudeAccountPool(profileDir);
+    await pool.refresh();
+    if (!pool.multi) return undefined;
+    return pool.pickReady(undefined, cap) !== undefined;
+  },
+};
+
+export async function accountRoomUnderCap(
+  profileConfig: ProfileConfig,
+  profileDir: string | undefined,
+  cap: AccountLineCap,
+): Promise<boolean | undefined> {
+  const check = ACCOUNT_ROOM[profileConfig.agentKind];
+  if (!check || !profileDir) return undefined;
+  try {
+    return await check(profileDir, cap);
+  } catch {
+    return undefined;
+  }
+}
 
 /** Undefined when the CLI cannot say — callers must treat that as "unknown", never as 0%. Never throws. */
 export async function readAgentQuota(profileConfig: ProfileConfig, opts: QuotaReadOptions): Promise<QuotaReading | undefined> {

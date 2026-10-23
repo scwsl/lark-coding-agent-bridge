@@ -159,6 +159,8 @@ interface HarnessOptions {
   busy?: () => boolean;
   /** The agent pool is full. Absent: the service goes by {@link busy} alone. */
   tight?: () => boolean;
+  /** Some account is below the cap. Absent: cannot be told (a single account). */
+  accountRoom?: () => boolean | undefined;
 }
 
 async function harness(opts: HarnessOptions) {
@@ -211,9 +213,12 @@ async function harness(opts: HarnessOptions) {
   } as unknown as AppConfig;
 
   const prompts: string[] = [];
+  const submits: SubmitRunInput[] = [];
+  const caps: unknown[] = [];
   const executor = {
     async submit(input: SubmitRunInput): Promise<RunExecution> {
       prompts.push(input.policy.prompt);
+      submits.push(input);
       const text = opts.answer(input.policy.prompt);
       return {
         runId: 'r',
@@ -243,6 +248,14 @@ async function harness(opts: HarnessOptions) {
     readTranscript: async () => undefined,
     isProfileBusy: opts.busy ?? (() => false),
     ...(opts.tight ? { isCapacityTight: opts.tight } : {}),
+    ...(opts.accountRoom
+      ? {
+          accountRoom: async (cap: unknown) => {
+            caps.push(cap);
+            return opts.accountRoom!();
+          },
+        }
+      : {}),
     readQuota: async () => opts.quota ?? { windows: [{ label: '5 小时窗口', usedPercent: 95 }, { label: '本周', usedPercent: 40 }] },
     countOpenPrs: async () => opts.openPrs ?? 5,
     afterPublish: async (repo) => {
@@ -256,7 +269,7 @@ async function harness(opts: HarnessOptions) {
   });
   await service.init();
   disposers.push(() => service.dispose());
-  return { service, prompts, published, told, knowledgeRemote, skillsRemote, externalRemote, ownSkillFile };
+  return { service, prompts, submits, caps, published, told, knowledgeRemote, skillsRemote, externalRemote, ownSkillFile };
 }
 
 const LEARNED = JSON.stringify({
@@ -415,6 +428,38 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     });
     expect(await h.service.checkAuto()).toMatchObject({ block: 'quota' });
     expect(h.prompts).toHaveLength(0);
+  });
+
+  it('runs every automatic agent turn under the weekly cap on each account', async () => {
+    const h = await harness({ answer: () => LEARNED, accountRoom: () => true });
+    expect((await h.service.checkAuto()).started).toBeDefined();
+    await h.service.idle();
+    expect(h.service.runs()[0]!.status).toBe('succeeded');
+    expect(h.submits.length).toBeGreaterThan(0);
+    for (const submit of h.submits) expect(submit.accountLineCap).toEqual({ seven_day: 80 });
+    expect(h.caps).toContainEqual({ seven_day: 80 });
+  });
+
+  it('starts no agent turn once every account is at the cap, and leaves the rest for later', async () => {
+    const h = await harness({ answer: () => LEARNED, accountRoom: () => false });
+    expect((await h.service.checkAuto()).started).toBeDefined();
+    await h.service.idle();
+    expect(h.prompts).toHaveLength(0);
+    const run = h.service.runs()[0]!;
+    expect(JSON.stringify(run)).toContain('各账户额度都到了课堂精练的上限');
+  });
+
+  it('holds no account back when the window resets before quotaResetBefore', async () => {
+    const h = await harness({
+      answer: () => LEARNED,
+      tuning: { quotaResetBefore: '10:00' },
+      quota: { windows: [{ label: '本周', usedPercent: 92, resets: 'Oct 16 at 9am (UTC)' }] },
+      accountRoom: () => false,
+    });
+    expect((await h.service.checkAuto()).started).toBeDefined();
+    await h.service.idle();
+    expect(h.prompts.length).toBeGreaterThan(0);
+    for (const submit of h.submits) expect(submit.accountLineCap).toBeUndefined();
   });
 
   it('reports an unreadable external library and goes on', async () => {

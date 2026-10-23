@@ -1,6 +1,6 @@
 import { runCapture } from '../../git/exec';
-import type { QuotaReading, QuotaReadOptions, QuotaWindow } from '../quota';
-import { claudeAccountPool, type ClaudeAccountPool } from './accounts';
+import { quotaResetAt, type QuotaReading, type QuotaReadOptions, type QuotaWindow } from '../quota';
+import { claudeAccountPool, WINDOW_KINDS, WINDOW_LABELS, type ClaudeAccountPool, type WindowKind } from './accounts';
 
 /**
  * Claude Code's subscription windows from `claude -p "/usage"` — a local
@@ -26,10 +26,27 @@ export async function readClaudeQuota(
   // what its last run reported; one never used yet is left out.
   const readings: QuotaReading[] = [];
   for (const account of pool.accounts()) {
-    const reading = (await readUsage(opts, binary, account.env)) ?? pool.quotaReading(account.id);
+    const fresh = await readUsage(opts, binary, account.env);
+    // What `/usage` just said beats what the account's last run reported,
+    // which may be days old: account picks read the pool.
+    if (fresh) pool.observeUsage(account.id, usageByKind(fresh));
+    const reading = fresh ?? pool.quotaReading(account.id);
     if (reading) readings.push(reading);
   }
-  return mostRoom(readings);
+  return mostRoom(readings, opts.window);
+}
+
+/** A `/usage` reading as the pool keeps it: windows by kind, resets as epoch ms. */
+function usageByKind(reading: QuotaReading): Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>> {
+  const now = Date.now();
+  const out: Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>> = {};
+  for (const kind of WINDOW_KINDS) {
+    const window = reading.windows.find((w) => w.label === WINDOW_LABELS[kind]);
+    if (!window) continue;
+    const resetsAt = quotaResetAt(window.resets, now);
+    out[kind] = { usedPercent: window.usedPercent, ...(resetsAt !== undefined ? { resetsAt } : {}) };
+  }
+  return out;
 }
 
 async function readUsage(opts: QuotaReadOptions, binary: string, env: Record<string, string>): Promise<QuotaReading | undefined> {
@@ -44,9 +61,12 @@ async function readUsage(opts: QuotaReadOptions, binary: string, env: Record<str
 }
 
 /** The reading whose fullest window is the emptiest; a blocked account counts as full. */
-function mostRoom(readings: QuotaReading[]): QuotaReading | undefined {
-  const fullness = (reading: QuotaReading): number =>
-    reading.blocked ? 100 : Math.max(0, ...reading.windows.map((w) => w.usedPercent));
+function mostRoom(readings: QuotaReading[], window: 'any' | 'week' = 'any'): QuotaReading | undefined {
+  const fullness = (reading: QuotaReading): number => {
+    if (reading.blocked) return 100;
+    const week = window === 'week' ? reading.windows.find((w) => w.label === WINDOW_LABELS.seven_day) : undefined;
+    return week ? week.usedPercent : Math.max(0, ...reading.windows.map((w) => w.usedPercent));
+  };
   return [...readings].sort((a, b) => fullness(a) - fullness(b))[0];
 }
 

@@ -781,3 +781,133 @@ describe('switch lines and rounds', () => {
     expect(pool.pick()?.id).toBe('backup2');
   });
 });
+
+describe('a per-run line cap (课堂精练)', () => {
+  const CAP = { seven_day: 80 } as const;
+
+  it('lowers every line for the calls that pass it, and never raises one', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(85));
+    expect(pool.lineOf('backup', 'seven_day', NOW, CAP)).toBe(80);
+    expect(pool.lineOf('backup2', 'five_hour', NOW, { five_hour: 95 })).toBe(80);
+    expect(pool.hasRoom('backup')).toBe(true);
+    expect(pool.hasRoom('backup', CAP)).toBe(false);
+    expect(pool.pastLine('backup', NOW, CAP)).toEqual({ kind: 'seven_day', line: 80 });
+    expect(pool.pickReady()?.id).toBe('backup');
+    expect(pool.pickReady(undefined, CAP)?.id).toBe('default');
+  });
+
+  it('takes a fresh /usage reading without lifting a refusal', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
+    pool.observeUsage('default', { seven_day: { usedPercent: 81, resetsAt: NOW + 2 * HOUR } });
+    expect(pool.isRefused('default')).toBe(true);
+    expect(pool.pastLine('default', NOW, CAP)).toEqual({ kind: 'seven_day', line: 80 });
+  });
+
+  it('moves a capped run off an account at the cap, only to one below it, and leaves the main account alone', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(70));
+    // Past the cap, still below its own 90% line: chats could use it, the capped run may not.
+    pool.observe('default', weekly(85));
+    pool.observe('backup2', weekly(10));
+    const calls: Array<{ account: PickedAccount; opts: AgentRunOptions }> = [];
+    const run = runWithAccountFailover(
+      { ...OPTS, accountLineCap: CAP },
+      {
+        pool,
+        spawn: (opts, account) => {
+          calls.push({ account, opts });
+          if (calls.length === 1) {
+            return fakeRun([
+              { type: 'system', sessionId: 's1' },
+              { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+              weekly(81),
+              { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+              { type: 'text', delta: 'must not run past the cap' },
+              { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+            ]);
+          }
+          return fakeRun([{ type: 'text', delta: 'finished' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+        },
+        labelOf: async (account) => account.label ?? account.id,
+      },
+    );
+    const events = await collect(run);
+    expect(calls.map((c) => c.account.id)).toEqual(['backup', 'backup2']);
+    expect(calls[1]!.opts).toMatchObject({ sessionId: 's1', prompt: SWITCH_LINE_PROMPT, accountLineCap: CAP });
+    expect(events).not.toContainEqual({ type: 'text', delta: 'must not run past the cap' });
+    const card = JSON.stringify(renderCard(events.reduce(reduce, initialState), { meta: { title: 'Occam' } }));
+    expect(card).toContain('本周用量到了 80% 的切换线');
+    // A borrowed account: new chats still start on the main one.
+    expect(pool.accounts()[0]!.id).toBe('backup');
+    expect(pool.pick()?.id).toBe('backup');
+  });
+
+  it('with every other account at the cap, finishes its turn where it is', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(70));
+    pool.observe('default', weekly(85));
+    pool.observe('backup2', weekly(88));
+    const spawned: string[] = [];
+    const run = runWithAccountFailover(
+      { ...OPTS, accountLineCap: CAP },
+      {
+        pool,
+        spawn: (_opts, account) => {
+          spawned.push(account.id);
+          return fakeRun([
+            { type: 'system', sessionId: 's1' },
+            { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+            weekly(81),
+            { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+            { type: 'text', delta: 'finishes here' },
+            { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+          ]);
+        },
+        labelOf: async (account) => account.label ?? account.id,
+      },
+    );
+    const events = await collect(run);
+    expect(spawned).toEqual(['backup']);
+    expect(events).toContainEqual({ type: 'text', delta: 'finishes here' });
+  });
+
+  it('after a refusal, moves only to an account below the cap', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(70));
+    pool.observe('default', weekly(85));
+    pool.observe('backup2', weekly(88));
+    const spawned: string[] = [];
+    const run = runWithAccountFailover(
+      { ...OPTS, accountLineCap: CAP },
+      {
+        pool,
+        spawn: (_opts, account) => {
+          spawned.push(account.id);
+          return fakeRun(refused);
+        },
+        labelOf: async (account) => account.label ?? account.id,
+        exitWaitMs: 10,
+      },
+    );
+    await collect(run);
+    // Nobody below the cap is left: the refused run ends instead of moving to default or Mia.
+    expect(spawned).toEqual(['backup']);
+  });
+});
+
+describe('most room by the weekly window', () => {
+  it('judges "most room" by the week when asked, not by the fullest window', { skip: process.platform === 'win32', timeout: 20_000 }, async () => {
+    const { pool, dir } = await poolWith(['b']);
+    const broken = join(dir, 'claude-broken');
+    await writeFile(broken, `#!${process.execPath}\nprocess.exit(1);\n`, { mode: 0o755 });
+    await chmod(broken, 0o755);
+    pool.observe('default', limit({ windows: [{ kind: 'five_hour', usedPercent: 5, resetsAt: NOW + HOUR }, { kind: 'seven_day', usedPercent: 85, resetsAt: NOW + HOUR }] }));
+    pool.observe('b', limit({ windows: [{ kind: 'five_hour', usedPercent: 90, resetsAt: NOW + HOUR }, { kind: 'seven_day', usedPercent: 60, resetsAt: NOW + HOUR }] }));
+    const fullest = await readClaudeQuota({ cwd: dir }, broken, pool);
+    expect(fullest?.windows.find((w) => w.label === '本周')?.usedPercent).toBe(85);
+    const week = await readClaudeQuota({ cwd: dir, window: 'week' }, broken, pool);
+    expect(week?.windows.find((w) => w.label === '本周')?.usedPercent).toBe(60);
+  });
+});
