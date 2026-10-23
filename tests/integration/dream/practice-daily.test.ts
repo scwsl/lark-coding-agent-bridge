@@ -155,6 +155,8 @@ interface HarnessOptions {
   quota?: QuotaReading;
   /** dreamTuning on top of the harness's own. */
   tuning?: Record<string, unknown>;
+  /** The profile has a task running. Default never. */
+  busy?: () => boolean;
 }
 
 async function harness(opts: HarnessOptions) {
@@ -237,7 +239,7 @@ async function harness(opts: HarnessOptions) {
     isAdmin: (id) => id === 'ou-admin',
     isScopeBusy: () => false,
     readTranscript: async () => undefined,
-    isProfileBusy: () => false,
+    isProfileBusy: opts.busy ?? (() => false),
     readQuota: async () => opts.quota ?? { windows: [{ label: '5 小时窗口', usedPercent: 95 }, { label: '本周', usedPercent: 40 }] },
     countOpenPrs: async () => opts.openPrs ?? 5,
     afterPublish: async (repo) => {
@@ -436,7 +438,39 @@ function notes(count: number, size: number, prefix = 'n'): Record<string, string
   return Object.fromEntries(Array.from({ length: count }, (_, i) => [`notes/${prefix}${i}.md`, `${prefix}${i} `.padEnd(size, '知')]));
 }
 
-describe('课前学习 budget', { timeout: TIMEOUT }, () => {
+describe('课堂精练 续跑', { timeout: TIMEOUT }, () => {
+  it('keeps running until the external library is read through, one card per run', async () => {
+    const big = await bareRemote('big', notes(6, 2_000));
+    const h = await harness({ answer: () => NOTHING, tuning: { maxInputChars: 10_000, externalLibraries: [{ name: 'big', url: big }] } });
+    const started = await h.service.start({ id: 'ou-admin' }, () => undefined);
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    const runs = [...h.service.runs()].reverse();
+    // 5 000 characters per run: two notes each, three runs in a row.
+    expect(runs.map((run) => [run.status, run.round ?? 1, run.external?.[0]?.files, run.external?.[0]?.pending])).toEqual([
+      ['succeeded', 1, 2, 4],
+      ['succeeded', 2, 2, 2],
+      ['succeeded', 3, 2, 0],
+    ]);
+    expect(runs[1]!.note).toContain('续跑第 2 轮');
+    expect(runs[1]!.note).toContain('4 个外部库文件');
+    expect(h.prompts).toHaveLength(3);
+    const status = await h.service.status();
+    expect(status.external[0]).toMatchObject({ name: 'big', cursor: { pending: 0 } });
+  });
+
+  it('stops at drainRounds', async () => {
+    const big = await bareRemote('big', notes(6, 2_000));
+    const h = await harness({
+      answer: () => NOTHING,
+      tuning: { maxInputChars: 10_000, drainRounds: 2, externalLibraries: [{ name: 'big', url: big }] },
+    });
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    expect(h.service.runs().map((run) => run.external?.[0]?.pending)).toEqual([2, 4]);
+  });
+
   it('gives a library with nothing new no share of the budget', async () => {
     const big = await bareRemote('big', notes(4, 2_000));
     const quiet = await bareRemote('quiet', { 'notes/old.md': 'old' });
@@ -465,5 +499,60 @@ describe('课前学习 budget', { timeout: TIMEOUT }, () => {
       { library: 'quiet', head: expect.any(String), files: 0, pending: 0 },
       { library: 'big', head: expect.any(String), files: 2, pending: 4 },
     ]);
+  });
+
+  it('an automatic chain cut short by a user task picks up again once the profile is idle', async () => {
+    const big = await bareRemote('big', notes(4, 2_000));
+    let busy = false;
+    let turns = 0;
+    const h = await harness({
+      answer: () => {
+        // A user shows up while the first run is learning.
+        if (++turns === 1) busy = true;
+        return NOTHING;
+      },
+      busy: () => busy,
+      tuning: { maxInputChars: 10_000, externalLibraries: [{ name: 'big', url: big }] },
+    });
+    const check = await h.service.checkAuto();
+    expect(check.started).toBeDefined();
+    await h.service.idle();
+    expect(h.service.runs().map((run) => [run.status, run.external?.[0]?.pending])).toEqual([['succeeded', 2]]);
+
+    // Still busy: the check waits.
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'busy' });
+    busy = false;
+    const resumed = await h.service.checkAuto();
+    expect(resumed.started).toBeDefined();
+    await h.service.idle();
+    const latest = h.service.runs()[0]!;
+    expect([latest.status, latest.round, latest.external?.[0]?.pending]).toEqual(['succeeded', 2, 0]);
+    expect(latest.note).toContain('续跑第 2 轮');
+    // Done: back to one run per window, and the window was not used up by the 续跑.
+    expect(await h.service.checkAuto()).toMatchObject({ block: 'window-used' });
+    expect(h.told.map((item) => item.text.split('\n')[0])).toHaveLength(2);
+  });
+
+  it('a run cancelled by hand ends the chain', async () => {
+    const big = await bareRemote('big', notes(4, 2_000));
+    let service: DreamService | undefined;
+    const h = await harness({
+      answer: () => {
+        service?.cancel();
+        return NOTHING;
+      },
+      tuning: { maxInputChars: 10_000, externalLibraries: [{ name: 'big', url: big }] },
+    });
+    service = h.service;
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    expect(h.service.runs().map((run) => run.status)).toEqual(['cancelled']);
+    // The day's own run still comes (inside the window), but as a first run, not a 续跑.
+    const check = await h.service.checkAuto();
+    expect(check.started).toBeDefined();
+    await h.service.idle();
+    expect(h.service.runs()[0]!.round).toBeUndefined();
+    expect(h.service.runs()[0]!.note ?? '').not.toContain('续跑');
   });
 });

@@ -31,6 +31,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
     `- 知识库：${view.targets.knowledge.url ? `\`${view.targets.knowledge.url}\`` : `⚠️ ${view.targets.knowledge.problem}`}`,
     `- skill 库：${view.targets.skills.library ? `\`${view.targets.skills.library}\`` : `⚠️ ${view.targets.skills.problem}`}`,
     `- 每轮上限：${settings.maxSessions} 个会话、${settings.maxInputChars} 字符、${settings.maxRunMinutes} 分钟；会话空闲 ${settings.minIdleMinutes} 分钟后才读${settings.scopes ? `；只读 ${settings.scopes.length} 个指定会话` : ''}`,
+    ...(settings.drainRounds > 1 ? [`- 续跑：一轮读不完的接着跑，最多连续 ${settings.drainRounds} 轮；被用户任务打断的，空闲后接着跑`] : []),
     `- 已登记会话：${view.trackedSessions} 个`,
     settings.publish === 'push'
       ? `- 发布方式：直接提交到默认分支并推送，每批写进仓库的 CHANGELOG.md${settings.skillUpdates === 'pr' ? '；修改已有技能改开 Draft PR，审核合并后生效' : ''}${view.pendingDrafts > 0 ? `；待重推 ${view.pendingDrafts} 个` : ''}`

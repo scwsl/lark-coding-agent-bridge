@@ -31,6 +31,7 @@ import {
   type ExternalCursor,
   type ExternalMaterial,
 } from './external';
+import { nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
@@ -168,6 +169,8 @@ export interface DreamStartOptions {
   budget?: number;
   /** Said first in the run's outcome (why an automatic run went ahead despite a full quota…). */
   note?: string;
+  /** 续跑: the how-manieth run in a row (default 1). */
+  round?: number;
 }
 
 export type DreamStartResult =
@@ -258,6 +261,9 @@ export class DreamService {
   private autoTimer: NodeJS.Timeout | undefined;
   private dailyTimer: { timer: NodeJS.Timeout; key: string } | undefined;
   private unsubscribe: (() => void) | undefined;
+  /** 续跑: deciding on / starting the run that follows the one just finished. */
+  private draining: Promise<void> | undefined;
+  private disposed = false;
 
   constructor(private readonly deps: DreamServiceDeps) {
     this.state = new DreamStateStore(deps.stateFile);
@@ -310,8 +316,10 @@ export class DreamService {
     this.dailyTimer = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.disposed = true;
     this.stop('bridge 正在停止');
     await this.checking?.catch(() => undefined);
+    await this.draining?.catch(() => undefined);
     await this.current?.done.catch(() => undefined);
     await this.state.flush();
   }
@@ -382,6 +390,7 @@ export class DreamService {
         rejected: 0,
         deferred: [],
         targets: [],
+        ...(options.round !== undefined && options.round > 1 ? { round: options.round } : {}),
       };
       this.state.addRun(run);
       const current: CurrentRun = { id, trigger, abort: new AbortController(), done: Promise.resolve() };
@@ -402,12 +411,20 @@ export class DreamService {
           const final = this.state.run(id);
           if (!final) return;
           this.recordOutcome(final);
-          if (!onFinish) return;
-          try {
-            onFinish(final);
-          } catch (err) {
-            log.fail('dream', err, { step: 'on-finish' });
+          if (onFinish) {
+            try {
+              onFinish(final);
+            } catch (err) {
+              log.fail('dream', err, { step: 'on-finish' });
+            }
           }
+          const draining = this.drain(final, actor, onFinish, options).catch((err: unknown) =>
+            log.fail('dream', err, { step: 'drain', batch: id }),
+          );
+          this.draining = draining;
+          void draining.finally(() => {
+            if (this.draining === draining) this.draining = undefined;
+          });
         });
       return { run: this.state.run(id)! };
     } finally {
@@ -436,7 +453,11 @@ export class DreamService {
 
   /** Wait for the running batch, if any (tests, shutdown). */
   async idle(): Promise<void> {
-    await this.current?.done.catch(() => undefined);
+    // A finished run may be followed by its 续跑: wait for the whole chain.
+    while (this.current || this.draining) {
+      await this.current?.done.catch(() => undefined);
+      await this.draining?.catch(() => undefined);
+    }
   }
 
   /** PRs of recent runs, newest first, each with its live state from `gh` when it answers. */
@@ -539,7 +560,12 @@ export class DreamService {
     const auto = settings.auto;
     if (this.current || this.starting) return this.noteCheck({ at: now, block: 'running', reason: '已经有一轮整理在进行' });
     const cheap = cheapDreamGate({ now, auto, ledger: this.state.autoLedger() });
-    if (cheap) return this.noteCheck({ at: now, ...cheap });
+    // 续跑: the last run left work behind (its chain was cut short by a user
+    // task, a restart or the quota) — finish it once the profile is idle,
+    // inside the window or not.
+    const resume =
+      cheap && (cheap.block === 'window-used' || cheap.block === 'outside-window') ? this.pendingDrain(settings.drainRounds) : undefined;
+    if (cheap && !resume) return this.noteCheck({ at: now, ...cheap });
     if (this.deps.isProfileBusy?.()) {
       return this.noteCheck({ at: now, block: 'busy', reason: '有任务在跑或有消息在排队，用户任务优先' });
     }
@@ -555,7 +581,7 @@ export class DreamService {
     this.noteCatalog();
     // 每日模式 runs whatever piled up — 课前学习 and own skills count as much as conversations.
     let material: DreamMaterial | undefined;
-    if (!auto.daily) {
+    if (!auto.daily && !resume) {
       const measured = await measureNewInput({ records: this.state.sessions(), settings, read: this.reader() });
       const counted = { scopes: measured.scopes, sessions: measured.sessions, chars: measured.chars };
       const gate = materialGate({ now, auto, material: counted, since: this.state.autoLedger().lastCompletedAt ?? measured.oldestAt });
@@ -573,20 +599,12 @@ export class DreamService {
         openPrs,
       });
     }
-    const quota = await this.readQuota(auto.quotaWindow);
+    const { quota, lead: quotaLead, block: quotaBlock } = await this.quotaGate(auto, now);
     const context = { ...(material ? { material } : {}), openPrs, quota };
-    let lead: string | undefined;
-    if ('percent' in quota && quota.percent >= auto.maxQuotaPercent) {
-      const reason = `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`;
-      const resetAt = quotaResetAt(quota.resets, now);
-      const before = auto.quotaResetBefore;
-      if (resetAt !== undefined && before && resetAt > now && resetAt <= localTimeToday(now, before.at, auto.timezone)) {
-        // Whatever is left goes away at the reset: use it.
-        lead = `${quota.label}额度已用 ${quota.percent}%，但今天 ${before.text} 前就重置，照常整理`;
-      }
-    }
-    if (!lead && 'percent' in quota && quota.percent >= auto.maxQuotaPercent) {
-      const reason = `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限`;
+    if (quotaBlock && resume) return this.noteCheck({ at: now, block: 'quota', reason: `续跑暂停：${quotaBlock}`, ...context });
+    const lead = resume ? resume.note : quotaLead;
+    if (quotaBlock) {
+      const reason = quotaBlock;
       if (auto.daily) {
         // The weekly window will not empty within the hours left: today is skipped, once, and said so.
         this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
@@ -603,12 +621,76 @@ export class DreamService {
       trigger: 'auto',
       budget: 'unknown' in quota ? UNKNOWN_QUOTA_BUDGET : 1,
       ...(lead ? { note: lead } : {}),
+      ...(resume ? { round: resume.round } : {}),
     });
     if ('error' in started) {
       return this.noteCheck({ at: now, block: started.code === 'locked' ? 'locked' : 'running', reason: started.error, ...context });
     }
-    this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
+    // A 续跑 outside the window must not use up the next one.
+    if (!resume) this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
     return this.noteCheck({ at: now, started: started.run.id, ...context });
+  }
+
+  /**
+   * 额度: over `maxQuotaPercent` blocks, unless the window resets today before
+   * `quotaResetBefore` — whatever is left would go away at the reset anyway.
+   */
+  private async quotaGate(
+    auto: DreamAutoSettings,
+    now: number,
+  ): Promise<{ quota: Awaited<ReturnType<DreamService['readQuota']>>; lead?: string; block?: string }> {
+    const quota = await this.readQuota(auto.quotaWindow);
+    if (!('percent' in quota) || quota.percent < auto.maxQuotaPercent) return { quota };
+    const resetAt = quotaResetAt(quota.resets, now);
+    const before = auto.quotaResetBefore;
+    if (resetAt !== undefined && before && resetAt > now && resetAt <= localTimeToday(now, before.at, auto.timezone)) {
+      return { quota, lead: `${quota.label}额度已用 ${quota.percent}%，但今天 ${before.text} 前就重置，照常整理` };
+    }
+    return { quota, block: `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限` };
+  }
+
+  /**
+   * The 续跑 the latest run calls for, if any. Runs cut off before their
+   * checkpoint by a user task, a restart or a shutdown consumed nothing: the
+   * one before them still says what is left. A run cancelled by hand ends it.
+   */
+  private pendingDrain(maxRounds: number): { round: number; note: string } | undefined {
+    const runs = this.state.runs();
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const run = runs[i]!;
+      const interrupted =
+        run.checkpointAt === undefined &&
+        ((run.status === 'cancelled' && !(run.note ?? '').startsWith('已取消')) ||
+          (run.status === 'failed' && (run.note ?? '').startsWith('进程重启时中断')));
+      if (!interrupted) return nextDrainRound(run, maxRounds);
+    }
+    return undefined;
+  }
+
+  /**
+   * 续跑 right after a run: start the next one when it left work behind. An
+   * automatic chain stops for a user task or a full quota; the periodic check
+   * picks it up again once the profile is idle.
+   */
+  private async drain(
+    run: DreamRun,
+    actor: DreamActor,
+    onFinish: ((run: DreamRun) => void) | undefined,
+    options: DreamStartOptions,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const settings = getDream(this.deps.appConfig());
+    if (!settings) return;
+    const next = nextDrainRound(run, settings.drainRounds);
+    if (!next) return;
+    if (run.trigger === 'auto') {
+      const auto = getDreamAuto(this.deps.appConfig())?.auto;
+      if (!auto || this.deps.isProfileBusy?.()) return;
+      const { block } = await this.quotaGate(auto, this.now());
+      if (block || this.disposed || this.deps.isProfileBusy?.()) return;
+    }
+    const started = await this.start(actor, onFinish, { ...options, round: next.round, note: next.note });
+    if ('error' in started) log.info('dream', 'drain-not-started', { after: run.id, reason: started.error });
   }
 
   /** Keep the latest check; the stored one is rewritten only when the outcome changes. */
@@ -759,7 +841,9 @@ export class DreamService {
     // 课前学习 first: external libraries' news and this profile's own skills.
     const learning = await this.learn(run.id, settings, { actor, deadline, signal, profileMemory, skills });
     if (signal.aborted) return stopped('游标未移动');
-    if (learning.report.length > 0) this.state.updateRun(run.id, { external: learning.report });
+    if (learning.report.length > 0) {
+      this.state.updateRun(run.id, { external: learning.report, ...(learning.error ? { learnFailed: true } : {}) });
+    }
     const learned = learning.additions.length + learning.skills.length > 0;
 
     if (selection.scopes.length === 0 && !learned) {

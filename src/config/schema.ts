@@ -329,6 +329,12 @@ export interface DreamTuning {
   maxInputChars?: number;
   /** Wall-clock limit for one run's agent turns, in minutes. Default 20. */
   maxRunMinutes?: number;
+  /**
+   * 续跑: a run that left work behind (external files still pending, conversations
+   * deferred for the run's input / count / time limits) is followed by another,
+   * up to this many runs in a row. 1: one run only. Default 6.
+   */
+  drainRounds?: number;
   /** A conversation still active is read only after this many idle minutes. Default 30. */
   minIdleMinutes?: number;
   /**
@@ -451,6 +457,8 @@ export interface DreamSettings {
   maxSessions: number;
   maxInputChars: number;
   maxRunMinutes: number;
+  /** See {@link DreamTuning.drainRounds}. */
+  drainRounds: number;
   minIdleMinutes: number;
   skillLibrary?: string;
   scopes?: string[];
@@ -486,6 +494,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   maxSessions: 20,
   maxInputChars: 120_000,
   maxRunMinutes: 20,
+  drainRounds: 6,
   minIdleMinutes: 30,
   publish: 'pr',
   skillUpdates: 'pr',
@@ -739,6 +748,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     maxSessions: pick(raw.maxSessions, 1, 200, DREAM_DEFAULTS.maxSessions),
     maxInputChars: pick(raw.maxInputChars, 10_000, 1_000_000, DREAM_DEFAULTS.maxInputChars),
     maxRunMinutes: pick(raw.maxRunMinutes, 2, 120, DREAM_DEFAULTS.maxRunMinutes),
+    drainRounds: pick(raw.drainRounds, 1, 20, DREAM_DEFAULTS.drainRounds),
     minIdleMinutes: pick(raw.minIdleMinutes, 0, 7 * 24 * 60, DREAM_DEFAULTS.minIdleMinutes),
     ...(library ? { skillLibrary: library } : {}),
     ...(scopes.length > 0 ? { scopes } : {}),

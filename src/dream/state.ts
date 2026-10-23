@@ -96,6 +96,10 @@ export interface DreamRun {
   checkpointAt?: number;
   /** 课前学习 of this run: the commit each external library was read up to (cursor after the checkpoint). */
   external?: Array<{ library: string; head: string; files: number; pending: number; error?: string }>;
+  /** 课前学习 read files but its turn failed: the libraries' cursors did not move. */
+  learnFailed?: boolean;
+  /** 续跑: the how-manieth run in a row of one start (absent: the first). */
+  round?: number;
 }
 
 interface DreamStateData {
