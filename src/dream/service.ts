@@ -963,8 +963,7 @@ export class DreamService {
     }
 
     const materials: ExternalMaterial[] = [];
-    const share = settings.external.length > 0 ? Math.floor(settings.maxInputChars / 2 / settings.external.length) : 0;
-    let nextRef = 1;
+    const fetchedLibraries: Array<{ name: string; dir: string; head: string; waiting: number }> = [];
     for (const library of settings.external) {
       if (ctx.signal.aborted) return outcome;
       const dir = join(this.deps.workDir, 'external', library.name);
@@ -973,14 +972,33 @@ export class DreamService {
         outcome.report.push({ library: library.name, head: '', files: 0, pending: 0, error: fetched.error });
         continue;
       }
-      const material = await collectExternalMaterial({
+      // A zero budget reads nothing and lists what is waiting.
+      const listed = await collectExternalMaterial({
         library: library.name,
         dir,
         head: fetched.head,
         cursor: this.state.externalCursor(library.name),
+        budget: 0,
+        startRef: 1,
+      });
+      fetchedLibraries.push({ name: library.name, dir, head: fetched.head, waiting: listed.pending.length });
+    }
+    // Half the run's input, split among the libraries that have something new;
+    // what one leaves unused goes to the next.
+    let remaining = Math.floor(settings.maxInputChars / 2);
+    let sharing = fetchedLibraries.filter((library) => library.waiting > 0).length;
+    let nextRef = 1;
+    for (const library of fetchedLibraries) {
+      const share = library.waiting > 0 && sharing > 0 ? Math.floor(remaining / sharing--) : 0;
+      const material = await collectExternalMaterial({
+        library: library.name,
+        dir: library.dir,
+        head: library.head,
+        cursor: this.state.externalCursor(library.name),
         budget: share,
         startRef: nextRef,
       });
+      remaining -= material.files.reduce((sum, file) => sum + file.content.length, 0);
       nextRef += material.files.length;
       outcome.report.push({ library: library.name, head: material.head, files: material.files.length, pending: material.pending.length });
       outcome.cursors[library.name] = {

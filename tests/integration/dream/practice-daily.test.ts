@@ -428,3 +428,42 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(run.status).toBe('succeeded');
   });
 });
+
+const NOTHING = JSON.stringify({ memory: [], skills: [] });
+
+/** `count` notes of `size` characters each. */
+function notes(count: number, size: number, prefix = 'n'): Record<string, string> {
+  return Object.fromEntries(Array.from({ length: count }, (_, i) => [`notes/${prefix}${i}.md`, `${prefix}${i} `.padEnd(size, '知')]));
+}
+
+describe('课前学习 budget', { timeout: TIMEOUT }, () => {
+  it('gives a library with nothing new no share of the budget', async () => {
+    const big = await bareRemote('big', notes(4, 2_000));
+    const quiet = await bareRemote('quiet', { 'notes/old.md': 'old' });
+    const h = await harness({
+      answer: () => NOTHING,
+      tuning: {
+        maxInputChars: 10_000,
+        drainRounds: 1,
+        externalLibraries: [
+          { name: 'quiet', url: quiet },
+          { name: 'big', url: big },
+        ],
+      },
+    });
+    // The quiet library is read once, so it has nothing new the next time.
+    const first = await h.service.start({ id: 'ou-admin' });
+    if ('error' in first) throw new Error(first.error);
+    await h.service.idle();
+    await pushFiles(big, notes(4, 2_000, 'm'), 'more');
+    const second = await h.service.start({ id: 'ou-admin' });
+    if ('error' in second) throw new Error(second.error);
+    await h.service.idle();
+    const run = h.service.runs()[0]!;
+    // Half of 10 000 all to the library with news: two notes, not one.
+    expect(run.external).toEqual([
+      { library: 'quiet', head: expect.any(String), files: 0, pending: 0 },
+      { library: 'big', head: expect.any(String), files: 2, pending: 4 },
+    ]);
+  });
+});
