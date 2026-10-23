@@ -33,6 +33,19 @@ describe('background turn replies', () => {
     ).toBeUndefined();
   });
 
+  it('names the account the stopped process ran on, not the CLI login', () => {
+    const state = backgroundTurnState(
+      { kind: 'stopped', reason: 'shutdown', account: 'shilong.wang' },
+      keepAll,
+    );
+    expect(state?.sponsor).toBe('shilong.wang');
+    const turn = backgroundTurnState(
+      { kind: 'turn', events: [{ type: 'account', label: 'shilong.wang' }, { type: 'text', delta: 'ok' }, done] },
+      keepAll,
+    );
+    expect(turn?.sponsor).toBe('shilong.wang');
+  });
+
   it('always reports background work that was stopped at the cap', () => {
     const state = backgroundTurnState({ kind: 'stopped', reason: 'max-linger', afterMs: 30 * 60_000 }, keepAll);
     expect(renderText(state!)).toContain('30 分钟');

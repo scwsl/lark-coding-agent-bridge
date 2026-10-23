@@ -17,6 +17,12 @@ export class ProcessSession {
   background = 0;
   /** Session / thread id the process reported — what a reused turn resumes. */
   conversationId: string | undefined;
+  /**
+   * The subscription account the process runs on, as reported at spawn. Only
+   * the first turn carries it, so later turns (a reused process, background
+   * turns) get it replayed — otherwise their card names the CLI's own login.
+   */
+  account: string | undefined;
   private sink: TurnSink | undefined;
   private backgroundEvents: AgentEvent[] = [];
   private started = false;
@@ -45,7 +51,10 @@ export class ProcessSession {
     if (this.sink) throw new Error('a user turn is already attached to this process');
     const sink = new TurnSink();
     if (this.exited) sink.end();
-    else this.sink = sink;
+    else {
+      if (this.started && this.account) sink.push({ type: 'account', label: this.account });
+      this.sink = sink;
+    }
     this.start();
     return sink;
   }
@@ -67,6 +76,7 @@ export class ProcessSession {
     try {
       for await (const event of this.run.events) {
         if (event.type === 'background') this.background = event.count;
+        if (event.type === 'account') this.account = event.label;
         if (event.type === 'system' || event.type === 'done') {
           this.conversationId = event.sessionId ?? event.threadId ?? this.conversationId;
         }
@@ -99,6 +109,9 @@ export class ProcessSession {
   private flushBackgroundTurn(): void {
     const events = this.backgroundEvents;
     this.backgroundEvents = [];
+    if (this.account && !events.some((e) => e.type === 'account')) {
+      events.unshift({ type: 'account', label: this.account });
+    }
     this.hooks.onBackgroundTurn(events);
   }
 }

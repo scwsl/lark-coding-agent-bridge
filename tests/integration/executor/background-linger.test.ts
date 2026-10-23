@@ -275,6 +275,50 @@ describe('RunExecutor background tasks', () => {
     live.exit();
   });
 
+  it('names the account the process runs on in every later turn, not just the first', async () => {
+    const h = harness({ maxBackgroundLingerMs: 40 });
+    const turns: BackgroundTurn[] = [];
+    const first = await h.executor.submit({ scopeId: 'chat-1', policy: policy() });
+    const live = h.agent.runs[0]!;
+    live.emit(
+      { type: 'account', label: 'shilong.wang' },
+      { type: 'system', sessionId: 'sess-1' },
+      { type: 'background', count: 1 },
+      done(),
+    );
+    await collect(first.subscribe());
+    await until(() => h.activeRuns.isLingering('chat-1'));
+
+    // A reused process: the account is only reported at spawn, so it is replayed.
+    const second = await h.executor.submit({
+      scopeId: 'chat-1',
+      policy: policy({ prompt: 'next' }),
+      sessionId: 'sess-1',
+      onBackgroundTurn: async (turn) => {
+        turns.push(turn);
+      },
+    });
+    live.emit({ type: 'text', delta: 'ok' }, done());
+    expect(await collect(second.subscribe())).toEqual([
+      { type: 'account', label: 'shilong.wang' },
+      { type: 'text', delta: 'ok' },
+      done(),
+    ]);
+
+    // A turn the background task triggers.
+    await until(() => h.activeRuns.isLingering('chat-1'));
+    live.emit({ type: 'text', delta: 'agent 1 done' }, done());
+    await until(() => turns.length === 1);
+    expect(turns[0]).toEqual({
+      kind: 'turn',
+      events: [{ type: 'account', label: 'shilong.wang' }, { type: 'text', delta: 'agent 1 done' }, done()],
+    });
+
+    // Still running when the linger cap hits: the stop notice names it too.
+    await until(() => turns.length === 2);
+    expect(turns[1]).toEqual({ kind: 'stopped', reason: 'max-linger', afterMs: 40, account: 'shilong.wang' });
+  });
+
   it('spawns a fresh process when the next message needs different run options', async () => {
     const h = harness();
     const first = await h.executor.submit({ scopeId: 'chat-1', policy: policy(), model: 'opus' });

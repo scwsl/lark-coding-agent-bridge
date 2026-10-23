@@ -3276,7 +3276,8 @@ export function backgroundTurnState(
       turn.reason === 'shutdown'
         ? 'bridge 重启，还在运行的后台任务已停止。会话上下文没丢，需要的话回一句「继续」重新发起。'
         : `后台任务运行超过 ${Math.round(turn.afterMs / 60_000)} 分钟仍未结束，已停止。需要的话请重新发起。`;
-    return reduce(reduce(initialState, { type: 'text', delta: notice }), {
+    const start = turn.account ? reduce(initialState, { type: 'account', label: turn.account }) : initialState;
+    return reduce(reduce(start, { type: 'text', delta: notice }), {
       type: 'done',
       terminationReason: 'normal',
     });

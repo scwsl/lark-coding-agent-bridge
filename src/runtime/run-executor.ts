@@ -47,8 +47,9 @@ export interface RunExecutorDeps {
  */
 export type BackgroundTurn =
   | { kind: 'turn'; events: AgentEvent[] }
-  | { kind: 'stopped'; reason: 'max-linger'; afterMs: number }
-  | { kind: 'stopped'; reason: 'shutdown' };
+  /** `account`: the subscription account the stopped process ran on, for the card. */
+  | { kind: 'stopped'; reason: 'max-linger'; afterMs: number; account?: string }
+  | { kind: 'stopped'; reason: 'shutdown'; account?: string };
 
 export type BackgroundTurnHandler = (turn: BackgroundTurn) => Promise<void>;
 
@@ -409,7 +410,9 @@ export class RunExecutor {
         log.info('run', 'linger-stopped', { ...live.dimensions, reason: 'shutdown', background: live.session.background });
         // Only real background work is worth telling the chat about; an idle
         // kept process just goes away.
-        if (live.session.background > 0) await this.notify(live, { kind: 'stopped', reason: 'shutdown' });
+        if (live.session.background > 0) {
+          await this.notify(live, { kind: 'stopped', reason: 'shutdown', ...accountOf(live) });
+        }
         await this.retire(live, 'shutdown');
       }),
     );
@@ -459,7 +462,12 @@ export class RunExecutor {
       background: live.session.background,
       maxLingerMs: this.maxBackgroundLingerMs,
     });
-    await this.notify(live, { kind: 'stopped', reason: 'max-linger', afterMs: this.maxBackgroundLingerMs });
+    await this.notify(live, {
+      kind: 'stopped',
+      reason: 'max-linger',
+      afterMs: this.maxBackgroundLingerMs,
+      ...accountOf(live),
+    });
     await this.retire(live, 'max-linger');
   }
 
@@ -591,6 +599,11 @@ export class RunExecutor {
     }
     if (this.live.get(live.scopeId) === live) this.live.delete(live.scopeId);
   }
+}
+
+/** The account a stopped process ran on, for its notice's card. */
+function accountOf(live: LiveProcess): { account?: string } {
+  return live.session.account ? { account: live.session.account } : {};
 }
 
 /** Everything a running process was started with that a later turn must share. */
