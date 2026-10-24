@@ -41,6 +41,12 @@ interface ClaudeRawEvent {
   num_turns?: number;
   /** `system/background_tasks_changed`: the full list of running background tasks. */
   tasks?: unknown[];
+  /** On a subagent's messages: the subagent (task) id. */
+  agent_id?: string;
+  /** `system/task_notification`: a background task stopped. */
+  task_id?: string;
+  status?: string;
+  summary?: string;
 }
 
 /**
@@ -54,6 +60,16 @@ export function isNoTurnResult(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object') return false;
   const evt = raw as ClaudeRawEvent;
   return evt.type === 'result' && evt.num_turns === 0;
+}
+
+/** How a task's failure summary says the quota refused it. */
+const QUOTA_FAILURE = /error type rate_limit|HTTP 429|hit your (?:\w+ )?limit|usage limit/i;
+
+function textOf(content: ContentBlock[] | undefined): string {
+  return (content ?? [])
+    .map((b) => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
+    .join('')
+    .trim();
 }
 
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
@@ -70,6 +86,18 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   // looks stuck. So only its activity comes through, never its content.
   if (typeof evt.parent_tool_use_id === 'string' && evt.parent_tool_use_id) {
     if (evt.type !== 'assistant') return;
+    // The subagent's request was refused for quota: it stops here, and the
+    // account the whole process runs on is spent.
+    if (evt.error === 'rate_limit') {
+      const message = textOf(evt.message?.content);
+      yield {
+        type: 'subagent_rate_limited',
+        ...(evt.agent_id ? { taskId: evt.agent_id } : {}),
+        ...(message ? { message } : {}),
+        at: Date.now(),
+      };
+      return;
+    }
     const tool = evt.message?.content?.find((b) => b.type === 'tool_use' && b.name);
     const description = (tool?.input as { description?: unknown } | undefined)?.description;
     yield {
@@ -86,6 +114,23 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
 
   if (evt.type === 'system' && evt.subtype === 'background_tasks_changed') {
     yield { type: 'background', count: Array.isArray(evt.tasks) ? evt.tasks.length : 0 };
+    return;
+  }
+
+  // A background task stopped (2.1.309: `{ subtype: "task_notification",
+  // task_id, tool_use_id, status, summary }`). A subagent cut off by the quota
+  // reports `status: "failed"` with a summary like "Agent … failed: Agent
+  // terminated early due to an API error: You've hit your session limit …
+  // (error type rate_limit, HTTP 429 …)".
+  if (evt.type === 'system' && evt.subtype === 'task_notification') {
+    if (evt.status === 'failed' && typeof evt.summary === 'string' && QUOTA_FAILURE.test(evt.summary)) {
+      yield {
+        type: 'subagent_rate_limited',
+        ...(evt.task_id ? { taskId: evt.task_id } : {}),
+        message: evt.summary,
+        at: Date.now(),
+      };
+    }
     return;
   }
 
@@ -118,10 +163,7 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   // `error: "rate_limit"` ("You've hit your limit · resets …"). It is the
   // reason the run stopped, not part of the answer.
   if (evt.type === 'assistant' && evt.error === 'rate_limit') {
-    const message = (evt.message?.content ?? [])
-      .map((b) => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
-      .join('')
-      .trim();
+    const message = textOf(evt.message?.content);
     yield { type: 'rate_limit', blocked: true, ...(message ? { message } : {}), at: Date.now() };
     return;
   }

@@ -2,7 +2,13 @@ import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { failoverPrompt, runWithAccountFailover, SWITCH_LINE_PROMPT } from '../../../src/agent/claude/account-failover.js';
+import {
+  BACKGROUND_FAILOVER_PROMPT,
+  failoverPrompt,
+  handoverPrompt,
+  runWithAccountFailover,
+  SWITCH_LINE_PROMPT,
+} from '../../../src/agent/claude/account-failover.js';
 import {
   accountRows,
   accountsReport,
@@ -453,8 +459,8 @@ describe('account failover', () => {
     expect(events.map((e) => e.type)).toEqual(['account', 'rate_limit', 'text', 'done']);
   });
 
-  it('does not retry a refusal in a background turn after the user turn ended', async () => {
-    const { pool } = await poolWith(['b']);
+  it('with a single account, a refusal in a background turn ends it paused as before', async () => {
+    const { pool } = await poolWith([]);
     const spawned: string[] = [];
     const run = runWithAccountFailover(OPTS, {
       pool,
@@ -471,8 +477,145 @@ describe('account failover', () => {
     });
     const events = await collect(run);
     expect(spawned).toEqual(['default']);
-    expect(events.map((e) => e.type)).toEqual(['account', 'text', 'done', 'rate_limit', 'done']);
+    expect(events.map((e) => e.type)).toEqual(['text', 'done', 'rate_limit', 'done']);
     expect(pool.refusedUntil('default')).toBe(NOW + HOUR);
+  });
+
+  it('moves a refused background turn to another account, never re-sending the user message', async () => {
+    const { pool } = await poolWith(['b']);
+    const calls: Array<{ account: string; opts: AgentRunOptions }> = [];
+    const stops: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (opts, account) => {
+        calls.push({ account: account.id, opts });
+        return calls.length === 1
+          ? fakeRun(
+              [
+                { type: 'text', delta: 'answer' },
+                { type: 'background', count: 2 },
+                { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+                limit({ blocked: true, resetsAt: NOW + HOUR }),
+                { type: 'error', message: 'claude exited with code 1', terminationReason: 'failed' },
+              ],
+              stops,
+            )
+          : fakeRun([{ type: 'text', delta: 'resumed' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+      },
+      labelOf: async (account) => account.label ?? account.id,
+    });
+    const events = await collect(run);
+    expect(calls.map((c) => c.account)).toEqual(['default', 'b']);
+    expect(stops).toEqual(['stop']);
+    expect(calls[1]!.opts).toMatchObject({ sessionId: 's1', prompt: BACKGROUND_FAILOVER_PROMPT });
+    expect(calls[1]!.opts.prompt).not.toContain('hello');
+    expect(BACKGROUND_FAILOVER_PROMPT).toContain('SendMessage');
+    // user turn | notice turn (the process stays busy) | resumed turn (it reported no tasks)
+    expect(events.map((e) => e.type)).toEqual([
+      'account', 'text', 'background', 'done',
+      'account', 'background', 'done',
+      'text', 'background', 'done',
+    ]);
+    expect(events[4]).toMatchObject({ label: 'b-name', switchedFrom: 'default', reason: expect.stringContaining('后台') });
+    expect(events[5]).toEqual({ type: 'background', count: 2 });
+    expect(events[8]).toEqual({ type: 'background', count: 0 });
+    expect(events.filter((e) => e.type === 'rate_limit' || e.type === 'error')).toEqual([]);
+    expect(pool.pick()?.id).toBe('b');
+  });
+
+  it('moves when a background subagent is cut off by the quota, asking to resume it', async () => {
+    const { pool } = await poolWith(['b']);
+    const calls: Array<{ account: string; opts: AgentRunOptions }> = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (opts, account) => {
+        calls.push({ account: account.id, opts });
+        return calls.length === 1
+          ? fakeRun([
+              { type: 'background', count: 1 },
+              { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+              { type: 'subagent_rate_limited', taskId: 'a1', at: NOW },
+              { type: 'background', count: 0 },
+              { type: 'text', delta: 'the subagent failed' },
+              { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+            ])
+          : fakeRun([{ type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+      },
+      labelOf: async (account) => account.label ?? account.id,
+    });
+    const events = await collect(run);
+    expect(calls.map((c) => c.account)).toEqual(['default', 'b']);
+    expect(calls[1]!.opts.prompt).toBe(BACKGROUND_FAILOVER_PROMPT);
+    expect(pool.isRefused('default')).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'account', switchedFrom: 'default' }));
+  });
+
+  it('a refused background turn of a stopped run stays put', async () => {
+    const { pool } = await poolWith(['b']);
+    const spawned: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (_opts, account) => {
+        spawned.push(account.id);
+        return fakeRun([
+          { type: 'background', count: 1 },
+          { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+          { type: 'subagent_rate_limited', at: NOW },
+          limit({ blocked: true, resetsAt: NOW + HOUR }),
+          { type: 'done', terminationReason: 'interrupted' },
+        ]);
+      },
+      labelOf: async () => 'me',
+    });
+    await run.stop();
+    await collect(run);
+    expect(spawned).toEqual(['default']);
+  });
+
+  it('hands the next message to another account when the kept process is refused or no longer the main one', async () => {
+    for (const setup of ['refused', 'switched'] as const) {
+      const { pool } = await poolWith(['b']);
+      const sent: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const calls: Array<{ account: string; opts: AgentRunOptions }> = [];
+      const run = runWithAccountFailover(OPTS, {
+        pool,
+        spawn: (opts, account) => {
+          calls.push({ account: account.id, opts });
+          if (calls.length > 1) return fakeRun([{ type: 'text', delta: 'on b' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+          return {
+            ...fakeRun([]),
+            events: (async function* () {
+              yield { type: 'system', sessionId: 's1' } as AgentEvent;
+              yield { type: 'background', count: 1 } as AgentEvent;
+              yield { type: 'done', sessionId: 's1', terminationReason: 'normal' } as AgentEvent;
+              await gate;
+              yield { type: 'done', terminationReason: 'interrupted' } as AgentEvent;
+            })(),
+            stop: async () => release(),
+            send: (prompt: string) => {
+              sent.push(prompt);
+              return true;
+            },
+          };
+        },
+        labelOf: async (account) => account.label ?? account.id,
+      });
+      const it = run.events[Symbol.asyncIterator]();
+      const seen: AgentEvent[] = [];
+      while (seen.at(-1)?.type !== 'done') seen.push((await it.next()).value as AgentEvent);
+      if (setup === 'refused') pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
+      else pool.promote('b');
+      expect(run.send?.('new message')).toBe(true);
+      for (let r = await it.next(); !r.done; r = await it.next()) seen.push(r.value);
+      expect(sent).toEqual([]);
+      expect(calls.map((c) => c.account)).toEqual(['default', 'b']);
+      expect(calls[1]!.opts).toMatchObject({ sessionId: 's1', prompt: handoverPrompt('new message', { subagents: true }) });
+      expect(seen.filter((e) => e.type === 'done')).toHaveLength(2);
+      expect(seen).toContainEqual(expect.objectContaining({ type: 'account', label: 'b-name', switchedFrom: 'default' }));
+      expect(seen).toContainEqual({ type: 'text', delta: 'on b' });
+    }
   });
 
   it('does not switch a run that was stopped', async () => {
@@ -488,6 +631,44 @@ describe('account failover', () => {
     });
     await collect(run);
     expect(spawned).toEqual(['default']);
+  });
+});
+
+describe('Claude subagent quota failures', () => {
+  it('reads a subagent cut off by the quota from its refusal and its failed task notification', () => {
+    // Shapes from claude 2.1.309 (stream-json): a background subagent's
+    // messages carry parent_tool_use_id + agent_id; a stopped task reports a
+    // system/task_notification.
+    expect([
+      ...translateEvent({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_1',
+        agent_id: 'a5c3605c87e6b7ee6',
+        error: 'rate_limit',
+        message: { content: [{ type: 'text', text: "You've hit your session limit · resets 1am (Asia/Shanghai)" }] },
+      }),
+    ]).toEqual([
+      {
+        type: 'subagent_rate_limited',
+        taskId: 'a5c3605c87e6b7ee6',
+        message: "You've hit your session limit · resets 1am (Asia/Shanghai)",
+        at: expect.any(Number),
+      },
+    ]);
+    const failed = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'ae33b795da24bc0a8',
+      tool_use_id: 'toolu_2',
+      status: 'failed',
+      summary:
+        'Agent "J0" failed: Agent terminated early due to an API error: You\'ve hit your session limit · resets 1am (Asia/Shanghai) (error type rate_limit, HTTP 429, request id req_1)',
+    };
+    expect([...translateEvent(failed)]).toEqual([
+      { type: 'subagent_rate_limited', taskId: 'ae33b795da24bc0a8', message: failed.summary, at: expect.any(Number) },
+    ]);
+    expect([...translateEvent({ ...failed, status: 'completed', summary: 'hi' })]).toEqual([]);
+    expect([...translateEvent({ ...failed, summary: 'Agent "x" failed: tool crashed' })]).toEqual([]);
   });
 });
 

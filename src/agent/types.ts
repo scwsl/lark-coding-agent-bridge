@@ -51,6 +51,13 @@ export type AgentEvent =
       at: number;
     }
   /**
+   * A subagent of this process (usually a background one) stopped because its
+   * requests were refused for quota. It ran on the process's own account, so
+   * that account is refused too. Claude reports it as the subagent's own
+   * `error: "rate_limit"` message and as a failed `task_notification`.
+   */
+  | { type: 'subagent_rate_limited'; taskId?: string; message?: string; at: number }
+  /**
    * Which subscription account this run (or, after a failover, the rest of
    * it) is paid by — for the reply card's `Sponsor:` line. `switchedFrom` is
    * set when the bridge moved the run off another account; `reason` says why
