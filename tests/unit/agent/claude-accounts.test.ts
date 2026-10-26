@@ -21,6 +21,7 @@ import {
   parseSwitchQuery,
   switchBoost,
   switchRefusal,
+  STICKY_MARGIN,
   switchScore,
   switchToAccount,
   reorderAccounts,
@@ -36,6 +37,7 @@ import {
   type AccountRow,
 } from '../../../src/agent/claude/accounts.js';
 import { readClaudeQuota } from '../../../src/agent/claude/quota.js';
+import { refreshPickQuota } from '../../../src/agent/claude/quota-probe.js';
 import { translateEvent } from '../../../src/agent/claude/stream-json.js';
 import type { AgentEvent, AgentRun, AgentRunOptions } from '../../../src/agent/types.js';
 import { readVerification } from '../../../src/cli/commands/claude-account.js';
@@ -219,8 +221,8 @@ describe('account table and switching (/accounts)', () => {
       five_hour: { usedPercent: five, line: 80 },
       seven_day: { usedPercent: week, line: 90, ...(weekResetIn !== undefined ? { resetsInMs: weekResetIn } : {}) },
     });
-    // 0.45 × 0.8 + 0.25 × 0.8 × 0.5 + 0.3 × 0.5
-    expect(switchScore(view(40, 18, 3.5 * DAY), true)).toBeCloseTo(0.61);
+    // 0.30 × 0.8 + 0.45 × 0.8 × 0.5 + 0.25 × 0.5
+    expect(switchScore(view(40, 18, 3.5 * DAY), true)).toBeCloseTo(0.545);
     expect(switchScore(view(0, 10, 6 * DAY), true)).toBeGreaterThan(switchScore(view(0, 86, 6 * DAY), true));
     // Same usage: the week that resets sooner wins.
     expect(switchScore(view(0, 50, DAY), true)).toBeGreaterThan(switchScore(view(0, 50, 6 * DAY), true));
@@ -229,8 +231,10 @@ describe('account table and switching (/accounts)', () => {
     // Room is against each account's own lines; at or past either line it scores 0.
     expect(switchScore(view(0, 90, HOUR), true)).toBe(0);
     expect(switchScore(view(80, 0, HOUR), true)).toBe(0);
-    expect(switchScore(view(0, 89, HOUR), true)).toBeGreaterThan(0.3);
-    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.375);
+    expect(switchScore(view(0, 89, HOUR), true)).toBeGreaterThan(0.25);
+    expect(switchScore(view(0, 0), false)).toBeCloseTo(0.275);
+    // Weekly room about to be lost outweighs a little more room that keeps for days.
+    expect(switchScore(view(0, 40, 12 * HOUR), true)).toBeGreaterThan(switchScore(view(0, 20, 6 * DAY), true));
   });
 
   it('lists every account in one table, one column per figure', async () => {
@@ -243,8 +247,10 @@ describe('account table and switching (/accounts)', () => {
     const rows = accountRows(pool, 'shilong.wang', NOW);
     const table = accountsTable(rows);
     expect(table.split('\n')[0]).toBe('| 账户 | 5 小时用量 / 重置 | 本周用量 / 重置 | 切换线（5 小时 / 本周） | 得分 | 状态 |');
-    expect(table).toContain('| ✅ **shilong.wang**（主，default） | 46% / 4h32m | 55% / 2d22h | 98% / 98% |');
-    expect(table).toContain('| **c-name**（备 2，c） | — | — | 98% / 98% | 38 | 还没运行过 |');
+    expect(table).toContain('| **shilong.wang**（主，default） | 46% / 4h32m | 55% / 2d22h | 98% / 98% | 38 | 可用 |');
+    // The best score takes the next run, main account or not.
+    expect(table).toContain('| ✅ **b-name**（备 1，b） | — | 10% / 5d0h | 98% / 98% | 63 | 使用中 |');
+    expect(table).toContain('| **c-name**（备 2，c） | — | — | 98% / 98% | 28 | 还没运行过 |');
   });
 
   it('switches without a name to the best-scoring account with room, never the current one', async () => {
@@ -264,14 +270,15 @@ describe('account table and switching (/accounts)', () => {
 
   it('switches to the best-scoring account when the main one is already past its line', async () => {
     const { pool } = await poolWith(['b', 'c']);
-    // The main account is past its 5-hour line, so new runs already go to b
-    // (the best score); a switch must pick b, not the runner-up c.
+    // The main account is past its 5-hour line, so new runs already go to the
+    // best score: c, whose weekly room resets two days sooner than b's larger
+    // room; a switch must pick c too.
     pool.observe('default', limit({ windows: [{ kind: 'five_hour', usedPercent: 99, resetsAt: NOW + 4 * HOUR }] }));
     pool.observe('b', limit({ windows: [{ kind: 'seven_day', usedPercent: 11, resetsAt: NOW + 6 * DAY }] }));
     pool.observe('c', limit({ windows: [{ kind: 'seven_day', usedPercent: 26, resetsAt: NOW + 4 * DAY }] }));
     const rows = accountRows(pool, undefined, NOW);
-    expect(rows.find((r) => r.next)?.id).toBe('b');
-    expect(bestSwitchTarget(rows)?.id).toBe('b');
+    expect(rows.find((r) => r.next)?.id).toBe('c');
+    expect(bestSwitchTarget(rows)?.id).toBe('c');
   });
 
   it('a switch by name obeys the switch lines: an account past one or refused is not switched to', async () => {
@@ -988,6 +995,7 @@ describe('switch lines and rounds', () => {
 
   it('past its line, a run moves to the best score rather than the next on the list, and makes it the main account', async () => {
     const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(5));
     pool.observe('default', weekly(60));
     pool.observe('backup2', weekly(10));
     const spawned: string[] = [];
@@ -1011,11 +1019,17 @@ describe('switch lines and rounds', () => {
     expect(pool.accounts().map((a) => a.id)).toEqual(['backup2', 'backup', 'default']);
     await pool.flush();
     expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['backup2', 'backup', 'default']);
-    // The new main account stays while it is below its lines, even when another scores higher.
+    // The new main account keeps the next run while no other beats it by more
+    // than STICKY_MARGIN (a move re-reads the conversation uncached)…
     pool.observe('backup2', weekly(50));
-    pool.observe('default', weekly(0));
+    pool.observe('default', weekly(45));
     expect(pool.score('default')).toBeGreaterThan(pool.score('backup2'));
+    expect(pool.score('default') - pool.score('backup2')).toBeLessThanOrEqual(STICKY_MARGIN);
     expect(pool.pick()?.id).toBe('backup2');
+    // …and every run checks again: a clearly better account takes it.
+    pool.observe('default', weekly(0));
+    expect(pool.score('default') - pool.score('backup2')).toBeGreaterThan(STICKY_MARGIN);
+    expect(pool.pick()?.id).toBe('default');
   });
 });
 
@@ -1047,7 +1061,8 @@ describe('a per-run line cap (课堂精练)', () => {
     pool.observe('backup', weekly(70));
     // Past the cap, still below its own 90% line: chats could use it, the capped run may not.
     pool.observe('default', weekly(85));
-    pool.observe('backup2', weekly(10));
+    // Near-equal to the main account: the run starts on the main one.
+    pool.observe('backup2', weekly(68));
     const calls: Array<{ account: PickedAccount; opts: AgentRunOptions }> = [];
     const run = runWithAccountFailover(
       { ...OPTS, accountLineCap: CAP },
@@ -1076,9 +1091,11 @@ describe('a per-run line cap (课堂精练)', () => {
     expect(events).not.toContainEqual({ type: 'text', delta: 'must not run past the cap' });
     const card = JSON.stringify(renderCard(events.reduce(reduce, initialState), { meta: { title: 'Occam' } }));
     expect(card).toContain('本周用量到了 80% 的切换线');
-    // A borrowed account: new chats still start on the main one.
+    // A borrowed account: the capped run does not make it the main one…
     expect(pool.accounts()[0]!.id).toBe('backup');
-    expect(pool.pick()?.id).toBe('backup');
+    // …chats still go by score, and backup2 now clearly beats the main one.
+    expect(pool.score('backup2') - pool.score('backup')).toBeGreaterThan(STICKY_MARGIN);
+    expect(pool.pick()?.id).toBe('backup2');
   });
 
   it('with every other account at the cap, finishes its turn where it is', async () => {
@@ -1146,5 +1163,43 @@ describe('most room by the weekly window', () => {
     expect(fullest?.windows.find((w) => w.label === '本周')?.usedPercent).toBe(85);
     const week = await readClaudeQuota({ cwd: dir, window: 'week' }, broken, pool);
     expect(week?.windows.find((w) => w.label === '本周')?.usedPercent).toBe(60);
+  });
+});
+
+describe('quota check before a run (refreshPickQuota)', () => {
+  const MIN = 60_000;
+
+  it('re-reads the pick when its quota is stale and picks again; fresh or just-checked accounts are left alone', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    pool.observe('backup', weekly(5));
+    pool.observe('backup2', weekly(10));
+    pool.observe('default', weekly(10));
+    const checkedAt = new Map<string, number>();
+    const probed: string[] = [];
+    // The main account's owner used it meanwhile: past its line now.
+    const probe = async (p: typeof pool, account: PickedAccount): Promise<void> => {
+      probed.push(account.id);
+      p.observe(account.id, weekly(account.id === 'backup' ? 95 : 10));
+    };
+    // Reported a minute ago: nothing to check.
+    await refreshPickQuota(pool, { probe, checkedAt, now: () => NOW + MIN });
+    expect(probed).toEqual([]);
+    // 20 minutes later: re-read it, move on, and check the new pick too (its
+    // report is as old); the reading just taken is then fresh.
+    await refreshPickQuota(pool, { probe, checkedAt, now: () => NOW + 20 * MIN });
+    expect(probed[0]).toBe('backup');
+    expect(probed).toHaveLength(2);
+    expect(pool.pick()?.id).toBe(probed[1]);
+    // Checked a moment ago, whatever the probe said: not again.
+    await refreshPickQuota(pool, { probe, checkedAt, now: () => NOW + 21 * MIN });
+    expect(probed).toHaveLength(2);
+  });
+
+  it('never throws when a probe fails', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 98, seven_day: 90 });
+    const probe = async (): Promise<void> => {
+      throw new Error('offline');
+    };
+    await expect(refreshPickQuota(pool, { probe, checkedAt: new Map(), now: () => NOW + HOUR })).resolves.toBeUndefined();
   });
 });

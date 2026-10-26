@@ -58,7 +58,7 @@ describe('Claude account failover (process)', () => {
     const paths = claudeAccountsPaths(dir);
     await writeFile(paths.configFile, JSON.stringify({ accounts: [{ id: 'default' }, { id: 'b', label: 'backup' }] }));
     const pool = new ClaudeAccountPool({ paths, readSecret: async () => 'sk-ant-oat01-b' });
-    const adapter = new ClaudeAdapter({ binary, accounts: pool });
+    const adapter = new ClaudeAdapter({ binary, accounts: pool, probeQuota: false });
     await adapter.prepareRun();
 
     const run = adapter.run({ runId: 'run-1', prompt: 'hello', cwd: dir, sessionId: 'sess-0' });
@@ -133,7 +133,7 @@ rl.once('line', (line) => {
       JSON.stringify({ accounts: [{ id: 'default', lines: { five_hour: 80 } }, { id: 'b', label: 'backup' }] }),
     );
     const pool = new ClaudeAccountPool({ paths, readSecret: async () => 'sk-ant-oat01-b' });
-    const adapter = new ClaudeAdapter({ binary, accounts: pool });
+    const adapter = new ClaudeAdapter({ binary, accounts: pool, probeQuota: false });
     await adapter.prepareRun();
 
     const started = Date.now();

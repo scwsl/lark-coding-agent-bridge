@@ -19,16 +19,16 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  *
  * Which account a run gets, in rounds:
  *   1. of the accounts still below their switch lines (one per window:
- *      5-hour and weekly; per account or the profile's default): the main
- *      one (first on the list) while it is, else the one with the best
- *      switch score ({@link switchScore});
+ *      5-hour and weekly; per account or the profile's default): the one with
+ *      the best switch score ({@link switchScore}), checked again before every
+ *      run; the main one (first on the list) keeps the run unless another
+ *      beats it by more than {@link STICKY_MARGIN}, since every move re-reads
+ *      the whole conversation uncached (the prompt cache is per account);
  *   2. once every account is past a line: of those not refused, the same
  *      way — accounts are used up one after another;
  *   3. once every account has been refused: the run waits for the soonest
  *      reset (it pauses and resumes on its own).
- * The account a run moves to becomes the main one (top of the list), so new
- * runs stay on it until it reaches a line in turn instead of going back and
- * forth as the scores shift.
+ * The account a run moves to becomes the main one (top of the list).
  *
  * Files in the profile directory:
  *   - `claude-accounts.json`: the list, in order of preference, and the
@@ -425,8 +425,9 @@ export class ClaudeAccountPool {
   }
 
   /**
-   * Of the accounts `ok` lets through: the main one while it is among them,
-   * else the best switch score; ties keep the list's order.
+   * Of the accounts `ok` lets through: the best switch score, ties keeping the
+   * list's order — except that the main one stays while no other beats it by
+   * more than {@link STICKY_MARGIN}.
    */
   private choose(
     exclude: ReadonlySet<string> | undefined,
@@ -436,7 +437,6 @@ export class ClaudeAccountPool {
   ): PickedAccount | undefined {
     const all = this.accounts();
     const candidates = all.filter((a) => !exclude?.has(a.id) && ok(a.id));
-    if (candidates[0] && candidates[0].id === all[0]?.id) return candidates[0];
     let best: PickedAccount | undefined;
     let bestScore = -1;
     for (const account of candidates) {
@@ -446,7 +446,14 @@ export class ClaudeAccountPool {
         bestScore = score;
       }
     }
+    const main = candidates[0] && candidates[0].id === all[0]?.id ? candidates[0] : undefined;
+    if (main && best && best.id !== main.id && bestScore - this.score(main.id, now, cap) <= STICKY_MARGIN) return main;
     return best;
+  }
+
+  /** When a run or `/usage` last reported the account's quota (epoch ms); undefined when never. */
+  reportedAt(id: string): number | undefined {
+    return this.loadState()[id]?.updatedAt;
   }
 
   /**
@@ -713,7 +720,13 @@ function formatClock(at: number): string {
 // ─── Account table and switching (`/accounts`, `claude-account switch`) ─────
 
 /** Weights of the switch score's three terms (see {@link switchScore}). */
-export const SWITCH_SCORE_WEIGHTS = { weekRoom: 0.45, weekExpiring: 0.25, fiveHourRoom: 0.3 } as const;
+export const SWITCH_SCORE_WEIGHTS = { weekRoom: 0.3, weekExpiring: 0.45, fiveHourRoom: 0.25 } as const;
+/**
+ * How much better than the main account another has to score to take the next
+ * run from it. Moving costs a full uncached read of the conversation (the
+ * prompt cache is per account), so near-equal scores don't trade places.
+ */
+export const STICKY_MARGIN = 0.05;
 /** Room assumed for an account that has never run here (its token is untested). */
 const UNKNOWN_ROOM = 0.5;
 const WINDOW_MS: Record<WindowKind, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
@@ -755,12 +768,13 @@ export interface AccountRow {
  * How good a switch target an account is, 0–1, built to even out the
  * accounts' weekly use:
  *
- *   0.45 × weekRoom + 0.25 × weekRoom × weekResetSoon + 0.30 × fiveHourRoom
+ *   0.30 × weekRoom + 0.45 × weekRoom × weekResetSoon + 0.25 × fiveHourRoom
  *
  * - weekRoom = 1 − weekly used ÷ weekly line: the week is the scarce budget,
  *   so the account with the most of it left goes first;
  * - weekRoom × weekResetSoon (1 − time to the weekly reset ÷ 7 days): room
- *   about to be lost at the reset — spend it first; multiplied so an account
+ *   about to be lost at the reset — spend it first, the heaviest term since
+ *   weekly room left at the reset is gone for good; multiplied so an account
  *   with nothing left gains nothing from a near reset;
  * - fiveHourRoom = 1 − 5-hour used ÷ 5-hour line: don't move to an account
  *   that is about to hit its 5-hour line and move again.

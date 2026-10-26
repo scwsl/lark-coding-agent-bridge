@@ -21,6 +21,7 @@ import {
 } from '../types';
 import { claudeAccountName } from './account';
 import { runWithAccountFailover } from './account-failover';
+import { probeAccountQuota, refreshPickQuota } from './quota-probe';
 import type { ClaudeAccountPool, PickedAccount } from './accounts';
 import { restoredSessionCost } from './session-cost';
 import { translateEvent } from './stream-json';
@@ -30,6 +31,11 @@ export interface ClaudeAdapterOptions {
   larkChannel?: LarkChannelEnvContext;
   /** The profile's subscription accounts; runs move to another one when the quota runs out. */
   accounts?: ClaudeAccountPool;
+  /**
+   * Check a stale account's quota before a run starts on it (see
+   * refreshPickQuota). Default true; tests whose fake CLI answers no probe turn it off.
+   */
+  probeQuota?: boolean;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -42,16 +48,29 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly larkChannel: LarkChannelEnvContext | undefined;
   private readonly accounts: ClaudeAccountPool | undefined;
   private botIdentity: AgentBotIdentity | undefined;
+  /** When each account's quota was last checked before a run (see refreshPickQuota). */
+  private readonly quotaCheckedAt = new Map<string, number>();
+  private readonly probeQuota: boolean;
 
   constructor(opts: ClaudeAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
     this.larkChannel = opts.larkChannel;
     this.accounts = opts.accounts;
+    this.probeQuota = opts.probeQuota ?? true;
   }
 
-  async prepareRun(): Promise<void> {
+  async prepareRun(opts?: AgentRunOptions): Promise<void> {
     // Pick up accounts added or removed since the last run.
     await this.accounts?.refresh();
+    // Then check that the account the run would get still has the room the
+    // bridge last saw: its owner may have used it since.
+    if (this.probeQuota && this.accounts?.multi) {
+      await refreshPickQuota(this.accounts, {
+        ...(opts?.accountLineCap ? { cap: opts.accountLineCap } : {}),
+        probe: (pool, account) => probeAccountQuota(pool, account, this.binary),
+        checkedAt: this.quotaCheckedAt,
+      });
+    }
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {

@@ -37,7 +37,7 @@ export async function readClaudeQuota(
 }
 
 /** A `/usage` reading as the pool keeps it: windows by kind, resets as epoch ms. */
-function usageByKind(reading: QuotaReading): Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>> {
+export function usageByKind(reading: QuotaReading): Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>> {
   const now = Date.now();
   const out: Partial<Record<WindowKind, { usedPercent: number; resetsAt?: number }>> = {};
   for (const kind of WINDOW_KINDS) {
