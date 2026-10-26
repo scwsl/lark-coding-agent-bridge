@@ -12,8 +12,8 @@ import {
   deleteAccount,
   isValidAccountId,
   reorderAccounts,
-  SWITCH_BOOST_LINE,
   switchBoost,
+  switchRefusal,
   saveAccount,
   updateAccount,
   updateDefaultLines,
@@ -139,24 +139,47 @@ export async function runClaudeAccountOrder(ids: string[], opts: AccountCliOptio
   await runClaudeAccountList(opts);
 }
 
-/** Make an account the main one: the named one, or the best-scoring one with room. */
-export async function runClaudeAccountSwitch(query: string | undefined, opts: AccountCliOptions = {}): Promise<void> {
+/**
+ * Make an account the main one: the named one, or the best-scoring one with
+ * room. A named account must be below its switch lines and not refused, as
+ * for every automatic move; `line` raises its lines to that value until each
+ * window resets — the only way past them.
+ */
+export async function runClaudeAccountSwitch(
+  query: string | undefined,
+  opts: AccountCliOptions & { line?: string } = {},
+): Promise<void> {
   const appPaths = await resolveSecretProfilePaths(opts);
   const paths = claudeAccountsPaths(appPaths.profileDir);
   const pool = new ClaudeAccountPool({ paths });
   await pool.refresh();
   const label = await claudeAccountName();
   const rows = accountRows(pool, label);
+  let line: number | undefined;
+  if (opts.line !== undefined) {
+    line = Number(opts.line.trim().replace(/%$/, ''));
+    if (!query || !Number.isInteger(line) || line < 1 || line > 100) {
+      console.error(query ? `✗ 切换线要是 1–100 的整数：${opts.line}` : '✗ --line 要和账户名一起用');
+      process.exit(1);
+    }
+  }
   const target = query ? findAccountRow(rows, query) : bestSwitchTarget(rows);
   if (!target) {
     console.error(query ? `✗ 没有叫「${query}」的账户` : '✗ 其他账户都已到切换线或额度用尽，暂时没有可切换的');
     process.exit(1);
   }
-  const boost = query ? switchBoost(pool, target.id) : undefined;
+  const refusal = query ? switchRefusal(pool, target, line) : undefined;
+  if (refusal) {
+    console.error(
+      `✗ 没有切换：${target.name}（${target.id}）${refusal}${target.refusedUntil === undefined ? '。确需继续用它，加 --line <高于当前用量的百分比> 临时调高切换线' : ''}`,
+    );
+    process.exit(1);
+  }
+  const boost = line !== undefined ? switchBoost(pool, target.id, line) : undefined;
   await switchToAccount(paths, target.id, boost);
   await pool.refresh();
   console.log(
-    `✓ 已把 ${target.name}（${target.id}）设为主账户${boost ? `，切换线临时放宽到 ${SWITCH_BOOST_LINE}%` : ''}，运行中的 bridge 下一次运行前生效\n`,
+    `✓ 已把 ${target.name}（${target.id}）设为主账户${boost ? `，切换线临时调到 ${line}%，该窗口重置后恢复` : ''}，运行中的 bridge 下一次运行前生效\n`,
   );
   console.log(accountsTable(accountRows(pool, label)).replace(/\*\*/g, ''));
 }

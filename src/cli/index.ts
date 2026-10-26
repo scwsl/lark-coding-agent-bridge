@@ -340,10 +340,13 @@ claudeAccount
 
 claudeAccount
   .command('switch [id]')
-  .description('Make an account the main one: the one named (id or name), or the best-scoring one with room')
+  .description(
+    'Make an account the main one: the one named (id or name, must be below its switch lines), or the best-scoring one with room',
+  )
+  .option('--line <percent>', "with a name: raise the account's switch lines to this value until each window resets")
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .action(async (id: string | undefined, opts: { profile?: string }) => {
-    await runClaudeAccountSwitch(id, { profile: opts.profile });
+  .action(async (id: string | undefined, opts: { profile?: string; line?: string }) => {
+    await runClaudeAccountSwitch(id, { profile: opts.profile, ...(opts.line !== undefined ? { line: opts.line } : {}) });
   });
 
 claudeAccount

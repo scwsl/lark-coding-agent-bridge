@@ -18,7 +18,9 @@ import {
   findAccountRow,
   formatDaysHours,
   formatHoursMinutes,
+  parseSwitchQuery,
   switchBoost,
+  switchRefusal,
   switchScore,
   switchToAccount,
   reorderAccounts,
@@ -31,6 +33,7 @@ import {
   saveAccount,
   updateAccount,
   type PickedAccount,
+  type AccountRow,
 } from '../../../src/agent/claude/accounts.js';
 import { readClaudeQuota } from '../../../src/agent/claude/quota.js';
 import { translateEvent } from '../../../src/agent/claude/stream-json.js';
@@ -271,32 +274,73 @@ describe('account table and switching (/accounts)', () => {
     expect(bestSwitchTarget(rows)?.id).toBe('b');
   });
 
-  it('a switch by name raises the lines to 98% until each window resets, and they drop once runs move on', async () => {
+  it('a switch by name obeys the switch lines: an account past one or refused is not switched to', async () => {
+    const { pool } = await poolInOrder(ROSTER, { five_hour: 80, seven_day: 90 });
+    pool.observe('backup2', fiveHour(85));
+    pool.observe('backup', limit({ blocked: true, resetsAt: NOW + HOUR }));
+    pool.observe('default', fiveHour(79));
+    const rows = accountRows(pool, undefined, NOW);
+    const row = (id: string): AccountRow => rows.find((r) => r.id === id)!;
+    expect(switchRefusal(pool, row('backup2'))).toBe('5 小时窗口用量 85%，已到 80% 的切换线');
+    expect(switchRefusal(pool, row('backup'))).toMatch(/^额度用尽，/);
+    // Just below the line: it may be switched to (and leaves again at 80%).
+    expect(switchRefusal(pool, row('default'))).toBeUndefined();
+    // A temporary line asked for with the switch: only one above the usage lets it through.
+    expect(switchRefusal(pool, row('backup2'), 85)).toBe('5 小时窗口用量 85%，已到 85% 的切换线');
+    expect(switchRefusal(pool, row('backup2'), 95)).toBeUndefined();
+    // A refused account stays refused whatever line is asked for.
+    expect(switchRefusal(pool, row('backup'), 100)).toMatch(/^额度用尽，/);
+  });
+
+  it('a raise already on an account does not let a plain switch past its own line', async () => {
+    const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 80, seven_day: 90 });
+    pool.observe('backup2', fiveHour(85));
+    await switchToAccount(paths, 'backup2', switchBoost(pool, 'backup2', 95, NOW));
+    await pool.refresh();
+    expect(pool.lineOf('backup2', 'five_hour')).toBe(95);
+    // Switching to it again without a line would drop the raise: judged by its own 80%.
+    const rows = accountRows(pool, undefined, NOW);
+    expect(switchRefusal(pool, rows.find((r) => r.id === 'backup2')!)).toBe('5 小时窗口用量 85%，已到 80% 的切换线');
+  });
+
+  it('a temporary line raises only the windows below it, until each window resets, and drops once runs move on', async () => {
     const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 80, seven_day: 90 });
     pool.observe('backup2', fiveHour(85));
     expect(pool.hasRoom('backup2')).toBe(false);
-    const boost = switchBoost(pool, 'backup2', NOW);
     // The 5-hour window resets in an hour; the weekly one is not known yet: a full week.
-    expect(boost).toEqual({
-      five_hour: { line: 98, until: NOW + HOUR },
-      seven_day: { line: 98, until: NOW + 7 * DAY },
+    expect(switchBoost(pool, 'backup2', 95, NOW)).toEqual({
+      five_hour: { line: 95, until: NOW + HOUR },
+      seven_day: { line: 95, until: NOW + 7 * DAY },
     });
+    // Only the windows whose own line is below the value rise.
+    expect(switchBoost(pool, 'backup2', 85, NOW)).toEqual({ five_hour: { line: 85, until: NOW + HOUR } });
+    expect(switchBoost(pool, 'backup2', 80, NOW)).toBeUndefined();
+    const boost = switchBoost(pool, 'backup2', 95, NOW);
     await switchToAccount(paths, 'backup2', boost);
     await pool.refresh();
     expect(pool.pick()?.id).toBe('backup2');
-    expect(pool.lineOf('backup2', 'five_hour')).toBe(98);
+    expect(pool.lineOf('backup2', 'five_hour')).toBe(95);
     expect(pool.lineOf('backup2', 'five_hour', NOW + 2 * HOUR)).toBe(80);
     const rows = accountRows(pool, undefined, NOW);
     expect(rows[0]?.boosted).toBe(true);
-    expect(accountsTable(rows)).toContain('| 98% / 98%（临时） |');
-    // An account whose lines are already 98% has nothing to raise.
-    const { pool: atDefault } = await poolWith(['b']);
-    expect(switchBoost(atDefault, 'b', NOW)).toBeUndefined();
-    // Runs move on (at 98%, or to another account): the raise is gone, in memory and on disk.
+    expect(accountsTable(rows)).toContain('| 95% / 95%（临时） |');
+    // Runs move on (at 95%, or to another account): the raise is gone, in memory and on disk.
     pool.promote('backup');
     expect(pool.lineOf('backup2', 'five_hour')).toBe(80);
     await pool.flush();
     expect(readAccountsConfig(paths).accounts.find((a) => a.id === 'backup2')?.boost).toBeUndefined();
+  });
+
+  it('reads a switch query: a name, and a temporary line only after a name', () => {
+    expect(parseSwitchQuery(undefined)).toEqual({});
+    expect(parseSwitchQuery('  ')).toEqual({});
+    expect(parseSwitchQuery('焦银玲')).toEqual({ name: '焦银玲' });
+    expect(parseSwitchQuery('焦银玲 95')).toEqual({ name: '焦银玲', line: 95 });
+    expect(parseSwitchQuery('焦银玲 95%')).toEqual({ name: '焦银玲', line: 95 });
+    expect(parseSwitchQuery('shilong wang 90')).toEqual({ name: 'shilong wang', line: 90 });
+    expect(parseSwitchQuery('95')).toEqual({ name: '95' });
+    expect(parseSwitchQuery('焦银玲 0')).toEqual({ error: '切换线要是 1–100 的整数：0' });
+    expect(parseSwitchQuery('焦银玲 120')).toEqual({ error: '切换线要是 1–100 的整数：120' });
   });
 
   it('finds an account by id, name or the CLI login, ignoring case', async () => {

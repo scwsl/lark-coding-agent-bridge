@@ -1,4 +1,5 @@
 import type { ProfileConfig } from '../config/profile-schema';
+import { log } from '../core/logger';
 import { claudeAccountName } from './claude/account';
 import {
   accountRows,
@@ -8,9 +9,10 @@ import {
   claudeAccountPool,
   claudeAccountsPaths,
   findAccountRow,
-  SWITCH_BOOST_LINE,
+  parseSwitchQuery,
   SWITCH_SCORE_WEIGHTS,
   switchBoost,
+  switchRefusal,
   switchToAccount,
   WINDOW_KINDS,
   type ClaudeAccountEntry,
@@ -84,15 +86,17 @@ export async function agentAccountsTable(profileConfig: AccountProfile, profileD
     '',
     `_用量和重置时间取自各账户最近一次运行的报告。${SCORE_NOTE}_`,
     '',
-    `\`/accounts switch\` 切到得分最高的可用账户；\`/accounts switch <名字或 id>\` 切到指定账户，它的切换线临时放宽到 ${SWITCH_BOOST_LINE}%。`,
+    `\`/accounts switch\` 切到得分最高的可用账户；\`/accounts switch <名字或 id>\` 切到指定账户（它要在切换线以下）；\`/accounts switch <名字或 id> <百分比>\` 同时把它的切换线临时调到该值，到该窗口重置恢复原线。`,
   ].join('\n');
 }
 
 /**
- * `/accounts switch [name]`: make an account the main one. Without a name,
- * the best-scoring account that has room, other than the current one; by
- * name, that one with its lines raised to 98% for a while ({@link switchBoost}).
- * Returns the reply as Markdown.
+ * `/accounts switch [name [line]]`: make an account the main one. Without a
+ * name, the best-scoring account that has room, other than the current one.
+ * By name, that one — only if it is below its switch lines and not refused:
+ * a switch obeys the lines like every automatic move. `line` raises its lines
+ * to that value until each window resets ({@link switchBoost}); that is the
+ * only way past an account's own line. Returns the reply as Markdown.
  */
 export async function switchAgentAccount(
   profileConfig: AccountProfile,
@@ -100,6 +104,8 @@ export async function switchAgentAccount(
   query?: string,
 ): Promise<string> {
   if (profileConfig.agentKind !== 'claude') return '只有 Claude profile 能切换订阅账户。';
+  const parsed = parseSwitchQuery(query);
+  if ('error' in parsed) return `❌ ${parsed.error}`;
   const pool = claudeAccountPool(profileDir);
   await pool.refresh();
   const label = await claudeAccountName();
@@ -110,24 +116,37 @@ export async function switchAgentAccount(
   const current = rows.find((row) => row.index === 0);
   let target: AccountRow | undefined;
   let boost: ClaudeAccountEntry['boost'];
-  if (query?.trim()) {
-    target = findAccountRow(rows, query);
-    if (!target) return `没有叫「${query.trim()}」的账户。可选：${rows.map((r) => `${r.name}（${r.id}）`).join('、')}`;
-    boost = switchBoost(pool, target.id);
+  if (parsed.name) {
+    target = findAccountRow(rows, parsed.name);
+    if (!target) return `没有叫「${parsed.name}」的账户。可选：${rows.map((r) => `${r.name}（${r.id}）`).join('、')}`;
+    const refusal = switchRefusal(pool, target, parsed.line);
+    if (refusal) {
+      const hint =
+        target.refusedUntil === undefined
+          ? `确需继续用它，带上临时切换线：\`/accounts switch ${parsed.name} <高于当前用量的百分比>\`，到该窗口重置恢复原线。`
+          : '';
+      return [`⚠️ 没有切换：**${target.name}** ${refusal}。${hint}`, '', accountsTable(rows)].join('\n');
+    }
+    if (parsed.line !== undefined) boost = switchBoost(pool, target.id, parsed.line);
   } else {
     target = bestSwitchTarget(rows);
     if (!target) return '其他账户都已到切换线或额度用尽，暂时没有可切换的。\n\n' + accountsTable(rows);
   }
   await switchToAccount(claudeAccountsPaths(profileDir), target.id, boost);
+  log.info('claude-accounts', 'manual-switch', {
+    from: current?.id ?? null,
+    to: target.id,
+    byName: Boolean(parsed.name),
+    line: boost ? (parsed.line ?? null) : null,
+  });
   await pool.refresh();
   const after = accountRows(pool, label);
-  const now = after.find((row) => row.next);
-  const raised = boost ? `切换线临时放宽到 ${SWITCH_BOOST_LINE}%（${boostedWindows(boost)}），到线自动切走或该窗口重置后恢复原线。` : '';
+  const raised = boost
+    ? `切换线临时调到 ${parsed.line}%（${boostedWindows(boost)}），该窗口重置后恢复原线；自动切走时也恢复。`
+    : '';
   const head =
-    now?.id !== target.id
-      ? `⚠️ 已把 **${target.name}** 排到第一，但它${target.refusedUntil !== undefined ? '额度用尽' : `用量已过 ${SWITCH_BOOST_LINE}%`}，恢复前新任务仍会用 **${now?.name ?? '下一个可用账户'}**。`
-      : current?.id === target.id
-        ? `✅ 继续用 **${target.name}**。${raised}`
-        : `✅ 已切换到 **${target.name}**（得分 ${Math.round(target.score * 100)}），从下一条消息起新任务用它${current ? `；之前是 ${current.name}` : ''}。${raised}`;
+    current?.id === target.id
+      ? `✅ 继续用 **${target.name}**。${raised}`
+      : `✅ 已切换到 **${target.name}**（得分 ${Math.round(target.score * 100)}），从下一条消息起新任务用它${current ? `；之前是 ${current.name}` : ''}。${raised}`;
   return [head, '', accountsTable(after), '', `_${SCORE_NOTE}_`].join('\n');
 }

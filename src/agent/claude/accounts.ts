@@ -59,8 +59,6 @@ export type SwitchLines = Record<WindowKind, number>;
  */
 export type LineCap = Partial<Record<WindowKind, number>>;
 export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
-/** How far a switch by name (`/accounts switch <name>`) raises the account's lines, for a while. */
-export const SWITCH_BOOST_LINE = 98;
 
 /** A raised line and until when it holds (that window's next reset). */
 export interface LineBoost {
@@ -904,16 +902,50 @@ function withMain(accounts: ClaudeAccountEntry[], id: string): ClaudeAccountEntr
 }
 
 /**
- * What a switch by name raises: each window whose line is below
- * {@link SWITCH_BOOST_LINE} goes up to it until that window's next reset (a
- * full window length when the reset is not known). Undefined when nothing rises.
+ * A temporary line the owner asked for with a switch by name (`/accounts
+ * switch <name> 95`): each window whose own line is below `line` goes up to
+ * it until that window's next reset (a full window length when the reset is
+ * not known). Undefined when nothing rises. A switch never raises a line on
+ * its own: without `line`, the account keeps its lines.
  */
-export function switchBoost(pool: ClaudeAccountPool, id: string, now = Date.now()): ClaudeAccountEntry['boost'] {
+export function switchBoost(pool: ClaudeAccountPool, id: string, line: number, now = Date.now()): ClaudeAccountEntry['boost'] {
   const windows = pool.windowViews(id, now);
   const boost: Partial<Record<WindowKind, LineBoost>> = {};
   for (const kind of WINDOW_KINDS) {
-    if (pool.baseLineOf(id, kind) >= SWITCH_BOOST_LINE) continue;
-    boost[kind] = { line: SWITCH_BOOST_LINE, until: now + (windows[kind].resetsInMs ?? WINDOW_MS[kind]) };
+    if (pool.baseLineOf(id, kind) >= line) continue;
+    boost[kind] = { line, until: now + (windows[kind].resetsInMs ?? WINDOW_MS[kind]) };
   }
   return Object.keys(boost).length > 0 ? boost : undefined;
+}
+
+/**
+ * `焦银玲` / `焦银玲 95` / `焦银玲 95%`: the account a switch names and the
+ * temporary line asked for with it, if any. A trailing number is a line only
+ * after a name; on its own it is a name.
+ */
+export function parseSwitchQuery(query: string | undefined): { name?: string; line?: number } | { error: string } {
+  const words = (query ?? '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return {};
+  const last = words.length > 1 ? /^(\d{1,3})%?$/.exec(words[words.length - 1]!) : null;
+  if (!last) return { name: words.join(' ') };
+  const line = Number(last[1]);
+  if (line < 1 || line > 100) return { error: `切换线要是 1–100 的整数：${words[words.length - 1]}` };
+  return { name: words.slice(0, -1).join(' '), line };
+}
+
+/**
+ * Why a switch by hand may not make `row` the main account, or undefined
+ * when it may: switches obey the switch lines like every automatic move. The
+ * account must not be refused and must be below each line it will have after
+ * the switch — its own line, or `line` where the owner raised it for now. A
+ * raise already on the account does not count: a switch replaces it.
+ */
+export function switchRefusal(pool: ClaudeAccountPool, row: AccountRow, line?: number): string | undefined {
+  if (row.refusedUntil !== undefined) return `额度用尽，${formatClock(row.refusedUntil)} 恢复`;
+  for (const kind of WINDOW_KINDS) {
+    const used = row.windows[kind].usedPercent;
+    const limit = Math.max(pool.baseLineOf(row.id, kind), line ?? 0);
+    if (used !== undefined && used >= limit) return `${WINDOW_LABELS[kind]}用量 ${Math.round(used)}%，已到 ${limit}% 的切换线`;
+  }
+  return undefined;
 }

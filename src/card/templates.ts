@@ -334,7 +334,7 @@ export function helpCard(agentName = 'Agent'): object {
         helpSection('grey-50', '⚙️ 运维与诊断', [
           '`/status` — 当前 profile、会话、工作目录、git、知识库状态，以及运行中任务的实况',
           '`/usage` — Claude 额度：5 小时窗口、本周用量和重置时间（不消耗额度）',
-          '`/accounts` — Claude 订阅账户表：各账户用量、重置时间、切换线；`/accounts switch [名字]` 切换账户（按名字切换时切换线临时放宽到 98%）',
+          '`/accounts` — Claude 订阅账户表：各账户用量、重置时间、切换线；`/accounts switch [名字] [百分比]` 切换账户（要在切换线以下；带百分比时临时调高该账户的切换线）',
           '`/config` — 偏好、访问控制、lark-cli 身份策略',
           '`/account` — 查看当前应用；`/account change` 换 appId/secret',
           '`/ps` · `/exit <id|#>` — 列出 / 关掉本机的 bot',
