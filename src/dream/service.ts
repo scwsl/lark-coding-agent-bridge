@@ -1277,7 +1277,10 @@ export class DreamService {
         scopeId,
         policy,
         model: resolveModelArg(profileConfig.agentKind, profileConfig.preferences.model),
-        effort: resolveEffortArg(profileConfig.agentKind, profileConfig.preferences.effort),
+        effort: resolveEffortArg(
+          profileConfig.agentKind,
+          profileConfig.preferences.dreamTuning?.effort ?? profileConfig.preferences.effort,
+        ),
         nowait: true,
         actor,
         ...(cap ? { accountLineCap: cap } : {}),

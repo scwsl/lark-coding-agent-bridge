@@ -331,6 +331,12 @@ function ids(raw: unknown, shape: RegExp): string[] {
 }
 
 export interface DreamTuning {
+  /**
+   * Effort for 课堂精练's turns, when it should differ from the chats'
+   * `preferences.effort` (say chats on `medium`, 课堂精练 kept on `high`).
+   * Default: unset, same as the chats.
+   */
+  effort?: EffortLevel;
   /** Conversations read per run, newest first. Default 20. */
   maxSessions?: number;
   /** Transcript characters handed to the agent per run, all scopes together. Default 120000. */
