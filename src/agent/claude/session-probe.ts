@@ -83,3 +83,36 @@ function userText(content: unknown): string | undefined {
   }
   return undefined;
 }
+
+const COMPACT_BOUNDARY = Buffer.from('"compact_boundary"');
+
+/**
+ * Whether the session's live context still holds the full knowledge block of
+ * `version`: a user message carrying it after the last compaction, within the
+ * transcript's last {@link MAX_SCAN_BYTES}. False when unsure (no transcript,
+ * compacted since, too far back), so the caller sends the block again.
+ */
+export function claudeSessionHasKnowledge(
+  sessionId: string,
+  cwd: string | undefined,
+  version: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!/^[0-9a-f]+$/.test(version)) return false;
+  const file = transcriptPath(sessionId, cwd, env);
+  if (!file) return false;
+  // As written inside the transcript's JSON string: `\"version\":\"<v>\"`.
+  const marker = Buffer.from(`\\"version\\":\\"${version}\\"`);
+  try {
+    for (const line of linesBackward(file, { maxBytes: MAX_SCAN_BYTES })) {
+      if (line.includes(COMPACT_BOUNDARY)) return false;
+      if (line.includes(USER) && line.includes(marker)) {
+        const rec = parse(line);
+        if (rec && rec.type === 'user' && rec.isSidechain !== true) return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}

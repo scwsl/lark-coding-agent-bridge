@@ -9,7 +9,7 @@ import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import type { RunState } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { promptSection } from '../agent/prompt';
-import { buildKnowledgeContext } from '../knowledge/inject';
+import { buildKnowledgeContext, nativeSkillOption } from '../knowledge/inject';
 import type { Controls } from '../commands';
 import { effortPrefForChat, getMessageReplyMode, getRunIdleTimeoutMs, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
@@ -267,7 +267,11 @@ async function buildJobPrompt(
   // the bot, which is where it was created.
   const originScope = job.threadId ? `${job.chatId}:${job.threadId}` : job.chatId;
   const knowledge = store
-    ? await buildKnowledgeContext({ store, scopeId: originScope }).catch(() => undefined)
+    ? await buildKnowledgeContext({
+        store,
+        scopeId: originScope,
+        ...nativeSkillOption(deps.controls.profileConfig.agentKind),
+      }).catch(() => undefined)
     : undefined;
   return [
     ...(knowledge ? [promptSection('bridge_knowledge', knowledge), ''] : []),

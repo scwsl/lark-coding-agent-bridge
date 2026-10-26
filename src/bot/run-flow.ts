@@ -18,7 +18,8 @@ import {
 import type { BackgroundTurnHandler, RunExecution, RunExecutor } from '../runtime/run-executor';
 import type { GateContext } from '../runtime/approvals';
 import { RunRejected, type RunRejectedCode } from '../runtime/errors';
-import type { AgentSessionProbe } from '../agent/session-probe';
+import { sessionHasKnowledge, type AgentSessionProbe } from '../agent/session-probe';
+import { log } from '../core/logger';
 import { effortPrefForChat, type SmartSessionSettings } from '../config/schema';
 import type { SessionCatalog } from '../session/catalog';
 import {
@@ -57,6 +58,12 @@ export interface StartRunFlowInput {
   cwd?: string;
   /** 会话智能压缩: see AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
+  /**
+   * The prompt's `<bridge_knowledge>` section (`full`, exactly as in the
+   * prompt) and the stub that replaces it when the conversation the run
+   * resumes still holds this `version` in full (agents that can tell).
+   */
+  knowledge?: { version: string; full: string; stub: string };
   /**
    * 会话智能压缩 (IM only): may leave the conversation this message would
    * resume and start fresh. Leave unset to always resume.
@@ -186,6 +193,18 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       resumeFrom = undefined;
       runPolicy = { ...policy, prompt: `${handoffSection(rotated)}\n\n${policy.prompt}` };
     }
+  }
+  // The conversation already holds this knowledge block (unchanged since, and
+  // not compacted away): send a stub instead of another full copy.
+  if (
+    input.knowledge &&
+    resumeFrom &&
+    runPolicy.prompt.includes(input.knowledge.full) &&
+    sessionHasKnowledge(input.profileConfig, resumeFrom, workspace.cwdRealpath, input.knowledge.version)
+  ) {
+    const { full, stub } = input.knowledge;
+    runPolicy = { ...runPolicy, prompt: runPolicy.prompt.replace(full, () => stub) };
+    log.info('knowledge', 'stub', { scope: input.scopeId, version: input.knowledge.version, savedChars: full.length - stub.length });
   }
   const sessionId = descriptor.sessionHandle === 'sessionId' ? resumeFrom : undefined;
   const threadId = descriptor.sessionHandle === 'threadId' ? resumeFrom : undefined;

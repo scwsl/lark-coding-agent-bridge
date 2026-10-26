@@ -17,6 +17,7 @@ import {
 } from '../agent/models';
 import {
   buildAgentPrompt,
+  promptSection,
   type BridgePromptInteractiveCard,
   type BridgePromptKnowledge,
   type BridgePromptMention,
@@ -120,7 +121,8 @@ import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { reportInterruptedRuns } from './interrupted-notice';
 import { RunRegistry } from '../runtime/run-registry';
-import { buildKnowledgeContext } from '../knowledge/inject';
+import { buildKnowledgeContext, knowledgeStub, nativeSkillOption } from '../knowledge/inject';
+import { writeKnowledgeSnapshot } from '../knowledge/snapshot';
 import { getKnowledgeSyncIntervalMinutes, KnowledgeAutoSync } from '../knowledge/auto-sync';
 import { getSkillSyncIntervalMinutes, SkillLibraries } from '../knowledge/libraries';
 import { syncKnowledge } from '../knowledge/sync';
@@ -591,6 +593,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           activeRuns,
           recalled,
           ...(knowledge ? { knowledge } : {}),
+          ...(deps.appPaths?.profileDir ? { knowledgeSnapshotDir: join(deps.appPaths.profileDir, 'knowledge-snapshots') } : {}),
         });
       } catch (err) {
         log.fail('flush', err);
@@ -1439,6 +1442,8 @@ interface RunBatchDeps {
   mode: ChatMode;
   runs?: RunRegistry;
   knowledge?: KnowledgeStore;
+  /** Where knowledge snapshots go (see writeKnowledgeSnapshot); unset: stubs carry no file. */
+  knowledgeSnapshotDir?: string;
   botOverload?: BotOverloadGuard;
   activeRuns?: ActiveRuns;
   recalled?: RecalledMessages;
@@ -1621,10 +1626,28 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // the middle of a conversation has to take effect on the next message, not
   // the next restart.
   const knowledgeContext = knowledge
-    ? await buildKnowledgeContext({ store: knowledge, scopeId: scope }).catch((err: unknown) => {
+    ? await buildKnowledgeContext({
+        store: knowledge,
+        scopeId: scope,
+        // Claude Code already lists its own skills: don't list them twice.
+        ...nativeSkillOption(agentKind),
+      }).catch((err: unknown) => {
         log.warn('knowledge', 'build-failed', { scope, err: String(err) });
         return undefined;
       })
+    : undefined;
+  // A resumed conversation that still holds this version of the block gets a
+  // stub instead (decided once the run knows which conversation it resumes).
+  const knowledgeSnapshot =
+    knowledgeContext?.version && deps.knowledgeSnapshotDir
+      ? await writeKnowledgeSnapshot(deps.knowledgeSnapshotDir, knowledgeContext)
+      : undefined;
+  const knowledgeDedupe = knowledgeContext?.version
+    ? {
+        version: knowledgeContext.version,
+        full: promptSection('bridge_knowledge', knowledgeContext),
+        stub: promptSection('bridge_knowledge', knowledgeStub(knowledgeContext.version, knowledgeSnapshot)),
+      }
     : undefined;
 
   // Changes to the bridge and the agent itself are the owner's alone: other
@@ -1758,6 +1781,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
       : {}),
     ...(firstMsg.senderName ? { actorName: firstMsg.senderName } : {}),
+    ...(knowledgeDedupe ? { knowledge: knowledgeDedupe } : {}),
     ...(gate ? { gate } : {}),
     onBackgroundTurn: (turn) => deliverBackgroundTurn?.(turn) ?? Promise.resolve(),
     observability: {

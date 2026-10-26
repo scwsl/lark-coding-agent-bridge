@@ -1,14 +1,25 @@
+import { createHash } from 'node:crypto';
+import { basename, dirname } from 'node:path';
+import { nativeSkillDirsFor } from '../agent/native-skills';
+import type { AgentKind } from '../agent/registry';
 import type { KnowledgeStore, MemoryEntry, SkillSummary } from './store';
 
 export interface KnowledgeContext {
+  /**
+   * Hash of everything below. A resumed conversation that still holds the
+   * block of this version gets a short stub instead (see {@link knowledgeStub}).
+   */
+  version?: string;
   /** Notes that apply to every chat in this profile. */
   profileMemory?: string[];
   /** Notes recorded for this chat / topic only. */
   chatMemory?: string[];
   /** Index only — the agent reads a skill's body itself when it needs it. */
   skills?: SkillRef[];
-  /** Topic notes (课堂精练), index only: `external/…` came from other bots' libraries. */
-  notes?: Array<{ name: string; path: string }>;
+  /** Where the notes live: note `x/y` is `<notesDir>/x/y.md`. */
+  notesDir?: string;
+  /** Topic notes (课堂精练), names only: `external/…` came from other bots' libraries. */
+  notes?: string[];
   /** Set when notes were dropped to stay inside the budget. */
   truncated?: boolean;
 }
@@ -18,6 +29,11 @@ export interface BuildKnowledgeContextInput {
   scopeId: string;
   /** Character budget for the memory notes. Skills are just an index. */
   maxChars?: number;
+  /**
+   * Skill directory names the agent CLI already lists on its own (Claude
+   * Code's `~/.claude/skills`): left out of the index rather than listed twice.
+   */
+  nativeSkillDirs?: ReadonlySet<string>;
 }
 
 export interface SkillRef {
@@ -66,7 +82,9 @@ export async function buildKnowledgeContext(
   const chat = [...group, ...topic];
 
   const budgeted = applyBudget(profile, chat, input.maxChars ?? DEFAULT_MAX_CHARS);
-  const trimmedSkills = budgetSkills(skills.slice(0, MAX_SKILLS).map(toSkillRef));
+  const native = input.nativeSkillDirs;
+  const ownSkills = native?.size ? skills.filter((skill) => !native.has(basename(dirname(skill.path)))) : skills;
+  const trimmedSkills = budgetSkills(ownSkills.slice(0, MAX_SKILLS).map(toSkillRef));
   if (
     budgeted.profile.length === 0 &&
     budgeted.chat.length === 0 &&
@@ -76,13 +94,50 @@ export async function buildKnowledgeContext(
     return undefined;
   }
 
-  return {
+  const body: KnowledgeContext = {
     ...(budgeted.profile.length > 0 ? { profileMemory: budgeted.profile } : {}),
     ...(budgeted.chat.length > 0 ? { chatMemory: budgeted.chat } : {}),
     ...(trimmedSkills.length > 0 ? { skills: trimmedSkills } : {}),
-    ...(keptNotes.length > 0 ? { notes: keptNotes } : {}),
-    ...(budgeted.truncated || skills.length > trimmedSkills.length || notes.length > keptNotes.length ? { truncated: true } : {}),
+    ...notesIndex(keptNotes),
+    ...(budgeted.truncated || ownSkills.length > trimmedSkills.length || notes.length > keptNotes.length ? { truncated: true } : {}),
   };
+  return { version: knowledgeVersion(body), ...body };
+}
+
+/** `buildKnowledgeContext`'s `nativeSkillDirs` for an agent kind (none when it lists no skills). */
+export function nativeSkillOption(kind: AgentKind): { nativeSkillDirs?: ReadonlySet<string> } {
+  const dirs = nativeSkillDirsFor(kind);
+  return dirs?.size ? { nativeSkillDirs: dirs } : {};
+}
+
+/** Stable short hash of a knowledge block's content. */
+export function knowledgeVersion(body: Omit<KnowledgeContext, 'version'>): string {
+  return createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 16);
+}
+
+/**
+ * What a resumed conversation gets instead of the block when it still holds
+ * this version in full (after its last compaction): the version it should
+ * look back to, and a file with the same content in case it cannot find it.
+ */
+export function knowledgeStub(version: string, snapshot?: string): { unchangedSince: string; snapshot?: string } {
+  return { unchangedSince: version, ...(snapshot ? { snapshot } : {}) };
+}
+
+/**
+ * Notes as names under one directory instead of one absolute path each. The
+ * store always lays them out that way; should one ever not fit, every note is
+ * listed by its full path instead.
+ */
+function notesIndex(notes: Array<{ name: string; path: string }>): Pick<KnowledgeContext, 'notesDir' | 'notes'> {
+  if (notes.length === 0) return {};
+  const first = notes[0]!;
+  const suffix = `/${first.name}.md`;
+  const dir = first.path.endsWith(suffix) ? first.path.slice(0, -suffix.length) : undefined;
+  if (dir && notes.every((note) => note.path === `${dir}/${note.name}.md`)) {
+    return { notesDir: dir, notes: notes.map((note) => note.name) };
+  }
+  return { notes: notes.map((note) => note.path) };
 }
 
 function toSkillRef(skill: SkillSummary): SkillRef {

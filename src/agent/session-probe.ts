@@ -1,5 +1,5 @@
 import type { ProfileConfig } from '../config/profile-schema';
-import { probeClaudeSession } from './claude/session-probe';
+import { claudeSessionHasKnowledge, probeClaudeSession } from './claude/session-probe';
 import { effectiveCodexHome } from './codex/account';
 import { probeCodexSession } from './codex/session-probe';
 import type { AgentKind } from './registry';
@@ -33,6 +33,25 @@ const SESSION_PROBES: Record<
     return home ? probeCodexSession(home, handle) : Promise.resolve(undefined);
   },
 };
+
+const KNOWLEDGE_CHECKS: Record<AgentKind, ((handle: string, cwd: string, version: string) => boolean) | undefined> = {
+  claude: (handle, cwd, version) => claudeSessionHasKnowledge(handle, cwd, version),
+  // Codex keeps its thread elsewhere; it always gets the full block.
+  codex: undefined,
+};
+
+/**
+ * Whether the conversation `handle` still holds the full `<bridge_knowledge>`
+ * block of `version` (not compacted away since). False when the agent cannot
+ * tell. Never throws.
+ */
+export function sessionHasKnowledge(profileConfig: ProbeProfile, handle: string, cwd: string, version: string): boolean {
+  try {
+    return KNOWLEDGE_CHECKS[profileConfig.agentKind]?.(handle, cwd, version) ?? false;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Probe the conversation `handle` (a Claude session id or a Codex thread id,
