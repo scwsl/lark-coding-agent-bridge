@@ -44,7 +44,12 @@ export interface SkillRef {
   source?: string;
 }
 
-const DEFAULT_MAX_CHARS = 6000;
+/**
+ * Memory budget. Notes past it are dropped oldest first — the oldest are often
+ * the standing rules — so it sits above what the profile actually keeps; the
+ * block now rides once per conversation, not on every message.
+ */
+const DEFAULT_MAX_CHARS = 10_000;
 const MAX_SKILLS = 80;
 /**
  * The index rides along on every message, and shared libraries can bring dozens
