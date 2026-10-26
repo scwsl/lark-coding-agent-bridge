@@ -862,10 +862,15 @@ export function accountsTable(rows: AccountRow[]): string {
   return out.join('\n');
 }
 
-/** The account a switch without a name goes to: the best-scoring ready one other than the current. */
+/**
+ * The account a switch without a name goes to: the best-scoring ready one
+ * other than the main account. Not "other than the one new runs would use":
+ * once the main account is past a line, that one is already the best ready
+ * account — excluding it handed the switch to the second best.
+ */
 export function bestSwitchTarget(rows: AccountRow[]): AccountRow | undefined {
   return rows
-    .filter((row) => !row.next && row.ready)
+    .filter((row) => row.index !== 0 && row.ready)
     .sort((a, b) => b.score - a.score || a.index - b.index)[0];
 }
 

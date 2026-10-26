@@ -259,6 +259,18 @@ describe('account table and switching (/accounts)', () => {
     expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['d', 'default', 'b', 'c']);
   });
 
+  it('switches to the best-scoring account when the main one is already past its line', async () => {
+    const { pool } = await poolWith(['b', 'c']);
+    // The main account is past its 5-hour line, so new runs already go to b
+    // (the best score); a switch must pick b, not the runner-up c.
+    pool.observe('default', limit({ windows: [{ kind: 'five_hour', usedPercent: 99, resetsAt: NOW + 4 * HOUR }] }));
+    pool.observe('b', limit({ windows: [{ kind: 'seven_day', usedPercent: 11, resetsAt: NOW + 6 * DAY }] }));
+    pool.observe('c', limit({ windows: [{ kind: 'seven_day', usedPercent: 26, resetsAt: NOW + 4 * DAY }] }));
+    const rows = accountRows(pool, undefined, NOW);
+    expect(rows.find((r) => r.next)?.id).toBe('b');
+    expect(bestSwitchTarget(rows)?.id).toBe('b');
+  });
+
   it('a switch by name raises the lines to 98% until each window resets, and they drop once runs move on', async () => {
     const { pool, paths } = await poolInOrder(ROSTER, { five_hour: 80, seven_day: 90 });
     pool.observe('backup2', fiveHour(85));

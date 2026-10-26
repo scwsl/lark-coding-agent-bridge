@@ -105,7 +105,9 @@ export async function switchAgentAccount(
   const label = await claudeAccountName();
   const rows = accountRows(pool, label);
   if (rows.length < 2) return '只有一个账户，没有可切换的。添加备用账户见 `lark-channel-bridge claude-account add`。';
-  const current = rows.find((row) => row.next);
+  // The main account: what a switch moves away from (new runs may already be
+  // on another one if it is past a line).
+  const current = rows.find((row) => row.index === 0);
   let target: AccountRow | undefined;
   let boost: ClaudeAccountEntry['boost'];
   if (query?.trim()) {
