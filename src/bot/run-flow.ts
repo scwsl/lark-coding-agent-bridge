@@ -215,6 +215,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      // Adapters without subagents (Codex) ignore it.
+      ...(input.profileConfig.preferences.subagentModel ? { subagentModel: input.profileConfig.preferences.subagentModel } : {}),
       actor: { id: input.scope.actorId, ...(input.actorName ? { name: input.actorName } : {}) },
       ...(input.scope.chatId ? { chatId: input.scope.chatId } : {}),
       ...(input.gate ? { gate: input.gate } : {}),

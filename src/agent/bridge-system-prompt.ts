@@ -42,6 +42,12 @@ export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 - 交给子任务（子 agent）的工作，必须先把结果写进台账或文件、提交之后，再返回汇报。
 - 中断后接着做时，先读台账和 \`git log\`，从「下一步」继续，不重做已完成的部分。
 
+## 子 agent 选模型
+
+- 只读搜索、找文件、摸代码结构这类子 agent（Explore 等），调用时传 \`model: "haiku"\`。
+- 其余子 agent 不传 \`model\`，用 bridge 配置的默认模型（可能比主会话便宜）。
+- 需要深度推理的子任务（复杂代码审查、架构判断、根因分析）才显式传 \`model: "opus"\`。
+
 ## 改动 bridge 与你自己：仅限 bot 主人
 
 - \`bridge_context.senderIsOwner\` 为 true，表示这一轮的消息全部来自 bot 主人本人。

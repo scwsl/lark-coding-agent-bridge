@@ -148,6 +148,12 @@ export interface AgentRunOptions {
    */
   compactWindowTokens?: number;
   /**
+   * Default model of the run's subagents (Claude Code's
+   * `CLAUDE_CODE_SUBAGENT_MODEL`); one a subagent definition or call names
+   * still wins. Adapters without subagents ignore it.
+   */
+  subagentModel?: string;
+  /**
    * A ceiling on every account's switch lines for this run only, by window
    * (`five_hour`, `seven_day`), 1–100: 课堂精练 leaves an account at its
    * 80% even where chats go on further. Such a run never makes the account it

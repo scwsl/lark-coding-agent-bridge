@@ -143,6 +143,14 @@ export interface AppPreferences {
    */
   effort?: EffortLevel;
   /**
+   * Model Claude Code's subagents default to (`CLAUDE_CODE_SUBAGENT_MODEL`),
+   * e.g. `sonnet`: a subagent whose definition or call names a model keeps
+   * that one, so the agent can still ask for `opus` where it matters. Chats,
+   * meetings and scheduled jobs only; 课堂精练 keeps the session's model.
+   * Config-file only. Default: unset (subagents run on the session's model).
+   */
+  subagentModel?: string;
+  /**
    * Per-chat override of {@link effort}, keyed by chat_id (a group's topics
    * follow the group). Chats not listed use `effort`. Hand-edited only;
    * `/config` still edits the profile-wide value.

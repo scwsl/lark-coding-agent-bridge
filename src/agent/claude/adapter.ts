@@ -168,6 +168,8 @@ export class ClaudeAdapter implements AgentAdapter {
         // 会话智能压缩: Claude Code auto-compacts against this window instead
         // of the model's full (up to 1M-token) one.
         ...(opts.compactWindowTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(opts.compactWindowTokens) } : {}),
+        // Subagents default to this model; one their definition or call names wins.
+        ...(opts.subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: opts.subagentModel } : {}),
         // Another subscription account: its token outranks the CLI's own login.
         ...(account?.env ?? {}),
       }),

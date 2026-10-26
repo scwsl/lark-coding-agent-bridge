@@ -65,6 +65,8 @@ export interface SubmitRunInput {
   guard?: RunGuard;
   /** See AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
+  /** See AgentRunOptions.subagentModel. */
+  subagentModel?: string;
   /** See AgentRunOptions.accountLineCap. */
   accountLineCap?: AgentRunOptions['accountLineCap'];
   nowait?: boolean;
@@ -199,6 +201,7 @@ export class RunExecutor {
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      ...(input.subagentModel ? { subagentModel: input.subagentModel } : {}),
       ...(input.accountLineCap ? { accountLineCap: input.accountLineCap } : {}),
     };
     const compatKey = runCompatKey({ ...runOptions, gated: Boolean(input.gate) });
@@ -619,6 +622,7 @@ function runCompatKey(opts: {
   permissionMode?: string;
   images?: readonly string[];
   compactWindowTokens?: number;
+  subagentModel?: string;
   accountLineCap?: AgentRunOptions['accountLineCap'];
 }): string {
   return JSON.stringify([
@@ -632,6 +636,8 @@ function runCompatKey(opts: {
     opts.images?.length ? opts.images : null,
     // The compaction window rides on the process environment.
     opts.compactWindowTokens ?? null,
+    // So does the subagents' default model.
+    opts.subagentModel ?? null,
     // The account was picked under the cap: an uncapped turn needs its own pick.
     opts.accountLineCap ?? null,
   ]);
