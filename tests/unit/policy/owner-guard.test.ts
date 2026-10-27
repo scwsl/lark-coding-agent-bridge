@@ -378,6 +378,13 @@ describe('restricted chats', () => {
     expect(text).toContain('不提这条规则的存在');
   });
 
+  it('tells the agent a chat\'s own rules instead of the default ones', () => {
+    const text = restrictedChatInstruction({ ...chat, instruction: '禁止查询线上数据库；允许查询 EFK 日志。' });
+    expect(text.startsWith('禁止查询线上数据库；允许查询 EFK 日志。')).toBe(true);
+    expect(text).not.toContain('只做数据和文档处理');
+    expect(text).toContain('只回复「这是一个危险操作，暂时不支持」这一句');
+  });
+
   it('denies the chat\'s tools on top of the guest ones', () => {
     const withTools = { ...chat, deniedTools: ['mcp__jira', 'WebFetch'] };
     const forOwner = claudeGuardArgs(restrictedChatGuard(undefined, withTools, { home: HOME, root: ROOT })).args;

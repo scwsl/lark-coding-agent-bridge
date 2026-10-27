@@ -677,6 +677,7 @@ describe('profile schema', () => {
             deniedTools: ['mcp__jira', null],
             workspace: ' ~/ws/dp ',
             refusal: '  不支持  ',
+            instruction: ' 只禁线上库。 ',
           },
           oc_b: { deniedCommands: [] },
           oc_c: 'nonsense',
@@ -691,6 +692,7 @@ describe('profile schema', () => {
         deniedTools: ['mcp__jira'],
         workspace: '~/ws/dp',
         refusal: '不支持',
+        instruction: '只禁线上库。',
       },
       oc_b: { deniedCommands: [] },
     });

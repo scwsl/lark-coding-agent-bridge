@@ -81,8 +81,9 @@ export interface ProfileAccess {
   guestToolGrants?: Record<string, string[]>;
   /**
    * Chats where every run — the owner's included — is fenced harder, keyed by
-   * chat_id: no cluster, cloud or database access and no environment configs
-   * or data, only everyday work and skills. A refused step gets one fixed
+   * chat_id. By default that means no cluster, cloud or database access and no
+   * environment configs or data, only everyday work and skills; a chat's own
+   * `instruction` can scope it differently. A refused step gets one fixed
    * answer and the rules behind it stay unexplained. Omitted when empty.
    */
   restrictedChats?: Record<string, RestrictedChat>;
@@ -106,6 +107,11 @@ export interface RestrictedChat {
   workspace?: string;
   /** The only answer given when a step is refused. */
   refusal?: string;
+  /**
+   * What the agent is told the chat may and may not do, replacing the default
+   * data-processing-only rules; the fixed answer is appended to it.
+   */
+  instruction?: string;
 }
 
 export interface SandboxConfig {
@@ -561,12 +567,14 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
     const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
     const workspace = text(raw.workspace);
     const refusal = text(raw.refusal);
+    const instruction = text(raw.instruction);
     out[chatId] = {
       deniedCommands: stringArray(raw.deniedCommands),
       ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
       ...(deniedTools.length > 0 ? { deniedTools } : {}),
       ...(workspace ? { workspace } : {}),
       ...(refusal ? { refusal } : {}),
+      ...(instruction ? { instruction } : {}),
     };
   }
   return out;
