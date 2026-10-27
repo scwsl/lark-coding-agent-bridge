@@ -8,13 +8,14 @@ import { findRollout } from './thread-usage';
 interface RolloutRecord {
   timestamp?: unknown;
   type?: unknown;
-  payload?: { type?: unknown; role?: unknown; phase?: unknown; content?: unknown };
+  payload?: { type?: unknown; role?: unknown; phase?: unknown; content?: unknown; arguments?: unknown; input?: unknown; action?: unknown };
 }
 
 /**
  * Chat requests and final answers of a Codex thread, in order, from its rollout
  * (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<threadId>.jsonl`). Progress
- * commentary, tool calls and reasoning are skipped.
+ * commentary and reasoning are skipped; of tool calls only the Markdown paths
+ * they name are kept.
  */
 export async function readCodexTranscript(codexHome: string, threadId: string): Promise<AgentTranscript | undefined> {
   if (!/^[A-Za-z0-9-]+$/.test(threadId)) return undefined;
@@ -30,7 +31,13 @@ export async function readCodexTranscript(codexHome: string, threadId: string): 
     } catch {
       continue;
     }
-    if (rec.type !== 'response_item' || rec.payload?.type !== 'message') continue;
+    if (rec.type !== 'response_item') continue;
+    const kind = rec.payload?.type;
+    if (kind === 'function_call' || kind === 'custom_tool_call' || kind === 'local_shell_call') {
+      builder.tool(rec.payload?.arguments ?? rec.payload?.input ?? rec.payload?.action);
+      continue;
+    }
+    if (kind !== 'message' || !rec.payload) continue;
     const at = parseRecordTime(rec.timestamp);
     builder.seen(at);
     if (rec.payload.role === 'user') {

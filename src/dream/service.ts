@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
 import {
@@ -42,6 +42,7 @@ import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
+import { RecallStore } from './recall';
 import {
   hasArgumentHint,
   parseDreamOutput,
@@ -155,6 +156,8 @@ export interface DreamServiceDeps {
    * busy all day (topics, groups, scheduled jobs) otherwise never finishes.
    */
   isCapacityTight?: () => boolean;
+  /** 召回统计 of notes and skills. Default: `dream-recall.json` next to {@link stateFile}. */
+  recallFile?: string;
   /** Host-wide directory of the per-repository locks every profile shares. Default: inside {@link workDir}. */
   lockDir?: string;
   /** The profile's state directory (where a profile-local CODEX_HOME lives). */
@@ -288,6 +291,7 @@ export const YIELD_REASON = '让位给用户任务';
 
 export class DreamService {
   private readonly state: DreamStateStore;
+  private readonly recall: RecallStore;
   private readonly now: () => number;
   private current: CurrentRun | undefined;
   /** A start is between its first check and owning {@link current}. */
@@ -304,11 +308,13 @@ export class DreamService {
 
   constructor(private readonly deps: DreamServiceDeps) {
     this.state = new DreamStateStore(deps.stateFile);
+    this.recall = new RecallStore(deps.recallFile ?? join(dirname(deps.stateFile), 'dream-recall.json'));
     this.now = deps.now ?? Date.now;
   }
 
   async init(): Promise<void> {
     await this.state.load(this.now());
+    await this.recall.load();
     this.unsubscribe = this.deps.sessionCatalog?.onUpsert((entry) => {
       if (this.enabled()) this.noteEntry(entry, entry.updatedAt);
     });
@@ -359,6 +365,7 @@ export class DreamService {
     await this.draining?.catch(() => undefined);
     await this.current?.done.catch(() => undefined);
     await this.state.flush();
+    await this.recall.flush();
   }
 
   enabled(): boolean {
@@ -886,6 +893,17 @@ export class DreamService {
       read: this.reader(),
     });
     for (const record of selection.idle) this.state.advance(record.key, record.consumed, record.consumedHash, this.now());
+    // 浅睡·召回统计: which notes and skills every conversation read since the last scan.
+    const recall = await this.recall.scan({
+      records: this.state.sessions(),
+      read: this.reader(),
+      knowledgeDir: this.deps.knowledge.dir,
+      now: this.now(),
+      timezone: settings.auto.timezone,
+      idleMs: settings.minIdleMinutes * 60_000,
+      signal,
+    });
+    if (signal.aborted) return stopped('游标未移动');
     const deferred = [...selection.deferred];
     const sessionsTotal = selection.scopes.reduce((sum, scope) => sum + scope.sessions.length, 0);
     this.state.updateRun(run.id, {
@@ -896,6 +914,7 @@ export class DreamService {
         0,
       ),
       deferred,
+      recall,
     });
     const [profileMemory, skills] = await Promise.all([
       this.deps.knowledge.listMemories({ kind: 'profile' }),

@@ -16,6 +16,12 @@ export interface TranscriptExchange {
   mixedSenders: boolean;
   user: string;
   assistant: string;
+  /**
+   * Markdown files the agent's tool calls named while answering (absolute or
+   * `~/` paths, at most {@link MAX_EXCHANGE_READS}) — which notes and skills
+   * it opened, for 课堂精练's recall counts. Absent when none.
+   */
+  reads?: string[];
 }
 
 export interface AgentTranscript {
@@ -26,6 +32,13 @@ export interface AgentTranscript {
 
 /** Longest text kept per side of an exchange; the rest is cut. */
 export const TRANSCRIPT_TEXT_LIMIT = 20_000;
+
+/** Distinct paths kept per exchange in {@link TranscriptExchange.reads}. */
+export const MAX_EXCHANGE_READS = 100;
+/** Tool input looked at for paths; a giant input (a file being written) is cut. */
+const TOOL_INPUT_LIMIT = 20_000;
+/** An absolute or home-relative path of a Markdown file. */
+const MARKDOWN_PATH_RE = /(?:~\/|\/)[\w@+~.\/-]*?\.md(?![\w.-])/g;
 
 /** Build an exchange list incrementally while reading a transcript in order. */
 export class TranscriptBuilder {
@@ -60,6 +73,21 @@ export class TranscriptBuilder {
     current.assistant = clip(current.assistant ? `${current.assistant}\n\n${clean}` : clean);
   }
 
+  /** A tool call made while answering the latest request; ignored before the first one. */
+  tool(input: unknown): void {
+    const current = this.exchanges.at(-1);
+    if (!current || input === undefined || input === null) return;
+    const text = (typeof input === 'string' ? input : JSON.stringify(input) ?? '').slice(0, TOOL_INPUT_LIMIT);
+    const found = markdownPaths(text);
+    if (found.length === 0) return;
+    const reads = new Set(current.reads ?? []);
+    for (const path of found) {
+      if (reads.size >= MAX_EXCHANGE_READS) break;
+      reads.add(path);
+    }
+    current.reads = [...reads];
+  }
+
   seen(at: number | undefined): void {
     if (at !== undefined && Number.isFinite(at)) this.lastActivityAt = Math.max(this.lastActivityAt ?? 0, at);
   }
@@ -70,6 +98,11 @@ export class TranscriptBuilder {
       ...(this.lastActivityAt !== undefined ? { lastActivityAt: this.lastActivityAt } : {}),
     };
   }
+}
+
+/** Markdown file paths named in a tool call's input, in order, without repeats. */
+export function markdownPaths(text: string): string[] {
+  return [...new Set(text.match(MARKDOWN_PATH_RE) ?? [])];
 }
 
 function clip(text: string): string {

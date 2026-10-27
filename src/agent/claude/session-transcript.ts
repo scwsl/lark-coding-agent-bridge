@@ -14,7 +14,8 @@ interface TranscriptRecord {
 /**
  * Chat requests and final answers of a Claude Code session, in order, from its
  * transcript (`~/.claude/projects/<cwd>/<sessionId>.jsonl`). Sub-agent
- * (sidechain) records, tool results and thinking are skipped.
+ * (sidechain) records, tool results and thinking are skipped; of tool calls
+ * only the Markdown paths they name are kept ({@link TranscriptBuilder.tool}).
  */
 export async function readClaudeTranscript(
   sessionId: string,
@@ -42,6 +43,7 @@ export async function readClaudeTranscript(
       if (request) builder.request({ ...request, ...(at !== undefined ? { at } : {}) });
     } else if (rec.type === 'assistant') {
       builder.answer(blocksText(rec.message?.content));
+      for (const input of toolInputs(rec.message?.content)) builder.tool(input);
     }
   }
   return builder.result();
@@ -59,4 +61,12 @@ function blocksText(content: unknown): string {
     )
     .filter(Boolean)
     .join('\n');
+}
+
+/** Inputs of the `tool_use` blocks of an assistant message. */
+function toolInputs(content: unknown): unknown[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => block && typeof block === 'object' && (block as { type?: unknown }).type === 'tool_use')
+    .map((block) => (block as { input?: unknown }).input);
 }

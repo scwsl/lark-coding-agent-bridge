@@ -102,6 +102,8 @@ export interface DreamRun {
   round?: number;
   /** An automatic run gave way to a user task before its checkpoint; what was done is kept, the rest deferred. */
   yielded?: boolean;
+  /** 浅睡·召回统计 of this run: what the conversations read since the last scan. */
+  recall?: { sessions: number; exchanges: number; reads: number };
 }
 
 interface DreamStateData {
