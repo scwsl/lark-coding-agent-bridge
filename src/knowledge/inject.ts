@@ -61,6 +61,12 @@ const SKILL_INDEX_MAX_CHARS = 16_000;
 /** 课前学习 writes what it learned from other bots under `notes/external/`; every chat may read it. */
 const EXTERNAL_NOTES_SCOPE = 'external';
 const MAX_NOTES = 60;
+/**
+ * Index slots kept for `external/` notes when this chat's own notes would
+ * fill the index on their own: own notes come first (they are about this
+ * chat), but other bots' notes are among the most read and keep a share.
+ */
+const MIN_EXTERNAL_NOTES = 20;
 
 /**
  * Assemble what the agent should know before answering, or `undefined` when
@@ -76,14 +82,16 @@ export async function buildKnowledgeContext(
   // A topic (`oc_xxx:omt_yyy`) also sees its group's notes (`oc_xxx`), so a
   // topic group can keep one shared memory instead of one per topic.
   const groupId = input.scopeId.includes(':') ? input.scopeId.split(':')[0] : undefined;
-  const [profile, group, topic, skills, notes] = await Promise.all([
+  const [profile, group, topic, skills, ownNotes, externalNotes] = await Promise.all([
     input.store.listMemories({ kind: 'profile' }),
     groupId ? input.store.listMemories({ kind: 'chat', scopeId: groupId }) : Promise.resolve([]),
     input.store.listMemories({ kind: 'chat', scopeId: input.scopeId }),
     input.store.listSkills(),
-    input.store.listNotes([EXTERNAL_NOTES_SCOPE, ...(groupId ? [groupId] : []), input.scopeId]).catch(() => []),
+    input.store.listNotes([input.scopeId, ...(groupId ? [groupId] : [])]).catch(() => []),
+    input.store.listNotes([EXTERNAL_NOTES_SCOPE]).catch(() => []),
   ]);
-  const keptNotes = notes.slice(0, MAX_NOTES);
+  const notes = [...ownNotes, ...externalNotes];
+  const keptNotes = pickNotes(ownNotes, externalNotes);
   const chat = [...group, ...topic];
 
   const budgeted = applyBudget(profile, chat, input.maxChars ?? DEFAULT_MAX_CHARS);
@@ -127,6 +135,18 @@ export function knowledgeVersion(body: Omit<KnowledgeContext, 'version'>): strin
  */
 export function knowledgeStub(version: string, snapshot?: string): { unchangedSince: string; snapshot?: string } {
   return { unchangedSince: version, ...(snapshot ? { snapshot } : {}) };
+}
+
+/**
+ * The notes that make the index: this chat's own first, then other bots'
+ * (`external/`), {@link MAX_NOTES} in all. Own notes leave at least
+ * {@link MIN_EXTERNAL_NOTES} slots to external ones, so neither side can push
+ * the other out of the index entirely.
+ */
+export function pickNotes<T>(own: readonly T[], external: readonly T[]): T[] {
+  const reserve = Math.min(external.length, MIN_EXTERNAL_NOTES);
+  const keptOwn = own.slice(0, MAX_NOTES - reserve);
+  return [...keptOwn, ...external.slice(0, MAX_NOTES - keptOwn.length)];
 }
 
 /**
