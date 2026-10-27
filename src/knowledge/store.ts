@@ -83,6 +83,24 @@ export class KnowledgeStore {
     return out;
   }
 
+  /**
+   * Note directories of a chat's topics (`notes/<chat>_omt_…`), sorted. A
+   * topic of a chat shares the chat's members, so what one topic learned is
+   * fair to show in another.
+   */
+  async noteTopicScopes(chatId: string): Promise<string[]> {
+    const prefix = `${sanitizeScopeId(chatId)}_omt_`;
+    try {
+      const entries = await readdir(join(this.dir, 'notes'), { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
   memoryFile(scope: MemoryScope): string {
     if (scope.kind === 'profile') return join(this.dir, 'MEMORY.md');
     return join(this.dir, 'chats', `${sanitizeScopeId(scope.scopeId)}.md`);

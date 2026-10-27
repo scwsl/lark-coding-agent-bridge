@@ -20,8 +20,12 @@ function fakeStore(
         { name: 'occam:coffee', path: '/lib/occam-skills/skills/occam-coffee/SKILL.md' },
         { name: 'antelope:tcpdump', path: '/lib/occam-skills/skills/antelope-tcpdump/SKILL.md' },
       ]).map((s) => ({ ...s, description: `${s.name} 的说明` })),
+    noteTopicScopes: async (chatId: string) =>
+      Object.keys(over.notes ?? {})
+        .filter((scope) => scope.startsWith(`${chatId}_omt_`))
+        .sort(),
     listNotes: async (scopes: string[]) =>
-      scopes.map((scope) => scope.replace(/[^\w.-]+/g, '_')).flatMap((scope) =>
+      [...new Set(scopes.map((scope) => scope.replace(/[^\w.-]+/g, '_')))].flatMap((scope) =>
         (over.notes?.[scope] ?? (scope === 'external' ? ['feishu-card', 'au-timezone'] : [])).map((topic) => ({
           name: `${scope}/${topic}`,
           path: `${NOTES}/${scope}/${topic}.md`,
@@ -55,6 +59,21 @@ describe('buildKnowledgeContext', () => {
     expect(ctx?.notes?.slice(0, 5)).toEqual(['oc_1_omt_2/topic-00', 'oc_1_omt_2/topic-01', 'oc_1/group-00', 'oc_1/group-01', 'oc_1/group-02']);
     expect(ctx?.notes).toHaveLength(60);
     expect(ctx?.truncated).toBe(true);
+  });
+
+  it("lists the chat's other topics' notes after this topic's and the chat's own", async () => {
+    const store = fakeStore({ notes: { oc_1: ['group'], oc_1_omt_1: ['first'], oc_1_omt_2: ['mine'], oc_1_omt_3: ['third'], oc_9_omt_1: ['other-chat'] } });
+    const topic = await buildKnowledgeContext({ store, scopeId: 'oc_1:omt_2' });
+    expect(topic?.notes).toEqual([
+      'oc_1_omt_2/mine',
+      'oc_1/group',
+      'oc_1_omt_1/first',
+      'oc_1_omt_3/third',
+      'external/feishu-card',
+      'external/au-timezone',
+    ]);
+    const chat = await buildKnowledgeContext({ store, scopeId: 'oc_1' });
+    expect(chat?.notes?.slice(0, 4)).toEqual(['oc_1/group', 'oc_1_omt_1/first', 'oc_1_omt_2/mine', 'oc_1_omt_3/third']);
   });
 
   it('keeps a share of the index for external notes however many own notes there are', () => {

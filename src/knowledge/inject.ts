@@ -79,15 +79,17 @@ const MIN_EXTERNAL_NOTES = 20;
 export async function buildKnowledgeContext(
   input: BuildKnowledgeContextInput,
 ): Promise<KnowledgeContext | undefined> {
-  // A topic (`oc_xxx:omt_yyy`) also sees its group's notes (`oc_xxx`), so a
+  // A topic (`oc_xxx:omt_yyy`) also sees its group's memory (`oc_xxx`), so a
   // topic group can keep one shared memory instead of one per topic.
   const groupId = input.scopeId.includes(':') ? input.scopeId.split(':')[0] : undefined;
+  // Notes also come from the chat's other topics, after this topic's and the chat's own.
+  const siblings = await input.store.noteTopicScopes(groupId ?? input.scopeId).catch(() => []);
   const [profile, group, topic, skills, ownNotes, externalNotes] = await Promise.all([
     input.store.listMemories({ kind: 'profile' }),
     groupId ? input.store.listMemories({ kind: 'chat', scopeId: groupId }) : Promise.resolve([]),
     input.store.listMemories({ kind: 'chat', scopeId: input.scopeId }),
     input.store.listSkills(),
-    input.store.listNotes([input.scopeId, ...(groupId ? [groupId] : [])]).catch(() => []),
+    input.store.listNotes([input.scopeId, ...(groupId ? [groupId] : []), ...siblings]).catch(() => []),
     input.store.listNotes([EXTERNAL_NOTES_SCOPE]).catch(() => []),
   ]);
   const notes = [...ownNotes, ...externalNotes];

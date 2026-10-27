@@ -226,3 +226,14 @@ describe('remote url validation', () => {
     }
   });
 });
+
+describe('noteTopicScopes', () => {
+  it("lists only the note directories of the chat's topics", async () => {
+    for (const scope of ['oc_1', 'oc_1_omt_b', 'oc_1_omt_a', 'oc_12_omt_x', 'external']) {
+      await mkdir(join(dir, 'knowledge', 'notes', scope), { recursive: true });
+    }
+    await writeFile(join(dir, 'knowledge', 'notes', 'oc_1_omt_file.md'), 'x');
+    expect(await store.noteTopicScopes('oc_1')).toEqual(['oc_1_omt_a', 'oc_1_omt_b']);
+    expect(await new KnowledgeStore(join(dir, 'missing')).noteTopicScopes('oc_1')).toEqual([]);
+  });
+});
