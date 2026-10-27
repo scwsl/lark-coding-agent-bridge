@@ -38,6 +38,17 @@ import {
   type ExternalCursor,
   type ExternalMaterial,
 } from './external';
+import {
+  applyMemoryPlan,
+  buildMemoryPrompt,
+  memoryPlanSummary,
+  memoryPrBody,
+  memoryPrTitle,
+  memoryWorthConsolidating,
+  parseMemoryOps,
+  readMemoryFiles,
+  readPendingFlags,
+} from './consolidate';
 import { diaryEntry, diaryWorthWriting, writeDiary, type DiaryInput } from './diary';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
@@ -306,6 +317,10 @@ const DIARY_TOP_DAYS = 7;
 const AUTO_ACTOR: DreamActor = { id: 'dream-auto', name: '自动整理' };
 /** 深睡整理's direct target in the knowledge repository: diary, notes consolidation, archive. */
 const DEEP_REPO = 'knowledge:deep';
+/** 深睡·记忆整合: always a Draft PR of its own. */
+const MEMORY_REPO = 'knowledge:memory';
+/** Between two 记忆整合 PRs, so a rejected one is not proposed again the next night. */
+const MEMORY_COOLDOWN_MS = 3 * 86_400_000;
 /** Deferral reason of the conversations an automatic run left to a user task. */
 export const YIELD_REASON = '让位给用户任务';
 
@@ -1148,6 +1163,7 @@ export class DreamService {
     const deepNote = await this.deepSleep(
       run.id,
       settings,
+      { actor, deadline, signal, ...(current.yielding ? { yielding: true } : {}) },
       {
         batchId: run.id,
         at: now,
@@ -1173,7 +1189,6 @@ export class DreamService {
         },
         rejected,
       },
-      signal,
     );
     await this.pruneCheckouts();
     const targets = this.state.run(run.id)?.targets ?? [];
@@ -1701,12 +1716,28 @@ export class DreamService {
    * moves a cursor; a failure is reported and tried again another night.
    * Returns a line for the run's summary, if any.
    */
-  private async deepSleep(id: string, settings: DreamSettings, diary: DiaryInput, signal: AbortSignal): Promise<string | undefined> {
+  private async deepSleep(
+    id: string,
+    settings: DreamSettings,
+    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal; yielding?: boolean },
+    diary: DiaryInput,
+  ): Promise<string | undefined> {
+    const { signal } = ctx;
+    const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
+    const notes: string[] = [];
+    // Agent turns only when the run has time left and nobody is waiting for a slot.
+    const awake = settings.deepSleep && url && !signal.aborted && !ctx.yielding;
+    if (awake) {
+      const consolidation = await this.consolidateMemory(id, url, ctx);
+      if (consolidation) {
+        diary.deep.consolidation = consolidation;
+        if (consolidation.error) notes.push(`记忆整合没做成：${consolidation.error}`);
+        else if (consolidation.prUrl) notes.push(`记忆整合 Draft PR：${consolidation.prUrl}`);
+      }
+    }
     this.state.updateRun(id, { diary: diaryEntry(diary) });
     // A Draft PR for nothing but the diary is noise: with publish: pr the diary stays in the run record.
-    if (signal.aborted || settings.publish !== 'push' || !diaryWorthWriting(diary)) return undefined;
-    const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
-    if (!url) return undefined;
+    if (signal.aborted || settings.publish !== 'push' || !diaryWorthWriting(diary) || !url) return notes.join('；') || undefined;
     let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（梦境日记）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
     const dir = join(this.deps.workDir, 'batches', id, 'deep');
     const prepared = await prepareCheckout({ repo: DEEP_REPO, label: target.label, url }, dir, target.branch, { direct: true });
@@ -1721,9 +1752,69 @@ export class DreamService {
       return `梦境日记没写成：${written.error}`;
     }
     const committed = await this.commitTarget(id, target, [written.file], '梦境日记');
-    if (committed.phase !== 'committed') return `梦境日记没写成：${committed.error ?? '提交失败'}`;
-    const pushed = await this.pushAndOpen(id, committed);
-    return pushed.error ? `梦境日记没推成：${pushed.error}` : undefined;
+    if (committed.phase !== 'committed') notes.push(`梦境日记没写成：${committed.error ?? '提交失败'}`);
+    else {
+      const pushed = await this.pushAndOpen(id, committed);
+      if (pushed.error) notes.push(`梦境日记没推成：${pushed.error}`);
+    }
+    return notes.join('；') || undefined;
+  }
+
+  /**
+   * 深睡·记忆整合: one turn over the pending flags (and a global memory near
+   * its budget), checked operation by operation, as a Draft PR of its own.
+   * One at a time: while the last one waits for review, or within a few days
+   * of it, nothing new is proposed. Undefined when there was nothing to do.
+   */
+  private async consolidateMemory(
+    id: string,
+    url: string,
+    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal },
+  ): Promise<NonNullable<DiaryInput['deep']['consolidation']> | undefined> {
+    const none = { updated: 0, merged: 0, deleted: 0, dismissed: 0 };
+    const earlier = this.state
+      .runs()
+      .filter((run) => run.id !== id)
+      .flatMap((run) => run.targets.filter((target) => target.repo === MEMORY_REPO).map((target) => ({ run, target })));
+    for (const { target } of earlier) {
+      if (target.phase === 'committed' || target.phase === 'pushed') return { ...none, skipped: '上一份记忆整合还没开成 PR' };
+      if (target.phase === 'pr-created' && target.prUrl) {
+        const state = await pullRequestState(this.deps.workDir, target.prUrl);
+        if (state !== '已合并' && state !== '已关闭') return { ...none, skipped: `上一份记忆整合 PR 还没审完（${target.prUrl}）` };
+      }
+    }
+    if (earlier.some(({ run }) => this.now() - run.startedAt < MEMORY_COOLDOWN_MS)) return undefined;
+
+    const label = '知识库（记忆整合）';
+    let target: DreamTarget = { repo: MEMORY_REPO, label, branch: `${dreamBranch(id)}-memory`, phase: 'failed', items: 0 };
+    const dir = join(this.deps.workDir, 'batches', id, 'memory');
+    const prepared = await prepareCheckout({ repo: MEMORY_REPO, label, url }, dir, target.branch);
+    if ('error' in prepared) return { ...none, error: prepared.error };
+    const flags = await readPendingFlags(dir);
+    const files = await readMemoryFiles(dir, flags);
+    if (!memoryWorthConsolidating(flags, files)) return undefined;
+    const remaining = ctx.deadline - this.now();
+    if (remaining <= 0) return { ...none, skipped: '超出本轮运行时间' };
+    const answer = await this.runAgent(`dream:${id}:memory`, buildMemoryPrompt({ flags, files }), ctx.actor, remaining, ctx.signal);
+    if ('error' in answer) return { ...none, error: answer.error };
+    const plan = parseMemoryOps(answer.text, { flags, files });
+    if ('error' in plan) return { ...none, error: `模型输出不合格：${plan.error}` };
+    const summary = memoryPlanSummary(plan);
+    if (plan.ops.length === 0) return { ...summary, skipped: plan.rejected.length > 0 ? `提出的 ${plan.rejected.length} 个操作都没通过校验` : '没有需要改的' };
+    const changed = await applyMemoryPlan(dir, plan, { flags, files });
+    target = {
+      ...target,
+      base: prepared.base,
+      checkoutDir: dir,
+      items: plan.ops.length,
+      title: memoryPrTitle(id, plan),
+      body: memoryPrBody({ batchId: id, profile: this.deps.profile, plan, files, flags }),
+    };
+    const committed = await this.commitTarget(id, target, changed, `记忆整合：改写 ${summary.updated}、合并 ${summary.merged}、删除 ${summary.deleted}、关闭标记 ${summary.dismissed}`);
+    if (committed.phase !== 'committed') return { ...summary, error: committed.error ?? '提交失败' };
+    const opened = await this.pushAndOpen(id, committed);
+    if (!opened.prUrl) return { ...summary, error: opened.error ?? '没开成 PR，下一轮重试' };
+    return { ...summary, prUrl: opened.prUrl };
   }
 
   private async commitTarget(id: string, target: DreamTarget, files: string[], summary: string): Promise<DreamTarget> {

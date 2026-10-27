@@ -294,6 +294,59 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect(await showFile(h.knowledgeRemote, `dream/${run.id}`, 'notes/oc_team/deploy.md')).toContain('上线流程耗时约 10 min');
   });
 
+  it('works off pending flags in a Draft PR of its own, one at a time', async () => {
+    const h = await harness({
+      answer: (prompt) =>
+        prompt.includes('<flags>')
+          ? JSON.stringify({
+              ops: [
+                { op: 'update', where: 'profile', id: 'aaa111', text: '提交信息和 PR 描述都不带 AI 署名', flags: ['f00001'], reason: '新说法更完整' },
+                { op: 'dismiss', flags: ['f00002'], reason: '仍然成立' },
+                { op: 'delete', where: 'profile', id: 'zzzzzz', flags: [], reason: '不存在' },
+              ],
+            })
+          : JSON.stringify({ memory: [], skills: [] }),
+    });
+    const seed = join(root, 'seed-knowledge');
+    await git(root, ['clone', '-q', h.knowledgeRemote, seed]);
+    await mkdir(join(seed, 'notes', 'oc_team'), { recursive: true });
+    await writeFile(join(seed, 'MEMORY.md'), '# 记忆（全局）\n\n- [aaa111] 提交信息不带 AI 署名\n- [bbb222] 回复用中文\n- [ccc333] 周报周五发\n- [ddd444] 用 pnpm\n');
+    await writeFile(
+      join(seed, 'notes', 'oc_team', 'dream-review.md'),
+      '# dream-review\n\n- [f00001] 冲突 `aaa111`（全局）「提交信息不带 AI 署名」 ↔ 新说法「PR 描述也不带」\n- [f00002] 疑似过时 `bbb222`（全局）「回复用中文」\n',
+    );
+    await git(seed, ['add', '-A']);
+    await git(seed, ['-c', 'user.name=s', '-c', 'user.email=s@example.com', 'commit', '-q', '-m', 'seed']);
+    await git(seed, ['push', '-q', 'origin', 'HEAD:main']);
+
+    talk(h, 'sess-1');
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    const run = h.service.runs()[0]!;
+    expect(run.status).toBe('succeeded');
+    expect(run.targets.find((t) => t.repo === 'knowledge:memory')).toMatchObject({ phase: 'pr-created', branch: `dream/${run.id}-memory` });
+    const branch = `dream/${run.id}-memory`;
+    expect(await showFile(h.knowledgeRemote, branch, 'MEMORY.md')).toContain('[aaa111] 提交信息和 PR 描述都不带 AI 署名');
+    expect(await showFile(h.knowledgeRemote, branch, 'MEMORY.md')).toContain('[bbb222] 回复用中文');
+    expect(await showFile(h.knowledgeRemote, branch, 'notes/oc_team/dream-review.md')).toBe('');
+    expect(await showFile(h.knowledgeRemote, 'main', 'MEMORY.md')).toContain('[aaa111] 提交信息不带 AI 署名');
+    const bodies = (await gh.calls()).map((c) => c.body).filter(Boolean).join('\n');
+    expect(bodies).toContain('**改写** 全局记忆 `aaa111`（处理标记 `f00001`）');
+    expect(bodies).toContain('没采纳的 1 个操作');
+    expect(run.diary).toContain('记忆整合：改写 1 条、合并 0 组、删除 0 条、关闭标记 1 条，待审 Draft PR');
+    expect(h.prompts.some((prompt) => prompt.includes('<flags>'))).toBe(true);
+
+    // The PR is still open: the next run proposes nothing new.
+    const turns = h.submits.length;
+    talk(h, 'sess-2');
+    const again = await h.service.start({ id: 'ou-admin' });
+    if ('error' in again) throw new Error(again.error);
+    await h.service.idle();
+    expect(h.submits).toHaveLength(turns + 1);
+    expect(h.service.runs()[0]!.diary).toContain('记忆整合跳过（上一份记忆整合 PR 还没审完');
+  });
+
   it('keeps an unopened PR for a retry and opens it on the next run', async () => {
     const h = await harness({ answer: () => JSON.stringify({ memory: [{ action: 'add', target: 'chat', text: '一条事实', reason: 'r', sources: ['S1#1'] }] }) });
     talk(h, 'sess-1');

@@ -415,6 +415,12 @@ export interface DreamTuning {
   /** Every skill a run writes must declare `argument-hint` in its frontmatter; own skills without one get it added. */
   requireArgumentHint?: boolean;
   /**
+   * 深睡整理 after each run: work off the pending merge / conflict / stale
+   * flags (a Draft PR), fold fragmented notes of a chat together, archive
+   * notes nobody reads. Default on; `false` keeps only the diary.
+   */
+  deepSleep?: boolean;
+  /**
    * Skills are named `<project>:<skill>`; keys are the allowed projects, values
    * say what each covers (shown to the model so it can pick one). A new skill
    * must use one of them, lives in directory `<project>-<skill>`, and its short
@@ -480,6 +486,8 @@ export interface DreamSettings {
   skillUpdates: 'pr' | 'push';
   external: DreamExternalLibraryConfig[];
   requireArgumentHint: boolean;
+  /** See {@link DreamTuning.deepSleep}. */
+  deepSleep: boolean;
   /** Empty: plain kebab-case skill names. See {@link DreamTuning.skillProjects}. */
   skillProjects: Record<string, string>;
   localSkillDirs: string[];
@@ -514,6 +522,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   skillUpdates: 'pr',
   external: [],
   requireArgumentHint: false,
+  deepSleep: true,
   skillProjects: {},
   localSkillDirs: [],
   localClones: [],
@@ -770,6 +779,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     skillUpdates: raw.skillUpdates === 'pr' || raw.skillUpdates === 'push' ? raw.skillUpdates : raw.publish === 'push' ? 'push' : 'pr',
     external: resolveExternalLibraries(raw.externalLibraries),
     requireArgumentHint: raw.requireArgumentHint === true,
+    deepSleep: raw.deepSleep !== false,
     skillProjects: resolveSkillProjects(raw.skillProjects),
     localSkillDirs: absoluteDirs(raw.localSkillDirs),
     localClones: absoluteDirs(raw.localClones),
