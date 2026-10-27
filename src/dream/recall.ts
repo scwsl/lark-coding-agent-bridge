@@ -42,8 +42,17 @@ interface RecallData {
   since?: number;
   cursors: Record<string, RecallCursor>;
   items: Record<string, RecallItem>;
-  /** First time each note (`note:<scope>/<topic>`) was seen in the knowledge directory. */
-  seen?: Record<string, number>;
+  /** Each note (`note:<scope>/<topic>`) of the knowledge repository as last observed. */
+  seen?: Record<string, NoteSeen>;
+}
+
+interface NoteSeen {
+  /** First observed. */
+  first: number;
+  /** Hash of its content when last observed. */
+  hash: string;
+  /** When its content was last seen to differ (or first observed). */
+  changed: number;
 }
 
 export interface RecallScanResult {
@@ -109,7 +118,7 @@ export class RecallStore {
           ...(typeof parsed.since === 'number' ? { since: parsed.since } : {}),
           cursors: parsed.cursors ?? {},
           items: parsed.items ?? {},
-          ...(parsed.seen ? { seen: parsed.seen } : {}),
+          ...(parsed.seen && typeof parsed.seen === 'object' ? { seen: validSeen(parsed.seen) } : {}),
         };
       }
     } catch (err) {
@@ -212,6 +221,41 @@ export class RecallStore {
     };
   }
 
+  /**
+   * Record the notes the knowledge repository has tonight: when each was
+   * first seen and when its content last changed. Notes no longer there
+   * (merged, archived, deleted) are forgotten; one moved back starts afresh.
+   */
+  observeNotes(notes: ReadonlyArray<{ key: string; hash: string }>, now: number): void {
+    const seen: Record<string, NoteSeen> = {};
+    for (const note of notes) {
+      const before = this.data.seen?.[note.key];
+      seen[note.key] = !before
+        ? { first: now, hash: note.hash, changed: now }
+        : before.hash === note.hash
+          ? before
+          : { ...before, hash: note.hash, changed: now };
+    }
+    this.data.seen = seen;
+    this.persist();
+  }
+
+  /**
+   * Notes first seen, last changed and last read more than `days` days ago,
+   * the longest unchanged first — none while the read counts do not yet
+   * cover that long, since an unread note then may just be unmeasured.
+   */
+  archivable(days: number, now: number, timezone: string, limit: number): string[] {
+    const cutoff = now - days * DAY_MS;
+    if (this.data.since === undefined || this.data.since > cutoff) return [];
+    const reads = this.counter(days, now, timezone);
+    return Object.entries(this.data.seen ?? {})
+      .filter(([key, note]) => note.first <= cutoff && note.changed <= cutoff && reads(key) === 0)
+      .sort(([a, x], [b, y]) => x.changed - y.changed || a.localeCompare(b))
+      .slice(0, limit)
+      .map(([key]) => key);
+  }
+
   item(key: string): RecallItem | undefined {
     return this.data.items[key];
   }
@@ -253,4 +297,15 @@ export class RecallStore {
       .then(() => writeFileAtomic(this.path, snapshot, { mode: 0o600 }))
       .catch((err: unknown) => log.fail('dream', err, { step: 'recall-persist' }));
   }
+}
+
+function validSeen(raw: object): Record<string, NoteSeen> {
+  const out: Record<string, NoteSeen> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const note = value as Partial<NoteSeen> | null;
+    if (note && typeof note.first === 'number' && typeof note.changed === 'number' && typeof note.hash === 'string') {
+      out[key] = { first: note.first, hash: note.hash, changed: note.changed };
+    }
+  }
+  return out;
 }

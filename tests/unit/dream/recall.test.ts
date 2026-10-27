@@ -131,3 +131,71 @@ describe('RecallStore.scan', () => {
     await store.flush();
   });
 });
+
+describe('RecallStore.observeNotes / archivable', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'lcb-recall-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('archives what was known, unchanged and unread for the whole window, and only once the counts cover it', async () => {
+    const store = new RecallStore(join(dir, 'recall.json'));
+    const t0 = NOW - 40 * DAY;
+    store.observeNotes(
+      [
+        { key: 'note:oc_1/old', hash: 'h1' },
+        { key: 'note:oc_1/read', hash: 'h2' },
+        { key: 'note:oc_1/edited', hash: 'h3' },
+        { key: 'note:oc_1/gone', hash: 'h4' },
+      ],
+      t0,
+    );
+    // No read counts yet: nothing can be told unread.
+    expect(store.archivable(30, NOW, TZ, 20)).toEqual([]);
+
+    const transcript: AgentTranscript = {
+      exchanges: [exchange(1, [`${KB}/notes/oc_1/read.md`], NOW - 2 * DAY)],
+      lastActivityAt: NOW - 2 * DAY,
+    };
+    await store.scan({ records: [record('a')], read: async () => transcript, knowledgeDir: KB, now: NOW - DAY, timezone: TZ, idleMs: HOUR });
+    store.observeNotes(
+      [
+        { key: 'note:oc_1/old', hash: 'h1' },
+        { key: 'note:oc_1/read', hash: 'h2' },
+        { key: 'note:oc_1/edited', hash: 'h3-new' },
+        { key: 'note:oc_1/new', hash: 'h5' },
+      ],
+      NOW - 5 * DAY,
+    );
+    // The scan counted a read from two days ago, so the counts begin there: still too short.
+    expect(store.archivable(30, NOW, TZ, 20)).toEqual([]);
+    expect(store.archivable(30, NOW + 40 * DAY, TZ, 20)).toEqual(['note:oc_1/old', 'note:oc_1/read', 'note:oc_1/edited', 'note:oc_1/new']);
+    expect(store.archivable(30, NOW + 40 * DAY, TZ, 1)).toEqual(['note:oc_1/old']);
+
+    await store.flush();
+    const reloaded = new RecallStore(join(dir, 'recall.json'));
+    await reloaded.load();
+    expect(reloaded.archivable(30, NOW + 40 * DAY, TZ, 20)).toHaveLength(4);
+  });
+
+  it('keeps a note that was read or changed within the window', async () => {
+    const store = new RecallStore(join(dir, 'recall.json'));
+    const t0 = NOW - 60 * DAY;
+    const transcript: AgentTranscript = { exchanges: [exchange(1, [`${KB}/notes/oc_1/read.md`], NOW - 3 * DAY)], lastActivityAt: NOW - 3 * DAY };
+    store.observeNotes([{ key: 'note:oc_1/old', hash: 'a' }, { key: 'note:oc_1/read', hash: 'b' }, { key: 'note:oc_1/edited', hash: 'c' }], t0);
+    await store.scan({
+      records: [record('a', NOW - 3 * DAY)],
+      read: async () => ({ exchanges: [exchange(1, [], t0), ...transcript.exchanges.map((item) => ({ ...item, index: 2 }))], lastActivityAt: NOW - 3 * DAY }),
+      knowledgeDir: KB,
+      now: NOW,
+      timezone: TZ,
+      idleMs: HOUR,
+    });
+    store.observeNotes([{ key: 'note:oc_1/old', hash: 'a' }, { key: 'note:oc_1/read', hash: 'b' }, { key: 'note:oc_1/edited', hash: 'c2' }], NOW - DAY);
+    expect(store.archivable(30, NOW, TZ, 20)).toEqual(['note:oc_1/old']);
+    await store.flush();
+  });
+});

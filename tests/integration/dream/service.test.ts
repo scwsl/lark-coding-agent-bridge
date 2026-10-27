@@ -406,6 +406,57 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect(run.diary).toContain('笔记整合：2 篇合成 1 篇');
   });
 
+  it('with publish: push, archives the notes nobody read or changed for a month', async () => {
+    let night = 1;
+    const h = await harness({
+      tuning: { publish: 'push' },
+      answer: (prompt) =>
+        prompt.includes('<family>')
+          ? JSON.stringify({ merges: [] })
+          : JSON.stringify({
+              memory:
+                night === 1
+                  ? [{ action: 'add', target: 'note', note: 'deploy', text: '发布按 docs/dev/ship.md 走', reason: '验证过', evidence: 'verified', sources: ['S1#1'] }]
+                  : [],
+              skills: [],
+            }),
+    });
+    const seed = join(root, 'seed-knowledge');
+    await git(root, ['clone', '-q', h.knowledgeRemote, seed]);
+    await mkdir(join(seed, 'notes', 'oc_team'), { recursive: true });
+    await writeFile(join(seed, 'notes', 'oc_team', 'old.md'), '# old\n\n- [a00001] 很久没人看的事\n');
+    await writeFile(join(seed, 'notes', 'oc_team', 'fresh.md'), '# fresh\n\n- [b00001] 一直有人看的事\n');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['-c', 'user.name=s', '-c', 'user.email=s@example.com', 'commit', '-q', '-m', 'seed']);
+    await git(seed, ['push', '-q', 'origin', 'HEAD:main']);
+
+    talk(h, 'sess-1');
+    const first = await h.service.start({ id: 'ou-admin' });
+    if ('error' in first) throw new Error(first.error);
+    await h.service.idle();
+    expect(h.service.runs()[0]!.diary).not.toContain('归档');
+
+    // A month later someone opened fresh.md yesterday; nobody touched the rest.
+    night = 2;
+    h.clock.now = NOW + 31 * 24 * HOUR;
+    talk(h, 'sess-2');
+    h.transcripts.set('sess-2', [
+      { ...EXCHANGES[0]!, at: h.clock.now - 24 * HOUR, reads: [join(h.store.dir, 'notes', 'oc_team', 'fresh.md')] },
+    ]);
+    const second = await h.service.start({ id: 'ou-admin' });
+    if ('error' in second) throw new Error(second.error);
+    await h.service.idle();
+    const run = h.service.runs()[0]!;
+    expect(run.status).toBe('succeeded');
+    expect(run.targets.find((t) => t.repo === 'knowledge:deep')).toMatchObject({ phase: 'published', items: 2 });
+    expect(await showFile(h.knowledgeRemote, 'main', 'notes/oc_team/old.md')).toBe('');
+    expect(await showFile(h.knowledgeRemote, 'main', 'archive/notes/oc_team/old.md')).toContain('很久没人看的事');
+    expect(await showFile(h.knowledgeRemote, 'main', 'archive/notes/oc_team/deploy.md')).toContain('ship.md');
+    expect(await showFile(h.knowledgeRemote, 'main', 'notes/oc_team/fresh.md')).toContain('一直有人看的事');
+    expect(await showFile(h.knowledgeRemote, 'main', 'CHANGELOG.md')).toContain('归档 `notes/oc_team/old.md` → `archive/notes/oc_team/old.md`');
+    expect(run.diary).toContain('归档长期没人读的笔记 2 篇');
+  });
+
   it('keeps an unopened PR for a retry and opens it on the next run', async () => {
     const h = await harness({ answer: () => JSON.stringify({ memory: [{ action: 'add', target: 'chat', text: '一条事实', reason: 'r', sources: ['S1#1'] }] }) });
     talk(h, 'sess-1');

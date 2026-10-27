@@ -49,6 +49,7 @@ import {
   readMemoryFiles,
   readPendingFlags,
 } from './consolidate';
+import { ARCHIVE_DAYS, archiveChangelogLines, archiveNotes, MAX_ARCHIVE, observeNotes } from './archive';
 import { diaryEntry, diaryWorthWriting, writeDiary, type DiaryInput } from './diary';
 import { applyNotesPlan, buildNotesPrompt, familyNoteRefs, notesChangelogLines, notesPlanSummary, parseNotesPlan, pickFamily } from './notes-merge';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
@@ -1719,8 +1720,8 @@ export class DreamService {
 
   /**
    * 深睡整理, once the night's input is checkpointed and published: 记忆整合
-   * as a Draft PR of its own; then, straight onto the default branch, 笔记整合
-   * and the diary entry at the top of DREAMS.md. The diary is also kept with
+   * as a Draft PR of its own; then, straight onto the default branch, 笔记整合,
+   * 归档 and the diary entry at the top of DREAMS.md. The diary is also kept with
    * the run. Nothing here moves a cursor; a failure is reported and looked at
    * again another night. Returns a line for the run's summary, if any.
    */
@@ -1752,7 +1753,8 @@ export class DreamService {
     // stays in the run record.
     const families = ctx.noteScopes.filter((scope) => scopeFamily(scope) !== LEARNING_SCOPE);
     if (signal.aborted || settings.publish !== 'push' || !url) return done();
-    if (!diaryWorthWriting(diary) && !(awake && families.length > 0)) return done();
+    const archivable = awake ? this.recall.archivable(ARCHIVE_DAYS, this.now(), diary.timezone, MAX_ARCHIVE) : [];
+    if (!diaryWorthWriting(diary) && !(awake && families.length > 0) && archivable.length === 0) return done();
     let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（深睡整理）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
     const dir = join(this.deps.workDir, 'batches', id, 'deep');
     const prepared = await prepareCheckout({ repo: DEEP_REPO, label: target.label, url }, dir, target.branch, { direct: true });
@@ -1773,6 +1775,19 @@ export class DreamService {
         if (merged.summary.error) notes.push(`笔记整合没做成：${merged.summary.error}`);
       }
     }
+    // 归档 after the merges (a merged note changed tonight, a folded one is
+    // gone), and observed before it: should the push fail, the notes are
+    // still known and come up again tomorrow.
+    const now = this.now();
+    this.recall.observeNotes(await observeNotes(dir), now);
+    if (awake) {
+      const archived = await archiveNotes(dir, this.recall.archivable(ARCHIVE_DAYS, now, diary.timezone, MAX_ARCHIVE));
+      if (archived.moved.length > 0) {
+        diary.deep.archived = archived.moved.length;
+        files.push(...archived.files);
+        logLines.push(...archiveChangelogLines(archived.moved));
+      }
+    }
     if (files.length === 0 && !diaryWorthWriting(diary)) return done();
     const written = await writeDiary(dir, diaryEntry(diary));
     if ('error' in written) notes.push(`梦境日记没写成：${written.error}`);
@@ -1784,9 +1799,11 @@ export class DreamService {
     if (files.length === 0) return done();
     const parts = [
       diary.deep.notesMerge?.notes ? `笔记整合 ${diary.deep.notesMerge.notes} 篇` : undefined,
+      diary.deep.archived ? `归档 ${diary.deep.archived} 篇` : undefined,
       'file' in written ? '梦境日记' : undefined,
     ].filter(Boolean);
-    const committed = await this.commitTarget(id, { ...target, items: diary.deep.notesMerge?.into ?? 0 }, files, `深睡整理：${parts.join('、')}`);
+    const items = (diary.deep.notesMerge?.into ?? 0) + (diary.deep.archived ?? 0);
+    const committed = await this.commitTarget(id, { ...target, items }, files, `深睡整理：${parts.join('、')}`);
     if (committed.phase !== 'committed') notes.push(`深睡整理没提交成：${committed.error ?? '提交失败'}`);
     else {
       const pushed = await this.pushAndOpen(id, committed);
