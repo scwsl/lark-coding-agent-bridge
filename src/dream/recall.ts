@@ -197,12 +197,19 @@ export class RecallStore {
 
   /** Reads of `key` within the last `days` local days, today included. */
   readsWithin(key: string, days: number, now: number, timezone: string): number {
-    const item = this.data.items[key];
-    if (!item) return 0;
+    return this.counter(days, now, timezone)(key);
+  }
+
+  /** {@link readsWithin} for many keys: the first day of the window worked out once. */
+  counter(days: number, now: number, timezone: string): (key: string) => number {
     const from = localDay(now - (days - 1) * DAY_MS, timezone);
-    let total = 0;
-    for (const [day, count] of Object.entries(item.days)) if (day >= from) total += count;
-    return total;
+    return (key) => {
+      const item = this.data.items[key];
+      if (!item) return 0;
+      let total = 0;
+      for (const [day, count] of Object.entries(item.days)) if (day >= from) total += count;
+      return total;
+    };
   }
 
   item(key: string): RecallItem | undefined {
@@ -211,9 +218,10 @@ export class RecallStore {
 
   /** The most read keys with a prefix (`note:` / `skill:`) within the last `days` days. */
   top(prefix: string, days: number, now: number, timezone: string, limit: number): RecallTop[] {
+    const reads = this.counter(days, now, timezone);
     return Object.keys(this.data.items)
       .filter((key) => key.startsWith(prefix))
-      .map((key) => ({ key, reads: this.readsWithin(key, days, now, timezone) }))
+      .map((key) => ({ key, reads: reads(key) }))
       .filter((item) => item.reads > 0)
       .sort((a, b) => b.reads - a.reads || a.key.localeCompare(b.key))
       .slice(0, limit);

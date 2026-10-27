@@ -237,3 +237,19 @@ describe('noteTopicScopes', () => {
     expect(await new KnowledgeStore(join(dir, 'missing')).noteTopicScopes('oc_1')).toEqual([]);
   });
 });
+
+describe('rankNotes', () => {
+  it('orders notes by the rank set from outside, ties and failures keep their order', () => {
+    const notes = [{ name: 'oc_1/a' }, { name: 'oc_1/b' }, { name: 'oc_1/c' }];
+    expect(store.rankNotes(notes).map((note) => note.name)).toEqual(['oc_1/a', 'oc_1/b', 'oc_1/c']);
+    store.setNoteRank(() => (name) => {
+      if (name === 'oc_1/c') throw new Error('boom');
+      return name === 'oc_1/b' ? 2 : 0;
+    });
+    expect(store.rankNotes(notes).map((note) => note.name)).toEqual(['oc_1/b', 'oc_1/a', 'oc_1/c']);
+    store.setNoteRank(() => {
+      throw new Error('boom');
+    });
+    expect(store.rankNotes(notes).map((note) => note.name)).toEqual(['oc_1/a', 'oc_1/b', 'oc_1/c']);
+  });
+});

@@ -48,6 +48,7 @@ const ENTRY_RE = /^-\s*\[([0-9a-f]{6})\]\s*(.*)$/;
 export class KnowledgeStore {
   readonly dir: string;
   private readonly skillSources: SkillSource[] = [];
+  private noteRanker: (() => (name: string) => number) | undefined;
 
   constructor(dir: string = paths.knowledgeDir) {
     this.dir = dir;
@@ -99,6 +100,28 @@ export class KnowledgeStore {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * How useful a note (`<scope>/<topic>`) has been — 课堂精练's recall
+   * count. Notes with a higher rank come first in their part of the index.
+   * `ranker` is asked once per {@link rankNotes} for the rank as of now.
+   */
+  setNoteRank(ranker: (() => (name: string) => number) | undefined): void {
+    this.noteRanker = ranker;
+  }
+
+  /** Notes ordered by {@link setNoteRank}, highest first; ties keep their order. */
+  rankNotes<T extends { name: string }>(notes: readonly T[]): T[] {
+    let rank: ((name: string) => number) | undefined;
+    try {
+      rank = this.noteRanker?.();
+    } catch {
+      rank = undefined;
+    }
+    if (!rank) return [...notes];
+    const score = new Map(notes.map((note) => [note.name, safeRank(rank, note.name)]));
+    return [...notes].sort((a, b) => (score.get(b.name) ?? 0) - (score.get(a.name) ?? 0));
   }
 
   memoryFile(scope: MemoryScope): string {
@@ -232,6 +255,15 @@ export class KnowledgeStore {
     // 0600 like every other piece of profile state: chat notes routinely quote
     // things people would not want world-readable on a shared machine.
     await writeFileAtomic(file, body, { mode: 0o600 });
+  }
+}
+
+function safeRank(rank: (name: string) => number, name: string): number {
+  try {
+    const value = rank(name);
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
   }
 }
 

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { nativeSkillDirsFor } from '../agent/native-skills';
 import type { AgentKind } from '../agent/registry';
-import type { KnowledgeStore, MemoryEntry, SkillSummary } from './store';
+import { sanitizeScopeId, type KnowledgeStore, type MemoryEntry, type SkillSummary } from './store';
 
 export interface KnowledgeContext {
   /**
@@ -84,14 +84,20 @@ export async function buildKnowledgeContext(
   const groupId = input.scopeId.includes(':') ? input.scopeId.split(':')[0] : undefined;
   // Notes also come from the chat's other topics, after this topic's and the chat's own.
   const siblings = await input.store.noteTopicScopes(groupId ?? input.scopeId).catch(() => []);
-  const [profile, group, topic, skills, ownNotes, externalNotes] = await Promise.all([
+  const listNotes = (scopes: string[]) => input.store.listNotes(scopes).catch(() => []);
+  const [profile, group, topic, skills, scopeNotes, groupNotes, siblingNotes, externalAll] = await Promise.all([
     input.store.listMemories({ kind: 'profile' }),
     groupId ? input.store.listMemories({ kind: 'chat', scopeId: groupId }) : Promise.resolve([]),
     input.store.listMemories({ kind: 'chat', scopeId: input.scopeId }),
     input.store.listSkills(),
-    input.store.listNotes([input.scopeId, ...(groupId ? [groupId] : []), ...siblings]).catch(() => []),
-    input.store.listNotes([EXTERNAL_NOTES_SCOPE]).catch(() => []),
+    listNotes([input.scopeId]),
+    groupId ? listNotes([groupId]) : Promise.resolve([]),
+    listNotes(siblings.filter((scope) => scope !== sanitizeScopeId(input.scopeId))),
+    listNotes([EXTERNAL_NOTES_SCOPE]),
   ]);
+  // Within each part, the notes read most lately first (课堂精练's recall counts).
+  const ownNotes = [scopeNotes, groupNotes, siblingNotes].flatMap((part) => input.store.rankNotes(part));
+  const externalNotes = input.store.rankNotes(externalAll);
   const notes = [...ownNotes, ...externalNotes];
   const keptNotes = pickNotes(ownNotes, externalNotes);
   const chat = [...group, ...topic];

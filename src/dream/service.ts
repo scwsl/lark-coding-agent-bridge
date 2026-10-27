@@ -285,6 +285,8 @@ const MAX_OWN_SKILL_CHARS = 20_000;
 const AUTO_CHECK_MS = 30 * 60_000;
 const WATCHDOG_MS = 15_000;
 const UNKNOWN_QUOTA_BUDGET = 0.5;
+/** Recall window the notes index is ranked by. */
+const NOTE_RANK_DAYS = 30;
 const AUTO_ACTOR: DreamActor = { id: 'dream-auto', name: '自动整理' };
 /** Deferral reason of the conversations an automatic run left to a user task. */
 export const YIELD_REASON = '让位给用户任务';
@@ -315,7 +317,12 @@ export class DreamService {
   async init(): Promise<void> {
     await this.state.load(this.now());
     await this.recall.load();
-    this.unsubscribe = this.deps.sessionCatalog?.onUpsert((entry) => {
+    // The notes index lists, within each tier, the most read notes of the last 30 days first.
+    this.deps.knowledge.setNoteRank?.(() => {
+      const reads = this.recall.counter(NOTE_RANK_DAYS, this.now(), resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).auto.timezone);
+      return (name) => reads(`note:${name}`);
+    });
+    this.unsubscribe =this.deps.sessionCatalog?.onUpsert((entry) => {
       if (this.enabled()) this.noteEntry(entry, entry.updatedAt);
     });
     if (this.enabled()) this.noteCatalog();

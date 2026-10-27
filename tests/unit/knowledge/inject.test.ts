@@ -10,7 +10,12 @@ import type { KnowledgeStore } from '../../../src/knowledge/store.js';
 const NOTES = '/kb/notes';
 
 function fakeStore(
-  over: { skills?: Array<{ name: string; path: string }>; profile?: string[]; notes?: Record<string, string[]> } = {},
+  over: {
+    skills?: Array<{ name: string; path: string }>;
+    profile?: string[];
+    notes?: Record<string, string[]>;
+    rank?: Record<string, number>;
+  } = {},
 ): KnowledgeStore {
   return {
     listMemories: async (scope: { kind: string }) =>
@@ -20,6 +25,8 @@ function fakeStore(
         { name: 'occam:coffee', path: '/lib/occam-skills/skills/occam-coffee/SKILL.md' },
         { name: 'antelope:tcpdump', path: '/lib/occam-skills/skills/antelope-tcpdump/SKILL.md' },
       ]).map((s) => ({ ...s, description: `${s.name} 的说明` })),
+    rankNotes: <T extends { name: string }>(notes: T[]) =>
+      over.rank ? [...notes].sort((a, b) => (over.rank![b.name] ?? 0) - (over.rank![a.name] ?? 0)) : [...notes],
     noteTopicScopes: async (chatId: string) =>
       Object.keys(over.notes ?? {})
         .filter((scope) => scope.startsWith(`${chatId}_omt_`))
@@ -74,6 +81,15 @@ describe('buildKnowledgeContext', () => {
     ]);
     const chat = await buildKnowledgeContext({ store, scopeId: 'oc_1' });
     expect(chat?.notes?.slice(0, 4)).toEqual(['oc_1/group', 'oc_1_omt_1/first', 'oc_1_omt_2/mine', 'oc_1_omt_3/third']);
+  });
+
+  it('orders each part of the index by how often its notes were read', async () => {
+    const store = fakeStore({
+      notes: { oc_1: ['a', 'b'], oc_1_omt_1: ['x'], oc_1_omt_2: ['y'], external: ['e1', 'e2', 'e3'] },
+      rank: { 'oc_1/b': 3, 'oc_1_omt_2/y': 5, 'external/e3': 9, 'external/e2': 1 },
+    });
+    const ctx = await buildKnowledgeContext({ store, scopeId: 'oc_1' });
+    expect(ctx?.notes).toEqual(['oc_1/b', 'oc_1/a', 'oc_1_omt_2/y', 'oc_1_omt_1/x', 'external/e3', 'external/e2', 'external/e1']);
   });
 
   it('keeps a share of the index for external notes however many own notes there are', () => {
