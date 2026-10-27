@@ -674,6 +674,7 @@ describe('profile schema', () => {
           oc_a: {
             deniedCommands: ['\\bkubectl\\b', 42],
             deniedPaths: ['~/.kube'],
+            readOnlyPaths: ['~/Desktop/code', 7],
             deniedTools: ['mcp__jira', null],
             workspace: ' ~/ws/dp ',
             refusal: '  不支持  ',
@@ -689,6 +690,7 @@ describe('profile schema', () => {
       oc_a: {
         deniedCommands: ['\\bkubectl\\b'],
         deniedPaths: ['~/.kube'],
+        readOnlyPaths: ['~/Desktop/code'],
         deniedTools: ['mcp__jira'],
         workspace: '~/ws/dp',
         refusal: '不支持',

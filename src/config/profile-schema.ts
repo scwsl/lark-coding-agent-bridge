@@ -98,6 +98,11 @@ export interface RestrictedChat {
   deniedCommands: string[];
   /** Paths (`~` allowed) the run may neither read nor change. */
   deniedPaths?: string[];
+  /**
+   * Paths (`~` allowed) everyone in the chat may read but never change, even
+   * inside `deniedPaths` or the fenced areas of a guest run.
+   */
+  readOnlyPaths?: string[];
   /** Claude permission rules denied there, e.g. `mcp__jira` or `WebFetch`. */
   deniedTools?: string[];
   /**
@@ -563,6 +568,7 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
     if (!chatId || !value || typeof value !== 'object' || Array.isArray(value)) continue;
     const raw = value as Record<string, unknown>;
     const deniedPaths = stringArray(raw.deniedPaths);
+    const readOnlyPaths = stringArray(raw.readOnlyPaths);
     const deniedTools = stringArray(raw.deniedTools);
     const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
     const workspace = text(raw.workspace);
@@ -571,6 +577,7 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
     out[chatId] = {
       deniedCommands: stringArray(raw.deniedCommands),
       ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
+      ...(readOnlyPaths.length > 0 ? { readOnlyPaths } : {}),
       ...(deniedTools.length > 0 ? { deniedTools } : {}),
       ...(workspace ? { workspace } : {}),
       ...(refusal ? { refusal } : {}),

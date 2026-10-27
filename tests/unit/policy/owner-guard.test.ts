@@ -408,5 +408,53 @@ describe('restricted chats', () => {
     expect(run(fenced, 'Bash', { command: 'find ~/Desktop/coding -name "*.yml"' }).code).toBe(2);
     expect(run(fenced, 'Read', { file_path: `${WORKSPACE}/data.csv` }).code).toBe(0);
   });
+
+  describe('read-only paths', () => {
+    const SKILLS = `${LC}/profiles/claude/skill-libraries`;
+    const ro = {
+      ...chat,
+      deniedCommands: [],
+      deniedPaths: ['~/Desktop', '~/.claude'],
+      readOnlyPaths: ['~/Desktop/coding/lark/alphaess', '~/.claude/reference/env.md', SKILLS],
+    };
+    const forOwner = restrictedChatGuard(undefined, ro, { home: HOME, root: ROOT });
+    const forGuest = restrictedChatGuard(guard, ro);
+
+    it('opens them for reading inside a fenced tree, for the owner and guests alike', () => {
+      for (const g of [forOwner, forGuest]) {
+        expect(run(g, 'Read', { file_path: `${OPEN}/antelope/App.java` }).code).toBe(0);
+        expect(run(g, 'Grep', { path: `${OPEN}/antelope`, pattern: 'install' }).code).toBe(0);
+        expect(run(g, 'Bash', { command: 'grep -rn install ~/Desktop/coding/lark/alphaess/antelope/src' }).code).toBe(0);
+        expect(run(g, 'Bash', { command: `git -C ${OPEN}/antelope log --oneline -5` }).code).toBe(0);
+        expect(run(g, 'Read', { file_path: `${HOME}/.claude/reference/env.md` }).code).toBe(0);
+      }
+      // A guest's own fence on the bridge home gives way to the read-only skills.
+      expect(run(forGuest, 'Read', { file_path: `${SKILLS}/s/SKILL.md` }).code).toBe(0);
+      expect(run(forGuest, 'Read', { file_path: `${LC}/config.json` }).code).toBe(2);
+    });
+
+    it('keeps the rest of the fenced tree closed, siblings and `..` included', () => {
+      for (const g of [forOwner, forGuest]) {
+        expect(run(g, 'Read', { file_path: `${HOME}/Desktop/coding/lark/thing-hub/a.md` }).code).toBe(2);
+        expect(run(g, 'Read', { file_path: `${HOME}/Desktop/coding/lark/alphaess-developer/a.md` }).code).toBe(2);
+        expect(run(g, 'Bash', { command: 'cat ~/Desktop/coding/lark/alphaess-x/a.md' }).code).toBe(2);
+        expect(run(g, 'Bash', { command: 'cat ~/Desktop/coding/lark/alphaess/../thing-hub/a.md' }).code).toBe(2);
+        expect(run(g, 'Read', { file_path: `${HOME}/.claude/CLAUDE.md` }).code).toBe(2);
+      }
+    });
+
+    it('never lets them be changed', () => {
+      for (const g of [forOwner, forGuest]) {
+        expect(run(g, 'Edit', { file_path: `${OPEN}/antelope/App.java`, old_string: 'a', new_string: 'b' }).code).toBe(2);
+        expect(run(g, 'Bash', { command: `sed -i '' s/a/b/ ${OPEN}/antelope/App.java` }).code).toBe(2);
+        expect(run(g, 'Bash', { command: `cd ${OPEN}/antelope && git checkout dev` }).code).toBe(2);
+        expect(run(g, 'Bash', { command: `echo x > ${OPEN}/antelope/x.txt` }).code).toBe(2);
+      }
+      const { args } = claudeGuardArgs(forOwner);
+      expect(args).toContain(`Edit(/${OPEN}/**)`);
+      expect(args).not.toContain(`Read(/${HOME}/Desktop/**)`);
+      expect(args).toContain(`Edit(/${HOME}/Desktop/**)`);
+    });
+  });
 });
 

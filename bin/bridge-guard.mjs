@@ -154,6 +154,10 @@ function decideBash(command, cfg, cwd) {
   if (BARE_CD.test(cmd)) return '这条命令会进入主人的主目录';
   for (const path of commandPaths(cmd, cwd)) {
     if (!inScope(path, cfg)) return `这条命令会访问未对外开放的位置 ${path}`;
+    // `<open path>/../<fenced>` names an allowed place but resolves into a fenced one.
+    for (const rule of cfg.rules ?? []) {
+      if (rule.bash === 'any' && fenced(path, rule)) return `这条命令会读取或改动 ${rule.path}`;
+    }
   }
   return null;
 }

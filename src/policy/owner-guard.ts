@@ -164,10 +164,25 @@ export function restrictedChatGuard(
     hookScript: join(opts.root ?? bridgeRoot(), 'bin', 'bridge-guard.mjs'),
   };
   const paths = (chat.deniedPaths ?? []).map(expand);
+  const readOnly = (chat.readOnlyPaths ?? []).map(expand);
+  const inside = (p: string, root: string): boolean => p === root || p.startsWith(`${root}/`);
+  // A read-only path stays readable inside a fenced tree: the hook lets it be
+  // named, and Claude's own Read deny is dropped for the trees holding one.
+  const carve = (rule: GuardRule): GuardRule => {
+    if (rule.bash !== 'any') return rule;
+    const open = readOnly.filter((p) => inside(p, rule.path)).map((p) => `${escapeRe(p)}(?![^/\\s'"\`;|&()<>])`);
+    return open.length > 0 ? { ...rule, allow: [...(rule.allow ?? []), ...open] } : rule;
+  };
+  const holdsReadOnly = (p: string): boolean => readOnly.some((r) => inside(r, p));
   return {
     ...base,
-    rules: [...base.rules, ...paths.map((path): GuardRule => ({ path, bash: 'any' }))],
-    readDeny: [...base.readDeny, ...paths.flatMap((p) => [p, join(p, '**')])],
+    rules: [
+      ...base.rules.map(carve),
+      ...paths.map((path): GuardRule => carve({ path, bash: 'any' })),
+      ...readOnly.map((path): GuardRule => ({ path, bash: 'write' })),
+    ],
+    allowedRoots: [...base.allowedRoots, ...readOnly],
+    readDeny: [...base.readDeny, ...paths.filter((p) => !holdsReadOnly(p)).flatMap((p) => [p, join(p, '**')])],
     deniedTools: [...base.deniedTools, ...(chat.deniedTools ?? [])],
     deniedCommands: [...base.deniedCommands, ...chat.deniedCommands],
     deniedContent: [...(base.deniedContent ?? []), ...chat.deniedCommands],
