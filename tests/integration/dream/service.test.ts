@@ -78,6 +78,8 @@ interface HarnessOptions {
   dream?: boolean;
   /** 自动整理 on, with these limits on top of the harness's own. */
   auto?: Record<string, unknown>;
+  /** dreamTuning on top of the harness's own, 自动整理 left off. */
+  tuning?: Record<string, unknown>;
   agentKind?: 'claude' | 'codex';
   /** Agent turns wait until stopped (or {@link release}d). */
   hold?: boolean;
@@ -108,7 +110,7 @@ async function harness(opts: HarnessOptions = {}) {
     preferences: {
       dream: opts.dream ?? true,
       ...(opts.auto ? { dreamAuto: true } : {}),
-      dreamTuning: { minIdleMinutes: 0, window: '11:00-13:00', timezone: 'UTC', ...opts.auto },
+      dreamTuning: { minIdleMinutes: 0, window: '11:00-13:00', timezone: 'UTC', ...opts.auto, ...opts.tuning },
     },
   } as unknown as AppConfig;
   const clock = { now: NOW };
@@ -345,6 +347,63 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     await h.service.idle();
     expect(h.submits).toHaveLength(turns + 1);
     expect(h.service.runs()[0]!.diary).toContain('记忆整合跳过（上一份记忆整合 PR 还没审完');
+  });
+
+  it('with publish: push, folds a chat\'s scattered notes into one under the chat itself', async () => {
+    const h = await harness({
+      tuning: { publish: 'push' },
+      answer: (prompt) =>
+        prompt.includes('<family>')
+          ? JSON.stringify({
+              merges: [
+                {
+                  into: { scope: 'oc_team', topic: 'build' },
+                  from: ['oc_team/build', 'oc_team_omt_x/build-tips'],
+                  entries: [
+                    { text: '全工程构建统一用 mvnd -T 10，并用全局锁包住', from: ['a00001', 'b00001'] },
+                    { text: '构建前先 install 上游模块', from: ['a00002'] },
+                  ],
+                  dropped: [],
+                  reason: '主会话和话题都在说本机构建',
+                },
+              ],
+            })
+          : JSON.stringify({
+              memory: [{ action: 'add', target: 'note', note: 'deploy', text: '发布按 docs/dev/ship.md 走', reason: '验证过', evidence: 'verified', sources: ['S1#1'] }],
+              skills: [],
+            }),
+    });
+    const seed = join(root, 'seed-knowledge');
+    await git(root, ['clone', '-q', h.knowledgeRemote, seed]);
+    await mkdir(join(seed, 'notes', 'oc_team'), { recursive: true });
+    await mkdir(join(seed, 'notes', 'oc_team_omt_x'), { recursive: true });
+    await writeFile(join(seed, 'notes', 'oc_team', 'build.md'), '# build\n\n- [a00001] 全工程构建用 mvnd -T 10\n- [a00002] 构建前先 install 上游模块\n');
+    await writeFile(join(seed, 'notes', 'oc_team_omt_x', 'build-tips.md'), '# build-tips\n\n- [b00001] 构建要加全局锁\n');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['-c', 'user.name=s', '-c', 'user.email=s@example.com', 'commit', '-q', '-m', 'seed']);
+    await git(seed, ['push', '-q', 'origin', 'HEAD:main']);
+
+    talk(h, 'sess-1');
+    const started = await h.service.start({ id: 'ou-admin' });
+    if ('error' in started) throw new Error(started.error);
+    await h.service.idle();
+    const run = h.service.runs()[0]!;
+    expect(run.status).toBe('succeeded');
+    expect(run.targets.map((t) => [t.repo, t.phase])).toEqual([
+      ['knowledge', 'published'],
+      ['knowledge:deep', 'published'],
+    ]);
+    expect(h.prompts.filter((prompt) => prompt.includes('<family>'))).toHaveLength(1);
+    const merged = await showFile(h.knowledgeRemote, 'main', 'notes/oc_team/build.md');
+    expect(merged).toContain('- [a00001] 全工程构建统一用 mvnd -T 10，并用全局锁包住');
+    expect(merged).toContain('- [a00002] 构建前先 install 上游模块');
+    expect(await showFile(h.knowledgeRemote, 'main', 'notes/oc_team_omt_x/build-tips.md')).toBe('');
+    expect(await showFile(h.knowledgeRemote, 'main', 'notes/oc_team/deploy.md')).toContain('ship.md');
+    const changelog = await showFile(h.knowledgeRemote, 'main', 'CHANGELOG.md');
+    expect(changelog).toContain('· 深睡整理');
+    expect(changelog).toContain('笔记整合 `notes/oc_team/build.md` ← `oc_team/build`、`oc_team_omt_x/build-tips`（2 条）');
+    expect(await showFile(h.knowledgeRemote, 'main', 'DREAMS.md')).toContain('笔记整合：2 篇合成 1 篇，1 篇提升到主会话');
+    expect(run.diary).toContain('笔记整合：2 篇合成 1 篇');
   });
 
   it('keeps an unopened PR for a retry and opens it on the next run', async () => {

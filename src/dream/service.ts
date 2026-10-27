@@ -50,11 +50,12 @@ import {
   readPendingFlags,
 } from './consolidate';
 import { diaryEntry, diaryWorthWriting, writeDiary, type DiaryInput } from './diary';
+import { applyNotesPlan, buildNotesPrompt, familyNoteRefs, notesChangelogLines, notesPlanSummary, parseNotesPlan, pickFamily } from './notes-merge';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
-import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, type PoolCandidate, type PoolTheme } from './pool';
+import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, scopeFamily, type PoolCandidate, type PoolTheme } from './pool';
 import { RecallStore } from './recall';
 import { buildRemPrompt, parseRemOutput, remWorthRunning } from './rem';
 import {
@@ -89,6 +90,7 @@ import {
 import {
   changelogEntry,
   commitMessage,
+  deepChangelogEntry,
   flagLine,
   knowledgePrBody,
   knowledgePrTitle,
@@ -1163,7 +1165,13 @@ export class DreamService {
     const deepNote = await this.deepSleep(
       run.id,
       settings,
-      { actor, deadline, signal, ...(current.yielding ? { yielding: true } : {}) },
+      {
+        actor,
+        deadline,
+        signal,
+        ...(current.yielding ? { yielding: true } : {}),
+        noteScopes: [...new Set(additions.filter((item) => item.target === 'note').map((item) => item.scopeId))],
+      },
       {
         batchId: run.id,
         at: now,
@@ -1710,21 +1718,25 @@ export class DreamService {
   }
 
   /**
-   * 深睡整理, once the night's input is checkpointed and published: the
-   * diary entry, kept with the run and — when the run changed anything —
-   * put at the top of the knowledge repository's DREAMS.md. Nothing here
-   * moves a cursor; a failure is reported and tried again another night.
-   * Returns a line for the run's summary, if any.
+   * 深睡整理, once the night's input is checkpointed and published: 记忆整合
+   * as a Draft PR of its own; then, straight onto the default branch, 笔记整合
+   * and the diary entry at the top of DREAMS.md. The diary is also kept with
+   * the run. Nothing here moves a cursor; a failure is reported and looked at
+   * again another night. Returns a line for the run's summary, if any.
    */
   private async deepSleep(
     id: string,
     settings: DreamSettings,
-    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal; yielding?: boolean },
+    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal; yielding?: boolean; noteScopes: readonly string[] },
     diary: DiaryInput,
   ): Promise<string | undefined> {
     const { signal } = ctx;
     const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
     const notes: string[] = [];
+    const done = () => {
+      this.state.updateRun(id, { diary: diaryEntry(diary) });
+      return notes.join('；') || undefined;
+    };
     // Agent turns only when the run has time left and nobody is waiting for a slot.
     const awake = settings.deepSleep && url && !signal.aborted && !ctx.yielding;
     if (awake) {
@@ -1735,29 +1747,87 @@ export class DreamService {
         else if (consolidation.prUrl) notes.push(`记忆整合 Draft PR：${consolidation.prUrl}`);
       }
     }
-    this.state.updateRun(id, { diary: diaryEntry(diary) });
-    // A Draft PR for nothing but the diary is noise: with publish: pr the diary stays in the run record.
-    if (signal.aborted || settings.publish !== 'push' || !diaryWorthWriting(diary) || !url) return notes.join('；') || undefined;
-    let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（梦境日记）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
+    // With publish: pr the notes being merged are the ones tonight's unmerged PR
+    // appends to, and a Draft PR for nothing but the diary is noise: the diary
+    // stays in the run record.
+    const families = ctx.noteScopes.filter((scope) => scopeFamily(scope) !== LEARNING_SCOPE);
+    if (signal.aborted || settings.publish !== 'push' || !url) return done();
+    if (!diaryWorthWriting(diary) && !(awake && families.length > 0)) return done();
+    let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（深睡整理）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
     const dir = join(this.deps.workDir, 'batches', id, 'deep');
     const prepared = await prepareCheckout({ repo: DEEP_REPO, label: target.label, url }, dir, target.branch, { direct: true });
     if ('error' in prepared) {
       this.saveTarget(id, { ...target, error: prepared.error });
-      return `梦境日记没写成：${prepared.error}`;
+      notes.push(`深睡整理没做成：${prepared.error}`);
+      return done();
     }
     target = { ...target, branch: prepared.base, base: prepared.base, checkoutDir: dir };
-    const written = await writeDiary(dir, diaryEntry(diary));
-    if ('error' in written) {
-      this.saveTarget(id, { ...target, phase: 'skipped', error: written.error });
-      return `梦境日记没写成：${written.error}`;
+    const files: string[] = [];
+    const logLines: string[] = [];
+    if (awake && families.length > 0) {
+      const merged = await this.mergeNotes(id, dir, families, ctx);
+      if (merged) {
+        diary.deep.notesMerge = merged.summary;
+        files.push(...merged.files);
+        logLines.push(...merged.lines);
+        if (merged.summary.error) notes.push(`笔记整合没做成：${merged.summary.error}`);
+      }
     }
-    const committed = await this.commitTarget(id, target, [written.file], '梦境日记');
-    if (committed.phase !== 'committed') notes.push(`梦境日记没写成：${committed.error ?? '提交失败'}`);
+    if (files.length === 0 && !diaryWorthWriting(diary)) return done();
+    const written = await writeDiary(dir, diaryEntry(diary));
+    if ('error' in written) notes.push(`梦境日记没写成：${written.error}`);
+    else files.push(written.file);
+    if (logLines.length > 0) {
+      const logged = await writeChangelog(dir, deepChangelogEntry({ batchId: id, at: this.now(), timezone: diary.timezone, lines: logLines }));
+      if ('file' in logged) files.push(logged.file);
+    }
+    if (files.length === 0) return done();
+    const parts = [
+      diary.deep.notesMerge?.notes ? `笔记整合 ${diary.deep.notesMerge.notes} 篇` : undefined,
+      'file' in written ? '梦境日记' : undefined,
+    ].filter(Boolean);
+    const committed = await this.commitTarget(id, { ...target, items: diary.deep.notesMerge?.into ?? 0 }, files, `深睡整理：${parts.join('、')}`);
+    if (committed.phase !== 'committed') notes.push(`深睡整理没提交成：${committed.error ?? '提交失败'}`);
     else {
       const pushed = await this.pushAndOpen(id, committed);
-      if (pushed.error) notes.push(`梦境日记没推成：${pushed.error}`);
+      if (pushed.phase !== 'published') {
+        // Merges made on a stale base are not worth a retry: the next night looks again.
+        if (pushed.phase === 'committed') this.saveTarget(id, { ...pushed, phase: 'failed' });
+        notes.push(`深睡整理没推成：${pushed.error ?? '推送失败'}`);
+      }
     }
-    return notes.join('；') || undefined;
+    return done();
+  }
+
+  /**
+   * 深睡·笔记整合: among the chats that got notes tonight, the one with the
+   * most to fold; one read-only turn proposes the merges, the code checks
+   * every one of them before a file is touched. Undefined when no chat has
+   * anything to fold.
+   */
+  private async mergeNotes(
+    id: string,
+    dir: string,
+    scopes: readonly string[],
+    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal },
+  ): Promise<{ summary: NonNullable<DiaryInput['deep']['notesMerge']>; files: string[]; lines: string[] } | undefined> {
+    const picked = await pickFamily(dir, scopes);
+    const remaining = ctx.deadline - this.now();
+    if (!picked || remaining <= 0 || ctx.signal.aborted) return undefined;
+    const none = { notes: 0, into: 0, lifted: 0, dropped: 0 };
+    const failed = (error: string) => ({ summary: { ...none, error }, files: [], lines: [] });
+    const built = buildNotesPrompt(picked.family, picked.notes);
+    const answer = await this.runAgent(`dream:${id}:notes`, built.prompt, ctx.actor, remaining, ctx.signal);
+    if ('error' in answer) return failed(answer.error);
+    const existing = await familyNoteRefs(dir, picked.family);
+    const plan = parseNotesPlan(answer.text, { family: picked.family, notes: built.shown, existing });
+    if ('error' in plan) return failed(`模型输出不合格：${plan.error}`);
+    if (plan.rejected.length > 0) log.warn('dream', 'notes-merge-rejected', { batch: id, family: picked.family, reasons: plan.rejected });
+    if (plan.merges.length === 0) {
+      return plan.rejected.length > 0 ? failed(`提出的 ${plan.rejected.length} 个合并都没通过校验`) : { summary: none, files: [], lines: [] };
+    }
+    const files = await applyNotesPlan(dir, plan);
+    return { summary: notesPlanSummary(plan, picked.family), files, lines: notesChangelogLines(plan) };
   }
 
   /**

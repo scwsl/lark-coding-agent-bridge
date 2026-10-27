@@ -196,6 +196,11 @@ export function changelogEntry(input: {
   return lines.join('\n');
 }
 
+/** The CHANGELOG entry of 深睡整理: notes merged and archived, one line each. */
+export function deepChangelogEntry(input: { batchId: string; at: number; timezone: string; lines: readonly string[] }): string {
+  return [`## ${localTime(input.at, input.timezone)} · 批次 \`${input.batchId}\` · 深睡整理`, '', ...input.lines].join('\n');
+}
+
 export function localTime(at: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
