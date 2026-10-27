@@ -43,8 +43,9 @@ import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
-import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, type PoolCandidate } from './pool';
+import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, type PoolCandidate, type PoolTheme } from './pool';
 import { RecallStore } from './recall';
+import { buildRemPrompt, parseRemOutput, remWorthRunning } from './rem';
 import {
   hasArgumentHint,
   parseDreamOutput,
@@ -1043,11 +1044,29 @@ export class DreamService {
       rejected.push(...outcome.rejected);
       done.push(scope);
     }
+    // REM: which of tonight's candidates say the same as each other or as the pool, and the night's themes.
+    let rem: DiaryInput['rem'];
+    let themes: PoolTheme[] | undefined;
+    const remaining = deadline - this.now();
+    if (remWorthRunning(candidates.length, this.pool.entries().length) && !current.yielding && remaining > 0) {
+      const built = buildRemPrompt({ candidates, pool: this.pool.entries(), tonight: additions.map((item) => item.text) });
+      const answer = await this.runAgent(`dream:${run.id}:rem`, built.prompt, actor, remaining, signal);
+      if (signal.aborted) return stopped('游标未移动');
+      const parsed = 'error' in answer ? answer : parseRemOutput(answer.text, built, { candidates, pool: this.pool.entries() });
+      if ('error' in parsed) {
+        rem = { themes: 0, recurring: 0, error: parsed.error };
+      } else {
+        themes = parsed.themes;
+        rem = { themes: parsed.themes.length, recurring: parsed.recurring, ...(parsed.narrative ? { narrative: parsed.narrative } : {}) };
+      }
+    }
+
     // 候选池: tonight's inferred notes join it; what recurred or whose note is being read is promoted.
     const reads = this.recall.counter(POOL_READ_DAYS, this.now(), timezone);
     const pooled = planPool({
       entries: this.pool.entries(),
       candidates,
+      ...(themes ? { themes } : {}),
       now: this.now(),
       timezone,
       reads: (note) => reads(`note:${note}`),
@@ -1145,6 +1164,7 @@ export class DreamService {
           topNotes: this.recall.top('note:', DIARY_TOP_DAYS, now, timezone, 5),
           topSkills: this.recall.top('skill:', DIARY_TOP_DAYS, now, timezone, 3),
         },
+        ...(rem ? { rem } : {}),
         deep: {
           ...drafted.tally,
           pool: { entered: pooled.entered, promoted: pooled.promote.length, expired: pooled.expired, size: pooled.entries.length },

@@ -260,6 +260,40 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect(h.service.runs()[0]).toMatchObject({ status: 'succeeded', note: expect.stringContaining('没有新的') });
   });
 
+  it('REM finds a pooled inference again in another conversation and promotes it', async () => {
+    const inferred = (text: string) =>
+      JSON.stringify({ memory: [{ action: 'add', target: 'note', note: 'deploy', text, reason: '推测', evidence: 'inferred', sources: ['S1#1'] }], skills: [] });
+    let night = 0;
+    const h = await harness({
+      answer: (prompt) => {
+        if (prompt.includes('<candidates>')) {
+          return JSON.stringify({ themes: [{ title: '发布耗时', members: ['T1', 'P1'] }], narrative: '今晚主要在聊发布要多久。' });
+        }
+        return inferred(night === 0 ? '发布大概要十分钟' : '上线流程耗时约 10 min');
+      },
+    });
+    talk(h, 'sess-1');
+    const first = await h.service.start({ id: 'ou-admin' });
+    if ('error' in first) throw new Error(first.error);
+    await h.service.idle();
+    expect(h.submits).toHaveLength(1);
+    expect(h.service.runs()[0]!.diary).toContain('候选池：新进 1 条、晋升 0 条');
+    expect(await showFile(h.knowledgeRemote, 'main', 'notes/oc_team/deploy.md')).toBe('');
+
+    night = 1;
+    talk(h, 'sess-2');
+    const second = await h.service.start({ id: 'ou-admin' });
+    if ('error' in second) throw new Error(second.error);
+    await h.service.idle();
+    // One proposal turn and one REM turn.
+    expect(h.submits).toHaveLength(3);
+    expect(h.prompts[2]).toContain('发布大概要十分钟');
+    const run = h.service.runs()[0]!;
+    expect(run.diary).toContain('**REM**：今晚主要在聊发布要多久。主题 1 个，其中跨会话或跨天复现的 1 个。');
+    expect(run.diary).toContain('晋升 1 条');
+    expect(await showFile(h.knowledgeRemote, `dream/${run.id}`, 'notes/oc_team/deploy.md')).toContain('上线流程耗时约 10 min');
+  });
+
   it('keeps an unopened PR for a retry and opens it on the next run', async () => {
     const h = await harness({ answer: () => JSON.stringify({ memory: [{ action: 'add', target: 'chat', text: '一条事实', reason: 'r', sources: ['S1#1'] }] }) });
     talk(h, 'sess-1');
@@ -445,6 +479,10 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     const resumed = await h.service.checkAuto();
     expect(resumed.started).toBeDefined();
     await vi.waitFor(() => expect(h.submits).toHaveLength(3));
+    h.release();
+    // REM: the second chat's inference next to the one the first round pooled.
+    await vi.waitFor(() => expect(h.submits).toHaveLength(4));
+    expect(h.prompts[3]).toContain('<candidates>');
     h.release();
     await h.service.idle();
     const second = h.service.runs()[0]!;
