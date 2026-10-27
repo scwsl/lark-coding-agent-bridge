@@ -2,19 +2,28 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CardPatchHealth,
   instrumentCardPatches,
+  isTransientPatchError,
   larkErrorCode,
 } from '../../../src/bot/card-patch-health.js';
 
 /** Mirrors the SDK card stream: updates go out through `this.patch()`. */
 class SdkLikeController {
   calls = 0;
-  constructor(private readonly outcomes: Array<'ok' | 'fail'>) {}
+  constructor(private readonly outcomes: Array<'ok' | 'fail' | 'server' | 'network'>) {}
   async patch(): Promise<void> {
     const outcome = this.outcomes[this.calls++] ?? 'ok';
     if (outcome === 'fail') {
       throw Object.assign(new Error('Request failed with status code 400'), {
-        response: { data: { code: 230025 } },
+        response: { status: 400, data: { code: 230025 } },
       });
+    }
+    if (outcome === 'server') {
+      throw Object.assign(new Error('Request failed with status code 500'), {
+        response: { status: 500, data: { code: 2200 } },
+      });
+    }
+    if (outcome === 'network') {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
     }
   }
   /** What the SDK's throttle timer does. */
@@ -54,6 +63,68 @@ describe('card patch health', () => {
     expect(health.lastFailed).toBe(false);
     for (let i = 0; i < 2; i++) await ctrl.fire();
     expect(onBroken).not.toHaveBeenCalled();
+  });
+
+  it('re-sends an update Feishu failed with a server error', async () => {
+    const onBroken = vi.fn();
+    const health = new CardPatchHealth(onBroken);
+    const ctrl = new SdkLikeController(['server', 'ok']);
+    const sleep = vi.fn(async () => {});
+    instrumentCardPatches(ctrl, health, [1000, 3000], sleep);
+
+    await ctrl.fire();
+
+    expect(ctrl.calls).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(1000);
+    expect(health.lastFailed).toBe(false);
+    expect(health.consecutiveFailures).toBe(0);
+  });
+
+  it('re-sends after a dropped connection', async () => {
+    const health = new CardPatchHealth(() => {});
+    const ctrl = new SdkLikeController(['network', 'network', 'ok']);
+    const sleep = vi.fn(async () => {});
+    instrumentCardPatches(ctrl, health, [1000, 3000], sleep);
+
+    await ctrl.fire();
+
+    expect(ctrl.calls).toBe(3);
+    expect(sleep.mock.calls).toEqual([[1000], [3000]]);
+    expect(health.lastFailed).toBe(false);
+  });
+
+  it('counts one failure once every retry of a server error failed', async () => {
+    const health = new CardPatchHealth(() => {});
+    const ctrl = new SdkLikeController(['server', 'server', 'server', 'ok']);
+    instrumentCardPatches(ctrl, health, [1000, 3000], async () => {});
+
+    await ctrl.fire();
+
+    expect(ctrl.calls).toBe(3);
+    expect(health.lastFailed).toBe(true);
+    expect(health.consecutiveFailures).toBe(1);
+    expect(health.lastErrorCode).toBe(2200);
+  });
+
+  it('does not re-send an update Feishu rejected (4xx)', async () => {
+    const health = new CardPatchHealth(() => {});
+    const ctrl = new SdkLikeController(['fail', 'ok']);
+    const sleep = vi.fn(async () => {});
+    instrumentCardPatches(ctrl, health, [1000, 3000], sleep);
+
+    await ctrl.fire();
+
+    expect(ctrl.calls).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(health.lastFailed).toBe(true);
+  });
+
+  it('tells transient failures from permanent ones', () => {
+    expect(isTransientPatchError({ response: { status: 500 } })).toBe(true);
+    expect(isTransientPatchError({ response: { status: 503 } })).toBe(true);
+    expect(isTransientPatchError(new Error('socket hang up'))).toBe(true);
+    expect(isTransientPatchError({ response: { status: 400, data: { code: 230025 } } })).toBe(false);
+    expect(isTransientPatchError({ response: { data: { code: 230099 } } })).toBe(false);
   });
 
   it('leaves controllers without a patch method alone', () => {

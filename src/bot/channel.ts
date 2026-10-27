@@ -2158,6 +2158,32 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // Set once the stream's failed final update was rescued: that already
       // re-sent the answer, so the card-broken delivery below must not repeat it.
       let rescued = false;
+      // The card's last update was rejected for good: point the card at the
+      // answer and post the answer as messages. Runs at most once — at the end
+      // of the run, or later when the final update outlived the grace window.
+      let cardBrokenHandled = false;
+      const deliverIfCardBroken = async (): Promise<boolean> => {
+        if (cardBrokenHandled || rescued || !cardHealth.lastFailed) return false;
+        cardBrokenHandled = true;
+        await deliverAnswerOutsideCard({
+          channel,
+          chatId,
+          scope,
+          sendOpts,
+          reason: 'card-broken',
+          state: filterForPrefs(latestState),
+          ...(cardMessageId
+            ? {
+                messageId: cardMessageId,
+                pointerCard: renderCard(
+                  pointerState(latestState, cardHealth.lastErrorCode, locale),
+                  cardRenderOptions,
+                ),
+              }
+            : {}),
+        });
+        return true;
+      };
       const heartbeat = setInterval(() => {
         if (cardCtrl && latestState.terminal === 'running') {
           void cardCtrl.update(renderLiveCard(latestState));
@@ -2205,6 +2231,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                   state: filterForPrefs(state),
                 });
               },
+          lateStreamEnd: separateFinalReply ? undefined : () => deliverIfCardBroken().then(() => {}),
         });
       } catch (err) {
         if (!separateFinalReply) throw err;
@@ -2228,24 +2255,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         // The card is the reply. If it doesn't hold the whole answer — its
         // last update was rejected, or the answer outgrew it — post the
         // answer as ordinary messages so it is never lost.
-        const reason = cardHealth.lastFailed && !rescued ? 'card-broken' : cardTrimmed ? 'too-long' : undefined;
-        if (reason) {
+        if (!(await deliverIfCardBroken()) && cardTrimmed) {
           await deliverAnswerOutsideCard({
             channel,
             chatId,
             scope,
             sendOpts,
-            reason,
+            reason: 'too-long',
             state: filterForPrefs(latestState),
-            ...(reason === 'card-broken' && cardMessageId
-              ? {
-                  messageId: cardMessageId,
-                  pointerCard: renderCard(
-                    pointerState(latestState, cardHealth.lastErrorCode, locale),
-                    cardRenderOptions,
-                  ),
-                }
-              : {}),
           });
         }
       }
@@ -2900,6 +2917,12 @@ async function awaitRenderAwareStream(input: {
    * (Codex: its answer goes out separately anyway).
    */
   rescue?: (state: RunState) => Promise<void>;
+  /**
+   * Runs once a stream that outlived the grace window finally completes. Its
+   * last update may have failed only then — after the run already checked —
+   * so the caller re-checks here and delivers the answer if the card is stuck.
+   */
+  lateStreamEnd?: () => Promise<void>;
 }): Promise<void> {
   const streamResult = input.progress.settled.then(
     () => ({ kind: 'stream' as const, ok: true as const }),
@@ -2951,11 +2974,15 @@ async function awaitRenderAwareStream(input: {
         mode: input.mode,
         graceMs: STREAM_TERMINAL_GRACE_MS,
       });
-      const { rescue } = input;
+      const { rescue, lateStreamEnd } = input;
       void streamResult.then(async (result) => {
         if (!result.ok) {
           log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
           if (rescue && !isTargetRevoked(result.err)) await runFallbackReply(input.mode, first.state, rescue, 'rescue');
+          return;
+        }
+        if (lateStreamEnd) {
+          await lateStreamEnd().catch((err) => log.fail('stream', err, { step: 'stream-late-end' }));
         }
       });
       return;

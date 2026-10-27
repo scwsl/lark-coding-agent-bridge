@@ -46,6 +46,14 @@ export class CardPatchHealth {
 }
 
 /**
+ * Waits before re-sending a card update Feishu failed with a server error or a
+ * dropped connection. 2026-10-27: the final update of a finished run got a 500
+ * after 3.7 s and was never re-sent, so the card kept showing "running" with a
+ * stop button although the run was done.
+ */
+export const CARD_PATCH_RETRY_DELAYS_MS: readonly number[] = [1000, 3000];
+
+/**
  * Route the SDK card stream's patch results into `health`.
  *
  * The SDK (`@larksuite/channel` CardStreamControllerImpl) patches from a
@@ -55,22 +63,60 @@ export class CardPatchHealth {
  * alike. Failures are swallowed here on purpose: `health` now carries them,
  * and the run checks `health.lastFailed` once the stream completes.
  *
+ * A transient failure (see {@link isTransientPatchError}) is retried after each
+ * of `retryDelaysMs` before it counts. The SDK's `patch()` snapshots the card
+ * when it is called, so a retry sends the newest card, never a stale one.
+ *
  * Returns false when the controller doesn't have that shape (a different SDK
  * version, a test fake): the run proceeds unchanged, just without detection.
  */
-export function instrumentCardPatches(ctrl: object, health: CardPatchHealth): boolean {
+export function instrumentCardPatches(
+  ctrl: object,
+  health: CardPatchHealth,
+  retryDelaysMs: readonly number[] = CARD_PATCH_RETRY_DELAYS_MS,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): boolean {
   const target = ctrl as { patch?: unknown };
   const original = target.patch;
   if (typeof original !== 'function') return false;
   target.patch = async (): Promise<void> => {
-    try {
-      await (original as () => Promise<void>).call(ctrl);
-      health.success();
-    } catch (err) {
-      health.failure(err);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await (original as () => Promise<void>).call(ctrl);
+        health.success();
+        return;
+      } catch (err) {
+        const wait = retryDelaysMs[attempt];
+        if (wait === undefined || !isTransientPatchError(err)) {
+          health.failure(err);
+          return;
+        }
+        log.warn('card', 'patch-retry', {
+          attempt: attempt + 1,
+          status: httpStatus(err) ?? null,
+          code: larkErrorCode(err) ?? null,
+        });
+        await sleep(wait);
+      }
     }
   };
   return true;
+}
+
+/**
+ * Worth sending again: Feishu answered with a server error (5xx), or nothing
+ * came back at all (connection reset, timeout). A 4xx — card too long, message
+ * recalled — fails the same way every time.
+ */
+export function isTransientPatchError(err: unknown): boolean {
+  const status = httpStatus(err);
+  if (status !== undefined) return status >= 500;
+  return (err as { response?: unknown } | undefined)?.response === undefined;
+}
+
+function httpStatus(err: unknown): number | undefined {
+  const status = (err as { response?: { status?: unknown } } | undefined)?.response?.status;
+  return typeof status === 'number' ? status : undefined;
 }
 
 export function larkErrorCode(err: unknown): number | undefined {
