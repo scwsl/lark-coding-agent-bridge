@@ -428,6 +428,7 @@ Claude 和 Codex 读的是同一份 skill 索引，一个文件同时服务两�
 /practice cancel          # 取消正在进行的整理（游标不动，下次重读）
 /practice prs             # 整理开出的 PR 及其审核状态
 /practice diff [批次]     # 某一批的差异（默认最近一次）
+/practice diary [批次]    # 某一批的梦境日记：读了什么、归纳出什么主题、写进 / 整合 / 归档了什么
 /practice revert <批次>   # 撤销某一批：已合并的开 revert Draft PR，未合并的告诉你去关 PR
 ```
 

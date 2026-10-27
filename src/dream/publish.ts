@@ -209,19 +209,32 @@ export async function writeSkillDraft(
  * Returns the path to commit, or an error when the file is not a plain file.
  */
 export async function writeChangelog(dir: string, entry: string): Promise<{ file: string } | { error: string }> {
-  const file = join(dir, CHANGELOG_FILE);
-  if (await isSymlink(file)) return { error: `${CHANGELOG_FILE} 是符号链接，不写` };
+  return prependEntry(dir, CHANGELOG_FILE, CHANGELOG_HEADER, entry);
+}
+
+/**
+ * Put `entry` at the top of a log file in the checkout (before its first
+ * `## ` heading, newest first), creating it with `header` the first time.
+ */
+export async function prependEntry(
+  dir: string,
+  name: string,
+  header: string,
+  entry: string,
+): Promise<{ file: string } | { error: string }> {
+  const file = join(dir, name);
+  if (await isSymlink(file)) return { error: `${name} 是符号链接，不写` };
   const current = await readIfExists(file);
   const block = `${entry.trim()}\n`;
   let next: string;
   if (current === undefined) {
-    next = `${CHANGELOG_HEADER}\n${block}`;
+    next = `${header}\n${block}`;
   } else {
     const at = current.search(/^## /m);
     next = at < 0 ? `${current.replace(/\s*$/, '')}\n\n${block}` : `${current.slice(0, at)}${block}\n${current.slice(at)}`;
   }
   await writeFile(file, next, 'utf8');
-  return { file: CHANGELOG_FILE };
+  return { file: name };
 }
 
 export const CHANGELOG_FILE = 'CHANGELOG.md';

@@ -51,7 +51,7 @@ export function formatDreamStatus(view: DreamStatusView): string {
   }
   lines.push(
     '',
-    '`/practice run` 立即整理 · `/practice cancel` 取消 · `/practice prs` PR 列表 · `/practice diff [批次]` 查看差异 · `/practice revert <批次>` 撤销',
+    '`/practice run` 立即整理 · `/practice cancel` 取消 · `/practice prs` PR 列表 · `/practice diff [批次]` 查看差异 · `/practice diary [批次]` 梦境日记 · `/practice revert <批次>` 撤销',
   );
   return lines.join('\n');
 }

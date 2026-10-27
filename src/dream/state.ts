@@ -104,6 +104,8 @@ export interface DreamRun {
   yielded?: boolean;
   /** 浅睡·召回统计 of this run: what the conversations read since the last scan. */
   recall?: { sessions: number; exchanges: number; reads: number };
+  /** 梦境日记 of this run (Markdown), for `/practice diary`; only runs that got as far as publishing. */
+  diary?: string;
 }
 
 interface DreamStateData {

@@ -428,6 +428,7 @@ Rules agreed in a chat, verified conclusions and procedures that worked are easy
 /practice cancel          # stop the running round (cursors do not move, it is re-read next time)
 /practice prs             # PRs it opened and their review state
 /practice diff [batch]    # the diff of a batch (default: the latest)
+/practice diary [batch]   # the dream diary of a batch: what was read, themes, what was written / consolidated / archived
 /practice revert <batch>  # undo a batch: a revert Draft PR if merged, otherwise a pointer to close the PR
 ```
 

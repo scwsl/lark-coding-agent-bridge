@@ -1872,6 +1872,11 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, 'error' in result ? `❌ ${result.error}` : formatDreamRevert(result));
       return;
     }
+    case 'diary': {
+      const result = dream.diary(rest[0]);
+      await reply(ctx, 'error' in result ? result.error : `**🌙 梦境日记**\n\n${result.diary.replace(/^## /, '### ')}`);
+      return;
+    }
     case 'diff': {
       const result = await dream.diff(rest[0]);
       if ('error' in result) {
@@ -1896,6 +1901,7 @@ async function handleDream(args: string, ctx: CommandContext): Promise<void> {
           '`/practice cancel` — 取消正在进行的整理',
           '`/practice prs` — 整理开出的 PR 及审核状态',
           '`/practice diff [批次]` — 查看某个批次的差异（默认最近一次）',
+          '`/practice diary [批次]` — 梦境日记：这一轮读了什么、归纳出什么主题、写进 / 整合 / 归档了什么、多少没采纳（默认最近一次）',
           '`/practice revert <批次>` — 撤销一个已合并的批次（开一个撤销用的 Draft PR）',
           '',
           '默认以 Draft PR 发布、审核合并后才生效；配置文件里 `dreamTuning.publish: "push"` 改为直接提交推送并写 CHANGELOG.md。「课堂精练」「自动整理」两个开关在 `/config` 里。',

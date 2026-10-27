@@ -38,6 +38,7 @@ import {
   type ExternalCursor,
   type ExternalMaterial,
 } from './external';
+import { diaryEntry, diaryWorthWriting, writeDiary, type DiaryInput } from './diary';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
@@ -241,6 +242,15 @@ interface ChangelogContext {
   sources: ChangelogSources;
 }
 
+/** What a run's drafts wrote, for the diary. */
+interface DraftTally {
+  /** Conventions: chat / profile memory. */
+  memory: number;
+  notes: number;
+  flags: number;
+  skills: number;
+}
+
 /** What 课前学习 brought into a run. */
 interface LearningOutcome {
   additions: MemoryAddition[];
@@ -287,7 +297,11 @@ const WATCHDOG_MS = 15_000;
 const UNKNOWN_QUOTA_BUDGET = 0.5;
 /** Recall window the notes index is ranked by. */
 const NOTE_RANK_DAYS = 30;
+/** The diary's most read notes / skills: the last week. */
+const DIARY_TOP_DAYS = 7;
 const AUTO_ACTOR: DreamActor = { id: 'dream-auto', name: '自动整理' };
+/** 深睡整理's direct target in the knowledge repository: diary, notes consolidation, archive. */
+const DEEP_REPO = 'knowledge:deep';
 /** Deferral reason of the conversations an automatic run left to a user task. */
 export const YIELD_REASON = '让位给用户任务';
 
@@ -535,6 +549,14 @@ export class DreamService {
     );
   }
 
+  /** 梦境日记 of one batch (default: the latest that has one). */
+  diary(id?: string): { id: string; diary: string } | { error: string } {
+    const run = id ? this.state.run(id) : this.runs().find((item) => item.diary);
+    if (!run) return { error: id ? `没有批次 \`${id}\`。` : '还没有写过梦境日记：整理走到发布这一步才会写。' };
+    if (!run.diary) return { error: `批次 \`${run.id}\` 没有日记（没有走到发布这一步：${run.note ?? run.status}）。` };
+    return { id: run.id, diary: run.diary };
+  }
+
   /** Diff of one batch (default: the latest that produced something). */
   async diff(id?: string): Promise<{ id: string; parts: Array<{ label: string; diff: string }> } | { error: string }> {
     const run = id
@@ -576,6 +598,10 @@ export class DreamService {
           .join('、')}。`,
       };
     }
+    const directNotes: DreamRevertResult['results'] = direct.map((target) => ({
+      label: target.label,
+      note: `直接推送的，没有 PR；要撤销在仓库里 \`git revert ${target.commit!.slice(0, 7)}\``,
+    }));
     if (targets.length === 0) return { error: `批次 \`${id}\` 没有开出过 PR，没有可撤销的内容。` };
     if (this.reverting) return { error: '已经有一个撤销在进行，稍后再试。' };
     this.reverting = true;
@@ -589,7 +615,7 @@ export class DreamService {
       });
       if ('error' in held) return { error: held.error };
       locks = held;
-      const results: DreamRevertResult['results'] = [];
+      const results: DreamRevertResult['results'] = [...directNotes];
       for (const target of targets) {
         results.push({ label: target.label, ...(await this.revertTarget(run.id, target, repos)) });
       }
@@ -788,7 +814,7 @@ export class DreamService {
       // backlog too — and all there is to go on when `gh` cannot answer.
       const waiting = runs
         .flatMap((run) => run.targets)
-        .filter((target) => target.repo === repo.repo && (target.phase === 'committed' || target.phase === 'pushed')).length;
+        .filter((target) => baseRepo(target.repo) === repo.repo && (target.phase === 'committed' || target.phase === 'pushed')).length;
       worst = Math.max(worst, (live ?? 0) + waiting);
     }
     return worst;
@@ -1070,6 +1096,39 @@ export class DreamService {
     if (signal.aborted) {
       return this.finish(run.id, 'cancelled', `${current.stopped ?? '已取消'}；草稿已保存，下一轮补推、补开 PR`);
     }
+
+    // 深睡整理 and the diary: after the checkpoint, so nothing here can cost the input.
+    const now = this.now();
+    const timezone = settings.auto.timezone;
+    const latest = this.state.run(run.id);
+    const deepNote = await this.deepSleep(
+      run.id,
+      settings,
+      {
+        batchId: run.id,
+        at: now,
+        timezone,
+        trigger: run.trigger ?? 'manual',
+        ...(run.round ? { round: run.round } : {}),
+        light: {
+          sessions: sessionsTotal,
+          scopes: selection.scopes.length,
+          exchanges: latest?.exchanges ?? 0,
+          deferred: deferred.length,
+          external: learning.report,
+          recall,
+          topNotes: this.recall.top('note:', DIARY_TOP_DAYS, now, timezone, 5),
+          topSkills: this.recall.top('skill:', DIARY_TOP_DAYS, now, timezone, 3),
+        },
+        deep: {
+          ...drafted.tally,
+          ...(settings.publish === 'push' ? {} : { viaPr: true }),
+          problems: (latest?.targets ?? []).filter((target) => target.error).map((target) => `${target.label}：${target.error}`),
+        },
+        rejected,
+      },
+      signal,
+    );
     await this.pruneCheckouts();
     const targets = this.state.run(run.id)?.targets ?? [];
     const problems = targets.filter((target) => target.error);
@@ -1083,6 +1142,7 @@ export class DreamService {
       `记忆 / 笔记 ${additions.length + flags.length} 条，skill ${skillProposals.length} 个，未采纳 ${rejected.length} 条`,
       targets.length === 0 ? '没有值得提交的内容' : undefined,
       deferred.length > 0 ? `${deferred.length} 个会话延后` : undefined,
+      deepNote,
       problems.length > 0 ? problems.map((target) => `${target.label}：${target.error}`).join('；') : undefined,
     ]
       .filter(Boolean)
@@ -1367,11 +1427,12 @@ export class DreamService {
     },
     signal: AbortSignal,
     changelog?: ChangelogContext,
-  ): Promise<{ blocked: boolean; published: string[] }> {
+  ): Promise<{ blocked: boolean; published: string[]; tally: DraftTally }> {
     let blocked = false;
     const published: string[] = [];
+    const tally: DraftTally = { memory: 0, notes: 0, flags: 0, skills: 0 };
     if (input.additions.length > 0 || input.flags.length > 0) {
-      const target = await this.draftKnowledge(id, input, signal, changelog);
+      const target = await this.draftKnowledge(id, input, signal, changelog, tally);
       if (target.phase === 'failed') blocked = true;
       if (target.commit) published.push(...input.additions.map((item) => item.hash), ...input.flags.map((item) => item.hash));
     }
@@ -1379,8 +1440,9 @@ export class DreamService {
       const outcome = await this.draftSkills(id, input.skills, input.rejected, input.legend, signal, changelog);
       if (outcome.blocked) blocked = true;
       published.push(...outcome.published);
+      tally.skills = input.skills.filter((skill) => outcome.published.includes(skill.hash)).length;
     }
-    return { blocked, published };
+    return { blocked, published, tally };
   }
 
   private async draftKnowledge(
@@ -1388,6 +1450,7 @@ export class DreamService {
     input: { additions: MemoryAddition[]; flags: MemoryFlag[]; rejected: DreamRejection[]; legend: SessionLegend[] },
     signal: AbortSignal,
     changelog?: ChangelogContext,
+    tally?: DraftTally,
   ): Promise<DreamTarget> {
     const direct = changelog !== undefined;
     let target: DreamTarget = {
@@ -1437,6 +1500,11 @@ export class DreamService {
         changelogEntry({ batchId: id, at: this.now(), ...changelog, knowledge: written, flags: writtenFlags }),
       );
       if ('file' in logged) files.push(logged.file);
+    }
+    if (tally) {
+      tally.memory = written.filter((item) => item.target !== 'note').length;
+      tally.notes = written.length - tally.memory;
+      tally.flags = writtenFlags.length;
     }
     const title = knowledgePrTitle(id, written.length + writtenFlags.length);
     const body = knowledgePrBody({
@@ -1579,6 +1647,38 @@ export class DreamService {
     return { blocked: false, published };
   }
 
+  /**
+   * 深睡整理, once the night's input is checkpointed and published: the
+   * diary entry, kept with the run and — when the run changed anything —
+   * put at the top of the knowledge repository's DREAMS.md. Nothing here
+   * moves a cursor; a failure is reported and tried again another night.
+   * Returns a line for the run's summary, if any.
+   */
+  private async deepSleep(id: string, settings: DreamSettings, diary: DiaryInput, signal: AbortSignal): Promise<string | undefined> {
+    this.state.updateRun(id, { diary: diaryEntry(diary) });
+    // A Draft PR for nothing but the diary is noise: with publish: pr the diary stays in the run record.
+    if (signal.aborted || settings.publish !== 'push' || !diaryWorthWriting(diary)) return undefined;
+    const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
+    if (!url) return undefined;
+    let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（梦境日记）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
+    const dir = join(this.deps.workDir, 'batches', id, 'deep');
+    const prepared = await prepareCheckout({ repo: DEEP_REPO, label: target.label, url }, dir, target.branch, { direct: true });
+    if ('error' in prepared) {
+      this.saveTarget(id, { ...target, error: prepared.error });
+      return `梦境日记没写成：${prepared.error}`;
+    }
+    target = { ...target, branch: prepared.base, base: prepared.base, checkoutDir: dir };
+    const written = await writeDiary(dir, diaryEntry(diary));
+    if ('error' in written) {
+      this.saveTarget(id, { ...target, phase: 'skipped', error: written.error });
+      return `梦境日记没写成：${written.error}`;
+    }
+    const committed = await this.commitTarget(id, target, [written.file], '梦境日记');
+    if (committed.phase !== 'committed') return `梦境日记没写成：${committed.error ?? '提交失败'}`;
+    const pushed = await this.pushAndOpen(id, committed);
+    return pushed.error ? `梦境日记没推成：${pushed.error}` : undefined;
+  }
+
   private async commitTarget(id: string, target: DreamTarget, files: string[], summary: string): Promise<DreamTarget> {
     const committed = await commitDraft(target.checkoutDir!, files, commitMessage(id, summary), this.hooksDir());
     if ('error' in committed) return this.saveTarget(id, { ...target, phase: 'failed', error: committed.error });
@@ -1639,15 +1739,16 @@ export class DreamService {
     }
     const done = this.saveTarget(id, { ...target, phase: 'published', commit: pushed.commit, error: undefined });
     log.info('dream', 'pushed-direct', { batch: id, repo: target.repo });
+    const repo = baseRepo(target.repo);
     const url = this.repoTargets(await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined)).find(
-      (item) => item.repo === target.repo,
+      (item) => item.repo === repo,
     )?.url;
     for (const raw of url ? resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).localClones : []) {
       const dir = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
       const pulled = await pullLocalClone(dir, url!);
       if ('error' in pulled) log.warn('dream', 'local-clone-pull-failed', { batch: id, error: pulled.error });
     }
-    await this.deps.afterPublish?.(target.repo).catch((err: unknown) => log.fail('dream', err, { step: 'after-publish', repo: target.repo }));
+    await this.deps.afterPublish?.(repo).catch((err: unknown) => log.fail('dream', err, { step: 'after-publish', repo }));
     return done;
   }
 
@@ -1688,7 +1789,7 @@ export class DreamService {
     if (info.state === 'OPEN') return { note: '还没合并，没有生效；不要的话直接在平台上关闭这个 PR' };
     if (info.state === 'CLOSED') return { note: '已关闭、没合并，没有生效，不用撤销' };
     if (info.state !== 'MERGED' || !info.mergeCommit) return { note: `PR 状态是 ${info.state || '未知'}，没法撤销` };
-    const url = repos.find((item) => item.repo === target.repo.replace(/:update$/, ''))?.url;
+    const url = repos.find((item) => item.repo === baseRepo(target.repo))?.url;
     if (!url) return { note: '这个仓库已经不在配置里，没法撤销' };
     const branch = `${dreamBranch(id)}-revert`;
     const dir = join(this.deps.workDir, 'reverts', id, target.repo.replace(/[^\w.-]+/g, '-'));
@@ -1792,6 +1893,14 @@ export class DreamService {
     }
     await rm(join(this.deps.workDir, 'reverts'), { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * The repository a target writes to: a batch may have several targets in one
+ * repository (`knowledge:deep`, `skills:<lib>:update`), each under its own key.
+ */
+export function baseRepo(repo: string): string {
+  return repo === 'knowledge' || repo.startsWith('knowledge:') ? 'knowledge' : repo.replace(/:update$/, '');
 }
 
 /** The run limits scaled down to a share; never below one session / one minute. */

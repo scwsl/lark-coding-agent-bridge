@@ -308,6 +308,7 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(run.targets.map((target) => [target.repo, target.phase, target.direct])).toEqual([
       ['knowledge', 'published', true],
       ['skills:occam', 'published', true],
+      ['knowledge:deep', 'published', true],
     ]);
     expect(run.external).toEqual([{ library: 'cc', head: expect.stringMatching(/^[0-9a-f]{40}$/), files: 2, pending: 0 }]);
 
@@ -323,6 +324,14 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(knowledgeLog).toContain('（自动）');
     expect(knowledgeLog).toMatch(/课前学习 cc@[0-9a-f]{7}（2 个文件）/);
     expect(knowledgeLog).toContain('笔记 `notes/external/circuit-breaker.md`');
+    // 梦境日记: the same night, newest first, also kept with the run.
+    const diary = await showFile(h.knowledgeRemote, 'main', 'DREAMS.md');
+    expect(diary).toMatch(/^# 梦境日记/);
+    expect(diary).toContain(`批次 \`${run.id}\`（自动）`);
+    expect(diary).toContain('课前学习 cc 2 个文件');
+    expect(diary).toContain('当晚生效：笔记 1 条、技能 2 个');
+    expect(run.diary).toContain('**深睡**');
+    expect(h.service.diary()).toMatchObject({ id: run.id });
 
     expect(await branches(h.skillsRemote)).toEqual(['main']);
     expect(await showFile(h.skillsRemote, 'main', 'skills/status-panel/SKILL.md')).toContain('argument-hint');
@@ -332,7 +341,7 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     expect(skillsLog).toContain('新建技能 `status-panel`');
     expect(skillsLog).toContain('更新技能 `deploy`');
 
-    expect(h.published).toEqual(['knowledge', 'skills:occam']);
+    expect(h.published).toEqual(['knowledge', 'skills:occam', 'knowledge']);
     // The local clone of the skill library is fast-forwarded; a clone of another repository is left alone.
     expect(await readFile(join(clone, 'skills', 'status-panel', 'SKILL.md'), 'utf8')).toContain('argument-hint');
     expect((await git(unrelated, ['log', '--oneline'])).stdout.trim().split('\n')).toHaveLength(1);
@@ -374,6 +383,7 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
       ['knowledge', 'published'],
       ['skills:occam', 'published'],
       ['skills:occam:update', 'pr-created'],
+      ['knowledge:deep', 'published'],
     ]);
     // main has the new skill and the changelog, not the rewrite
     expect(await showFile(h.skillsRemote, 'main', 'skills/status-panel/SKILL.md')).toContain('argument-hint');
@@ -382,7 +392,7 @@ describe('课堂精练 每日模式 with 课前学习 and publish: push', { time
     // the rewrite waits on its own branch for review
     expect(await showFile(h.skillsRemote, `dream/${run.id}`, 'skills/deploy/SKILL.md')).toContain('argument-hint: "[环境]"');
     expect(await showFile(h.skillsRemote, `dream/${run.id}`, 'CHANGELOG.md')).toBe('');
-    expect(h.published).toEqual(['knowledge', 'skills:occam']);
+    expect(h.published).toEqual(['knowledge', 'skills:occam', 'knowledge']);
   });
 
   it('holds back rewrites while the last rewrite PR is still open', async () => {

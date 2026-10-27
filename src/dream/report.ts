@@ -196,7 +196,7 @@ export function changelogEntry(input: {
   return lines.join('\n');
 }
 
-function localTime(at: number, timezone: string): string {
+export function localTime(at: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
