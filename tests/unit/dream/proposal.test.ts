@@ -262,3 +262,22 @@ describe('project-scoped skill names', () => {
     expect(learning).not.toMatch(/\{\{(SKILL_NAMING|NAME_FORMAT)\}\}/);
   });
 });
+
+describe('evidence', () => {
+  it('keeps admin only with an admin turn behind it, and takes anything unclear as an inference', () => {
+    const out = validateDreamProposals(
+      {
+        memory: [
+          { action: 'add', target: 'note', note: 'ci', text: '部署前先跑 ci', reason: '管理员说的', evidence: 'admin', sources: ['S1#1'] },
+          { action: 'add', target: 'note', note: 'ci', text: '用 dev 分支', reason: '转述', evidence: 'admin', sources: ['S1#2'] },
+          { action: 'add', target: 'note', note: 'ci', text: 'ci 跑了 3 分钟', reason: '跑过', evidence: 'verified', sources: ['S1#2'] },
+          { action: 'add', target: 'note', note: 'ci', text: 'ci 可能很慢', reason: '猜', evidence: 'maybe', sources: ['S1#2'] },
+        ],
+        skills: [],
+      },
+      ctx(),
+    );
+    expect(out.additions.map((item) => item.evidence)).toEqual(['admin', 'inferred', 'verified', 'inferred']);
+    expect(built.prompt).toContain('evidence');
+  });
+});

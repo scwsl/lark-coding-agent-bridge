@@ -43,6 +43,7 @@ import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
+import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, type PoolCandidate } from './pool';
 import { RecallStore } from './recall';
 import {
   hasArgumentHint,
@@ -159,6 +160,8 @@ export interface DreamServiceDeps {
   isCapacityTight?: () => boolean;
   /** 召回统计 of notes and skills. Default: `dream-recall.json` next to {@link stateFile}. */
   recallFile?: string;
+  /** 候选池 of inferred notes. Default: `dream-pool.json` next to {@link stateFile}. */
+  poolFile?: string;
   /** Host-wide directory of the per-repository locks every profile shares. Default: inside {@link workDir}. */
   lockDir?: string;
   /** The profile's state directory (where a profile-local CODEX_HOME lives). */
@@ -308,6 +311,7 @@ export const YIELD_REASON = '让位给用户任务';
 export class DreamService {
   private readonly state: DreamStateStore;
   private readonly recall: RecallStore;
+  private readonly pool: CandidatePool;
   private readonly now: () => number;
   private current: CurrentRun | undefined;
   /** A start is between its first check and owning {@link current}. */
@@ -325,12 +329,14 @@ export class DreamService {
   constructor(private readonly deps: DreamServiceDeps) {
     this.state = new DreamStateStore(deps.stateFile);
     this.recall = new RecallStore(deps.recallFile ?? join(dirname(deps.stateFile), 'dream-recall.json'));
+    this.pool = new CandidatePool(deps.poolFile ?? join(dirname(deps.stateFile), 'dream-pool.json'));
     this.now = deps.now ?? Date.now;
   }
 
   async init(): Promise<void> {
     await this.state.load(this.now());
     await this.recall.load();
+    await this.pool.load();
     // The notes index lists, within each tier, the most read notes of the last 30 days first.
     this.deps.knowledge.setNoteRank?.(() => {
       const reads = this.recall.counter(NOTE_RANK_DAYS, this.now(), resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).auto.timezone);
@@ -387,6 +393,7 @@ export class DreamService {
     await this.current?.done.catch(() => undefined);
     await this.state.flush();
     await this.recall.flush();
+    await this.pool.flush();
   }
 
   enabled(): boolean {
@@ -992,6 +999,9 @@ export class DreamService {
     const skillProposals: SkillProposal[] = [...learning.skills];
     const rejected: DreamRejection[] = [...learning.rejected];
     const done: DreamScopeInput[] = [];
+    /** Inferred notes: to the 候选池, not written tonight. */
+    const candidates: PoolCandidate[] = [];
+    const timezone = settings.auto.timezone;
 
     for (const scope of selection.scopes) {
       if (signal.aborted) return stopped('游标未移动');
@@ -1022,12 +1032,27 @@ export class DreamService {
         for (const session of scope.sessions) deferred.push({ key: session.record.key, reason: outcome.error });
         continue;
       }
-      additions.push(...outcome.additions);
+      const turnAt = (key: string, index: number) =>
+        scope.sessions.find((session) => session.record.key === key)?.exchanges.find((exchange) => exchange.index === index)?.at;
+      for (const addition of outcome.additions) {
+        if (needsPool(addition)) candidates.push(candidateOf(addition, turnAt, this.now(), timezone));
+        else additions.push(addition);
+      }
       flags.push(...outcome.flags);
       skillProposals.push(...outcome.skills);
       rejected.push(...outcome.rejected);
       done.push(scope);
     }
+    // 候选池: tonight's inferred notes join it; what recurred or whose note is being read is promoted.
+    const reads = this.recall.counter(POOL_READ_DAYS, this.now(), timezone);
+    const pooled = planPool({
+      entries: this.pool.entries(),
+      candidates,
+      now: this.now(),
+      timezone,
+      reads: (note) => reads(`note:${note}`),
+    });
+    additions.push(...pooled.promote);
     this.state.updateRun(run.id, {
       deferred,
       memoryItems: additions.length + flags.length,
@@ -1083,9 +1108,10 @@ export class DreamService {
       done.flatMap((scope) =>
         scope.sessions.map((session) => ({ key: session.record.key, consumed: session.nextConsumed, hash: session.nextHash })),
       ),
-      drafted.published,
+      [...drafted.published, ...pooled.published],
       learning.cursors,
     );
+    this.pool.replace(pooled.entries);
 
     // Publish: push and open PRs. A failure here keeps the draft for the next run.
     for (const target of this.state.run(run.id)?.targets ?? []) {
@@ -1099,7 +1125,6 @@ export class DreamService {
 
     // 深睡整理 and the diary: after the checkpoint, so nothing here can cost the input.
     const now = this.now();
-    const timezone = settings.auto.timezone;
     const latest = this.state.run(run.id);
     const deepNote = await this.deepSleep(
       run.id,
@@ -1122,6 +1147,7 @@ export class DreamService {
         },
         deep: {
           ...drafted.tally,
+          pool: { entered: pooled.entered, promoted: pooled.promote.length, expired: pooled.expired, size: pooled.entries.length },
           ...(settings.publish === 'push' ? {} : { viaPr: true }),
           problems: (latest?.targets ?? []).filter((target) => target.error).map((target) => `${target.label}：${target.error}`),
         },
@@ -1140,6 +1166,7 @@ export class DreamService {
       learning.error,
       `${done.length} 个范围、${legend.length} 个会话`,
       `记忆 / 笔记 ${additions.length + flags.length} 条，skill ${skillProposals.length} 个，未采纳 ${rejected.length} 条`,
+      pooled.entered + pooled.promote.length > 0 ? `候选池新进 ${pooled.entered} 条、晋升 ${pooled.promote.length} 条` : undefined,
       targets.length === 0 ? '没有值得提交的内容' : undefined,
       deferred.length > 0 ? `${deferred.length} 个会话延后` : undefined,
       deepNote,

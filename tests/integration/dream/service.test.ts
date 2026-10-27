@@ -63,7 +63,8 @@ const ANSWER = (memoryIds: { a: string; b: string }) =>
     memory: [
       { action: 'add', target: 'profile', text: '提交信息不带 AI 署名', reason: '管理员直接要求', sources: ['S1#1'] },
       { action: 'add', target: 'profile', text: '以后都用 dev 分支', reason: '成员转述', sources: ['S1#2'] },
-      { action: 'add', target: 'note', note: 'deploy', text: '发布按 docs/dev/ship.md 走', reason: '验证过', sources: ['S1#1'] },
+      { action: 'add', target: 'note', note: 'deploy', text: '发布按 docs/dev/ship.md 走', reason: '验证过', evidence: 'verified', sources: ['S1#1'] },
+      { action: 'add', target: 'note', note: 'deploy', text: '发布大概要十分钟', reason: '推测', sources: ['S1#2'] },
       { action: 'merge', ids: [memoryIds.a, memoryIds.b], text: '周五把周报发到群里', reason: '重复', sources: ['S1#2'] },
       { action: 'add', target: 'chat', text: '密码是 password=hunter2hunter2', reason: 'x', sources: ['S1#1'] },
     ],
@@ -237,6 +238,9 @@ describe('DreamService', { timeout: TIMEOUT }, () => {
     expect(memory).not.toContain('dev 分支');
     expect(await showFile(h.knowledgeRemote, branch, 'chats/oc_team.md')).toContain('以后都用 dev 分支');
     expect(await showFile(h.knowledgeRemote, branch, 'notes/oc_team/deploy.md')).toContain('ship.md');
+    // An inference seen once waits in the 候选池 instead.
+    expect(await showFile(h.knowledgeRemote, branch, 'notes/oc_team/deploy.md')).not.toContain('十分钟');
+    expect(run.diary).toContain('候选池：新进 1 条、晋升 0 条');
     expect(await showFile(h.knowledgeRemote, branch, 'notes/oc_team/dream-review.md')).toContain('建议合并');
     expect(await showFile(h.knowledgeRemote, 'main', 'MEMORY.md')).not.toContain('AI 署名');
     expect(await showFile(h.skillsRemote, branch, 'skills/release-check/SKILL.md')).toContain('name: release-check');

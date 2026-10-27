@@ -32,10 +32,11 @@ const INSTRUCTIONS = `你在做「课堂精练」：把下面这一个会话范�
 6. 不要推测本会话范围以外的事情；不要复述 existing_memory 里已有的条目。重复的可以用 merge 建议合并，矛盾的用 conflict 标出（text 写新的说法，reason 写清双方依据），疑似过时的用 stale 标出——这三种只做标记，不会改文件。ids 只能用 existing_memory 里的 id。
 7. skill 只在同一种操作已经成功做过、且明显会再用到时才提出；body 是完整的 SKILL.md（以 --- 开头的 frontmatter 含 name 和 description{{ARGUMENT_HINT}}），写清触发条件、输入要求、步骤、成功判定、失败处理、权限边界。已有同名 skill 时用 action "update" 并给出完整的新正文，否则用 "create"，name 不能和 existing_skills 里的名字重复。{{SKILL_NAMING}}
 8. 条目 text 写成一句完整、可独立理解的中文；宁缺毋滥，没有值得整理的内容就输出空数组。
+9. 每条 add 都要标 evidence：管理员本人直接说的（依据里有 admin 为 true 的轮次，如「记住…」「以后都…」）写 "admin"；对话里实际执行命令、查询、测试并确认了结果的写 "verified"；只是从对话归纳、推断出来、没有被验证过的写 "inferred"。拿不准就写 "inferred"。inferred 的笔记不会当晚写入，要在别的会话或别的日子再次出现、或者对应笔记被人读到过才会写入。
 
 输出格式：
 {"memory":[
-  {"action":"add","target":"chat|profile|note","note":"仅 target 为 note 时填写","text":"…","reason":"…","sources":["S1#3"]},
+  {"action":"add","target":"chat|profile|note","note":"仅 target 为 note 时填写","text":"…","reason":"…","evidence":"admin|verified|inferred","sources":["S1#3"]},
   {"action":"merge","ids":["a1b2c3","d4e5f6"],"text":"合并后的写法","reason":"…","sources":["S1#3"]},
   {"action":"conflict","ids":["a1b2c3"],"text":"新的说法","reason":"…","sources":["S1#3"]},
   {"action":"stale","ids":["a1b2c3"],"reason":"…","sources":["S1#3"]}

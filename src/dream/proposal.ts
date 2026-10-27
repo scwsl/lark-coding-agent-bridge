@@ -25,8 +25,16 @@ export interface MemoryAddition {
   sources: DreamSourceRef[];
   /** Asked for `profile` without an admin's own words behind it: kept for the chat only. */
   downgraded?: boolean;
+  /**
+   * What it rests on: an admin's own words, a result the conversation
+   * verified, or only an inference. An inferred note waits in the 候选池
+   * until it recurs; absent counts as inferred.
+   */
+  evidence?: DreamEvidence;
   hash: string;
 }
+
+export type DreamEvidence = 'admin' | 'verified' | 'inferred';
 
 /** Merge / conflict / stale: listed in the PR for a human, never applied to a file. */
 export interface MemoryFlag {
@@ -213,6 +221,9 @@ function validateMemoryItem(
     if (target !== 'note' && (existingText.chat.has(key) || existingText.profile.has(key))) {
       return { error: '与已有记忆重复' };
     }
+    // An admin's words only when an admin's turn is among the sources; anything unclear is an inference.
+    let evidence: DreamEvidence = item.evidence === 'admin' || item.evidence === 'verified' ? item.evidence : 'inferred';
+    if (evidence === 'admin' && !sources.some((source) => source.admin)) evidence = 'inferred';
     return {
       kind: 'add',
       scopeId: ctx.scopeId,
@@ -222,6 +233,7 @@ function validateMemoryItem(
       reason,
       sources,
       ...(downgraded ? { downgraded } : {}),
+      evidence,
       hash: hashOf(['add', target as string, target === 'profile' ? '' : ctx.scopeId, note ?? '', key]),
     };
   }
