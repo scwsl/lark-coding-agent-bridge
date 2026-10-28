@@ -79,6 +79,17 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Opens the read-only paths lying inside a fenced (`bash: 'any'`) tree: the
+ * hook lets them be named. Their own `write` rules still refuse changes.
+ */
+function carveReadOnly(rule: GuardRule, readOnly: readonly string[]): GuardRule {
+  if (rule.bash !== 'any') return rule;
+  const inside = (p: string): boolean => p === rule.path || p.startsWith(`${rule.path}/`);
+  const open = readOnly.filter(inside).map((p) => `${escapeRe(p)}(?![^/\\s'"\`;|&()<>])`);
+  return open.length > 0 ? { ...rule, allow: [...(rule.allow ?? []), ...open] } : rule;
+}
+
 export function ownerOnlyGuard(opts: {
   larkChannelHome: string;
   /** Projects the owner opened to others (`access.guestRoots`). */
@@ -119,9 +130,11 @@ export function ownerOnlyGuard(opts: {
     ],
     allowPatterns: [`${escapeRe(lc)}/profiles/[^/]+/media/`],
     rules: [
-      { path: root, bash: 'any' },
+      // A read-only root inside these trees (say one skill of a synced skill
+      // library) stays readable and runnable.
+      carveReadOnly({ path: root, bash: 'any' }, readOnlyRoots),
       // Attachments the user sent land under media/ and must stay readable.
-      { path: lc, bash: 'any', allow: [`${escapeRe(lc)}/profiles/[^/]+/media/`] },
+      carveReadOnly({ path: lc, bash: 'any', allow: [`${escapeRe(lc)}/profiles/[^/]+/media/`] }, readOnlyRoots),
       ...['CLAUDE.md', 'settings.json', 'settings.local.json', 'skills', 'agents', 'scripts', 'projects'].map(
         (name): GuardRule => ({ path: join(claude, name), bash: 'write' }),
       ),
@@ -168,11 +181,7 @@ export function restrictedChatGuard(
   const inside = (p: string, root: string): boolean => p === root || p.startsWith(`${root}/`);
   // A read-only path stays readable inside a fenced tree: the hook lets it be
   // named, and Claude's own Read deny is dropped for the trees holding one.
-  const carve = (rule: GuardRule): GuardRule => {
-    if (rule.bash !== 'any') return rule;
-    const open = readOnly.filter((p) => inside(p, rule.path)).map((p) => `${escapeRe(p)}(?![^/\\s'"\`;|&()<>])`);
-    return open.length > 0 ? { ...rule, allow: [...(rule.allow ?? []), ...open] } : rule;
-  };
+  const carve = (rule: GuardRule): GuardRule => carveReadOnly(rule, readOnly);
   const holdsReadOnly = (p: string): boolean => readOnly.some((r) => inside(r, p));
   return {
     ...base,

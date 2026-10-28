@@ -169,6 +169,42 @@ describe('guest runs: read-only roots', () => {
     expect(guard.allowedRoots).toContain(READ_ONLY);
     expect(claudeGuardArgs(guard).args).toContain(`Edit(/${READ_ONLY}/**)`);
   });
+
+  describe('inside the bridge home (one skill of a synced skill library)', () => {
+    const SKILL = `${LC}/profiles/claude/skill-libraries/occam-skills/skills/antelope-deploy`;
+    const skillGuard = ownerOnlyGuard({
+      larkChannelHome: LC,
+      guestReadOnlyRoots: ['~/.lark-channel/profiles/claude/skill-libraries/occam-skills/skills/antelope-deploy'],
+      workspace: WORKSPACE,
+      home: HOME,
+      root: ROOT,
+    });
+    const skillEnv = claudeGuardArgs(skillGuard).env;
+    const run = (toolName: string, toolInput: Record<string, unknown>) =>
+      spawnSync(process.execPath, [skillGuard.hookScript], {
+        input: JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: WORKSPACE }),
+        env: { ...process.env, ...skillEnv },
+        encoding: 'utf8',
+      }).status;
+
+    it('reads and runs it', () => {
+      expect(run('Read', { file_path: `${SKILL}/SKILL.md` })).toBe(0);
+      expect(run('Bash', { command: `python3 ${SKILL}/scripts/deploy.py status --plan x` })).toBe(0);
+      expect(run('Bash', { command: `cd ${SKILL} && python3 scripts/deploy.py allow` })).toBe(0);
+    });
+
+    it('never writes into it', () => {
+      expect(run('Bash', { command: `echo x > ${SKILL}/SKILL.md` })).toBe(2);
+      expect(run('Edit', { file_path: `${SKILL}/scripts/deploy.py` })).toBe(2);
+    });
+
+    it('keeps the rest of the bridge home fenced', () => {
+      expect(run('Read', { file_path: `${LC}/profiles/claude/skill-libraries/occam-skills/skills/other/SKILL.md` })).toBe(2);
+      expect(run('Bash', { command: `cat ${SKILL}-old/SKILL.md` })).toBe(2);
+      expect(run('Bash', { command: `cat ${SKILL}/../../../../../../config.json` })).toBe(2);
+      expect(run('Bash', { command: 'cat ~/.lark-channel/config.json' })).toBe(2);
+    });
+  });
 });
 
 describe('guest runs: owner-only commands of this deployment', () => {
