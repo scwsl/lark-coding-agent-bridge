@@ -375,6 +375,31 @@ function fakeRun(events: AgentEvent[], log: string[] = []): AgentRun {
   };
 }
 
+/**
+ * A scripted claude attempt kept on for its background tasks: after its
+ * events it stays up, as the real process does, until it is stopped.
+ */
+function lingeringRun(events: AgentEvent[], log: string[] = []): AgentRun {
+  let release!: () => void;
+  const stopped = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    runId: 'r',
+    pid: 1,
+    events: (async function* () {
+      yield* events;
+      await stopped;
+      yield { type: 'done', terminationReason: 'interrupted' } as AgentEvent;
+    })(),
+    stop: async () => {
+      log.push('stop');
+      release();
+    },
+    waitForExit: async () => false,
+  };
+}
+
 async function collect(run: AgentRun): Promise<AgentEvent[]> {
   const out: AgentEvent[] = [];
   for await (const evt of run.events) out.push(evt);
@@ -611,6 +636,73 @@ describe('account failover', () => {
     expect(calls[1]!.opts.prompt).toBe(BACKGROUND_FAILOVER_PROMPT);
     expect(pool.isRefused('default')).toBe(true);
     expect(events).toContainEqual(expect.objectContaining({ type: 'account', switchedFrom: 'default' }));
+  });
+
+  it('moves a refused user turn with background subagents at once, not when the kept process ends', async () => {
+    const { pool } = await poolWith(['b']);
+    const calls: Array<{ account: string; opts: AgentRunOptions }> = [];
+    const stops: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (opts, account) => {
+        calls.push({ account: account.id, opts });
+        return calls.length === 1
+          ? lingeringRun(
+              [
+                { type: 'system', sessionId: 's1' },
+                { type: 'background', count: 4 },
+                { type: 'subagent_rate_limited', taskId: 'a1', at: NOW },
+                limit({ blocked: true, message: "You've hit your 5-hour limit" }),
+                { type: 'usage', costUsd: 11 },
+                { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+              ],
+              stops,
+            )
+          : fakeRun([{ type: 'text', delta: 'resumed on b' }, { type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+      },
+      labelOf: async (account) => account.label ?? account.id,
+    });
+    const events = await collect(run);
+    expect(calls.map((c) => c.account)).toEqual(['default', 'b']);
+    expect(stops).toEqual(['stop']);
+    // The whole session — main agent and every subagent — goes to one account.
+    expect(calls[1]!.opts).toMatchObject({ sessionId: 's1', prompt: failoverPrompt('hello', { subagents: true }) });
+    expect(calls[1]!.opts.prompt).toContain('SendMessage');
+    expect(events.filter((e) => e.type === 'rate_limit')).toEqual([]);
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'background')).toEqual([
+      { type: 'background', count: 4 },
+      { type: 'background', count: 0 },
+    ]);
+    expect(events).toContainEqual({ type: 'account', label: 'b-name', switchedFrom: 'default' });
+    expect(pool.pick()?.id).toBe('b');
+  });
+
+  it('with no account to move to, a refused user turn with background tasks pauses at once', async () => {
+    const { pool } = await poolWith(['b']);
+    pool.observe('b', limit({ blocked: true, resetsAt: NOW + 30 * 60_000 }));
+    const spawned: string[] = [];
+    const run = runWithAccountFailover(OPTS, {
+      pool,
+      spawn: (_opts, account) => {
+        spawned.push(account.id);
+        return lingeringRun([
+          { type: 'background', count: 2 },
+          limit({ blocked: true, resetsAt: NOW + HOUR }),
+          { type: 'done', sessionId: 's1', terminationReason: 'normal' },
+        ]);
+      },
+      labelOf: async () => 'me',
+    });
+    const seen: AgentEvent[] = [];
+    for await (const evt of run.events) {
+      seen.push(evt);
+      if (evt.type === 'done') break;
+    }
+    expect(spawned).toEqual(['default']);
+    expect(seen.reduce(reduce, initialState).terminal).toBe('paused');
+    expect(seen.find((e) => e.type === 'rate_limit')).toMatchObject({ blocked: true, resetsAt: NOW + 30 * 60_000 });
+    await run.stop();
   });
 
   it('a refused background turn of a stopped run stays put', async () => {

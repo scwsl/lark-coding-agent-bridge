@@ -25,6 +25,9 @@ export interface AccountFailoverDeps {
  *   has room, the refused process is let go and a new one resumes the session
  *   on that account, with a note to pick up where the last one stopped.
  *   Otherwise the held events go out unchanged and the run ends `paused`.
+ *   A process kept on for background tasks never ends there: the move (or
+ *   the pause) is decided at the refused turn's end, and the tasks — on the
+ *   spent account too — are brought back on the new one.
  * - **Past its line**: Claude reports the quota once per message, after the
  *   first request. When that report puts the account at or past a switch
  *   line and another account is still below its lines, the run moves — to
@@ -97,6 +100,10 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
     const exclude = new Set([from]);
     return cap ? deps.pool.pickReady(exclude, cap) : deps.pool.pickRunnable(exclude);
   };
+
+  /** Where a refused user turn is retried; a capped run only on an account below its cap. */
+  const refusalTarget = (): PickedAccount | undefined =>
+    cap ? deps.pool.pickReady(tried, cap) : deps.pool.pickRunnable(tried);
 
   /** Where the next user message should go instead of the current process, if anywhere. */
   const handoverTarget = (): { to: PickedAccount; reason: string } | undefined => {
@@ -211,6 +218,18 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         if (terminal && evt.type === 'done' && evt.sessionId) sessionId = evt.sessionId;
         if (refusal && terminal) {
           held.push(evt);
+          // Kept on for its background tasks, the process does not exit after
+          // the refused turn: decide now instead of when it ends. Waiting held
+          // the turn back until the idle timeout killed it (2026-10-29: four
+          // subagents cut off with the main turn on a spent account).
+          if (background > 0 && !stopped && !wasInterrupted(held)) {
+            if (refusalTarget()) break;
+            // Nowhere to go: the turn ends paused; its tasks report back as before.
+            yield soonestReset(refusal, deps.pool);
+            refusal = undefined;
+            turnEnded = true;
+            yield* held.splice(0);
+          }
           continue;
         }
         if (refusal && isProgress(evt)) {
@@ -340,20 +359,22 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         yield* held;
         return;
       }
-      // A capped run moves only to an account below its cap, never one past it.
-      const next =
-        stopped || wasInterrupted(held)
-          ? undefined
-          : cap
-            ? deps.pool.pickReady(tried, cap)
-            : deps.pool.pickRunnable(tried);
+      const next = stopped || wasInterrupted(held) ? undefined : refusalTarget();
       if (!next) {
         yield soonestReset(refusal, deps.pool);
         yield* held;
         return;
       }
-      log.info('agent', 'account-failover', { runId: opts.runId, from: on.id, to: next.id, hasSession: Boolean(sessionId) });
-      if (!(await attempt.waitForExit(deps.exitWaitMs ?? 10_000))) await attempt.stop();
+      log.info('agent', 'account-failover', {
+        runId: opts.runId,
+        from: on.id,
+        to: next.id,
+        hasSession: Boolean(sessionId),
+        background,
+        subagentsCut,
+      });
+      // With background tasks left the process stays up for them: no use waiting.
+      if (background > 0 || !(await attempt.waitForExit(deps.exitWaitMs ?? 10_000))) await attempt.stop();
       if (stopped) {
         yield refusal;
         yield* held;
