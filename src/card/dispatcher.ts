@@ -25,6 +25,21 @@ import { lookupMessageThreadId } from '../bot/thread-id';
 const BRIDGE_CALLBACK_MARKER = '__bridge_cb';
 const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
 
+/** Marker on buttons a skill's script put on its own card (antelope:deploy's
+ * confirm / cancel), whose value is the skill name. These are clicked long
+ * after the run that sent the card has ended, so there is no run to sign a
+ * token against; the click goes to the agent unsigned, as the clicker, and
+ * the skill re-checks who clicked against its own state (the deploy script
+ * only lets the plan's operator confirm it). To keep a forged card from
+ * smuggling instructions in under someone else's name, the value may only
+ * carry a few short identifier fields — no free text.
+ */
+const SKILL_CALLBACK_MARKER = '__skill_cb';
+const SKILL_NAME = /^[a-z0-9-]{1,40}:[a-z0-9-]{1,40}$/;
+const SKILL_FIELD_KEY = /^[a-z_]{1,32}$/;
+const SKILL_FIELD_VALUE = /^[A-Za-z0-9_.:,/@-]{1,120}$/;
+const SKILL_MAX_FIELDS = 6;
+
 export interface CardDispatchDeps {
   channel: LarkChannel;
   evt: CardActionEvent;
@@ -81,6 +96,19 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });
+    return;
+  }
+
+  if (SKILL_CALLBACK_MARKER in payload) {
+    const click = skillClick(payload);
+    if (!click) {
+      log.warn('cardAction', 'skip-bad-skill-callback', {
+        scope,
+        payload: JSON.stringify(payload).slice(0, 200),
+      });
+      return;
+    }
+    forwardToAgent(deps, click, undefined, scope, threadId, mode);
     return;
   }
 
@@ -255,6 +283,26 @@ function mayStopRun(deps: CardDispatchDeps, scope: string, operatorId: string): 
     operatorId,
     running.supplement?.initiators,
   ).ok;
+}
+
+/** `{__skill_cb: 'antelope:deploy', action: 'confirm', plan: '…'}` →
+ * `{skill: 'antelope:deploy', action: 'confirm', plan: '…'}`, or undefined
+ * when the value is anything but a skill name plus a few short identifiers
+ * (or also carries a command or bridge-callback fields). */
+function skillClick(payload: Record<string, unknown>): Record<string, string> | undefined {
+  const { [SKILL_CALLBACK_MARKER]: skill, ...fields } = payload;
+  if (typeof skill !== 'string' || !SKILL_NAME.test(skill)) return undefined;
+  if ('cmd' in fields || 'skill' in fields || isSignedBridgeCallback(fields)) return undefined;
+  const entries = Object.entries(fields);
+  if (entries.length === 0 || entries.length > SKILL_MAX_FIELDS) return undefined;
+  const click: Record<string, string> = { skill };
+  for (const [key, value] of entries) {
+    if (!SKILL_FIELD_KEY.test(key) || typeof value !== 'string' || !SKILL_FIELD_VALUE.test(value)) {
+      return undefined;
+    }
+    click[key] = value;
+  }
+  return click;
 }
 
 function isSignedBridgeCallback(payload: Record<string, unknown>): boolean {
