@@ -7,6 +7,9 @@ import {
   bestSwitchTarget,
   claudeAccountsPaths,
   findAccountRow,
+  findPausedAccount,
+  pausedNote,
+  pausedRefusal,
   switchToAccount,
   ClaudeAccountPool,
   deleteAccount,
@@ -164,6 +167,11 @@ export async function runClaudeAccountSwitch(
     }
   }
   const target = query ? findAccountRow(rows, query) : bestSwitchTarget(rows);
+  const paused = query && !target ? findPausedAccount(pool, query) : undefined;
+  if (paused) {
+    console.error(`✗ 没有切换：${paused.name}（${paused.id}）${pausedRefusal(paused.until)}；要提前恢复用 claude-account resume ${paused.id}`);
+    process.exit(1);
+  }
   if (!target) {
     console.error(query ? `✗ 没有叫「${query}」的账户` : '✗ 其他账户都已到切换线或额度用尽，暂时没有可切换的');
     process.exit(1);
@@ -182,6 +190,55 @@ export async function runClaudeAccountSwitch(
     `✓ 已把 ${target.name}（${target.id}）设为主账户${boost ? `，切换线临时调到 ${line}%，该窗口重置后恢复` : ''}，运行中的 bridge 下一次运行前生效\n`,
   );
   console.log(accountsTable(accountRows(pool, label)).replace(/\*\*/g, ''));
+  const note = pausedNote(pool);
+  if (note) console.log(`\n${note}`);
+}
+
+/**
+ * Take an account out of rotation until a date (`--until 2026-11-13`, local
+ * midnight; or `2026-11-13T09:00`) or for some days (`--days 14`). Runs
+ * already on it move at their next message; it comes back on its own.
+ */
+export async function runClaudeAccountPause(
+  id: string,
+  opts: AccountCliOptions & { until?: string; days?: string },
+): Promise<void> {
+  const until = parsePauseUntil(opts);
+  if (typeof until === 'string') {
+    console.error(`✗ ${until}`);
+    process.exit(1);
+  }
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await updateAccount(claudeAccountsPaths(appPaths.profileDir), id, { pausedUntil: until });
+  console.log(`✓ 已暂停账户 ${id} 到 ${new Date(until).toLocaleString('zh-CN', { hour12: false })}，到期自动恢复；运行中的 bridge 下一次运行前生效\n`);
+  await runClaudeAccountList(opts);
+}
+
+/** End a pause now. */
+export async function runClaudeAccountResume(id: string, opts: AccountCliOptions = {}): Promise<void> {
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await updateAccount(claudeAccountsPaths(appPaths.profileDir), id, { pausedUntil: null });
+  console.log(`✓ 已恢复账户 ${id}，运行中的 bridge 下一次运行前生效\n`);
+  await runClaudeAccountList(opts);
+}
+
+/** `--until 2026-11-13` (local midnight) / `2026-11-13T09:00`, or `--days 14`: epoch ms in the future, else why not. */
+export function parsePauseUntil(opts: { until?: string; days?: string }, now = Date.now()): number | string {
+  if ((opts.until === undefined) === (opts.days === undefined)) return '--until <日期> 和 --days <天数> 二选一';
+  let until: number;
+  if (opts.days !== undefined) {
+    const days = Number(opts.days.trim());
+    if (!Number.isFinite(days) || days <= 0) return `天数要是正数：${opts.days}`;
+    until = now + days * 86_400_000;
+  } else {
+    const raw = opts.until!.trim();
+    // A bare date is local midnight, not UTC midnight as Date.parse reads it.
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    until = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime() : Date.parse(raw);
+    if (!Number.isFinite(until)) return `日期看不懂：${opts.until}（例：2026-11-13 或 2026-11-13T09:00）`;
+  }
+  if (until <= now) return '暂停截止时间要在将来';
+  return until;
 }
 
 /** `--five-hour 98` / `--weekly 90%`; `0` (when allowed) drops an account's own line. Anything else exits. */

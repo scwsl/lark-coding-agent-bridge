@@ -7,7 +7,9 @@ import {
   runClaudeAccountLines,
   runClaudeAccountList,
   runClaudeAccountOrder,
+  runClaudeAccountPause,
   runClaudeAccountRemove,
+  runClaudeAccountResume,
   runClaudeAccountSet,
   runClaudeAccountSwitch,
 } from './commands/claude-account';
@@ -347,6 +349,24 @@ claudeAccount
   .option('--profile <name>', 'profile name (defaults to active profile)')
   .action(async (id: string | undefined, opts: { profile?: string; line?: string }) => {
     await runClaudeAccountSwitch(id, { profile: opts.profile, ...(opts.line !== undefined ? { line: opts.line } : {}) });
+  });
+
+claudeAccount
+  .command('pause <id>')
+  .description('Take an account out of rotation until a date or for some days; it comes back on its own')
+  .option('--until <date>', 'resume on this date (2026-11-13 is local midnight; 2026-11-13T09:00 also works)')
+  .option('--days <n>', 'resume after this many days')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string, opts: { until?: string; days?: string; profile?: string }) => {
+    await runClaudeAccountPause(id, opts);
+  });
+
+claudeAccount
+  .command('resume <id>')
+  .description('End a pause now')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (id: string, opts: { profile?: string }) => {
+    await runClaudeAccountResume(id, { profile: opts.profile });
   });
 
 claudeAccount

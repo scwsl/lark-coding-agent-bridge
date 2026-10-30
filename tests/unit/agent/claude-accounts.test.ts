@@ -16,6 +16,8 @@ import {
   accountSecretId,
   bestSwitchTarget,
   findAccountRow,
+  findPausedAccount,
+  pausedNote,
   formatDaysHours,
   formatHoursMinutes,
   parseSwitchQuery,
@@ -40,7 +42,7 @@ import { readClaudeQuota } from '../../../src/agent/claude/quota.js';
 import { refreshPickQuota } from '../../../src/agent/claude/quota-probe.js';
 import { translateEvent } from '../../../src/agent/claude/stream-json.js';
 import type { AgentEvent, AgentRun, AgentRunOptions } from '../../../src/agent/types.js';
-import { readVerification } from '../../../src/cli/commands/claude-account.js';
+import { parsePauseUntil, readVerification } from '../../../src/cli/commands/claude-account.js';
 import { renderCard } from '../../../src/card/run-renderer.js';
 import { initialState, reduce } from '../../../src/card/run-state.js';
 import { getSecret } from '../../../src/config/keystore.js';
@@ -1122,6 +1124,109 @@ describe('switch lines and rounds', () => {
     pool.observe('default', weekly(0));
     expect(pool.score('default') - pool.score('backup2')).toBeGreaterThan(STICKY_MARGIN);
     expect(pool.pick()?.id).toBe('default');
+  });
+});
+
+describe('pausing an account', () => {
+  it('keeps a paused account out of every pick until the pause ends, then it comes back on its own', async () => {
+    let now = NOW;
+    const { pool, paths } = await poolWith(['b', 'c'], { now: () => now });
+    await updateAccount(paths, 'b', { pausedUntil: NOW + 14 * 24 * HOUR });
+    await pool.refresh();
+    expect(readAccountsConfig(paths).accounts[1]).toEqual({ id: 'b', label: 'b-name', pausedUntil: NOW + 14 * 24 * HOUR });
+    expect(pool.accounts().map((a) => a.id)).toEqual(['default', 'c']);
+    expect(pool.isPaused('b')).toBe(true);
+    pool.observe('default', limit({ blocked: true, resetsAt: NOW + HOUR }));
+    pool.observe('c', limit({ blocked: true, resetsAt: NOW + 2 * HOUR }));
+    // Every other account refused: still not the paused one.
+    expect(pool.pick()?.id).toBe('default');
+    expect(pool.pickRunnable()).toBeUndefined();
+    expect(findPausedAccount(pool, 'B-NAME')).toMatchObject({ id: 'b', name: 'b-name' });
+    expect(pausedNote(pool)).toContain('b-name（b）到');
+    expect(accountsReport(pool, 'yu.ou', NOW).at(-1)).toContain('**b-name**（已暂停，b；');
+    expect(accountRows(pool, 'yu.ou', NOW).map((r) => r.id)).toEqual(['default', 'c']);
+
+    now = NOW + 14 * 24 * HOUR + 1;
+    expect(pool.isPaused('b')).toBe(false);
+    expect(pool.accounts().map((a) => a.id)).toEqual(['default', 'b', 'c']);
+    expect(pausedNote(pool)).toBeUndefined();
+  });
+
+  it('resumes on request, and never pauses the CLI login', async () => {
+    const { pool, paths } = await poolWith(['b']);
+    await updateAccount(paths, 'b', { pausedUntil: NOW + HOUR });
+    await updateAccount(paths, 'b', { pausedUntil: null });
+    await pool.refresh();
+    expect(readAccountsConfig(paths).accounts[1]).toEqual({ id: 'b', label: 'b-name' });
+    expect(pool.isPaused('b')).toBe(false);
+    await expect(updateAccount(paths, 'default', { pausedUntil: NOW + HOUR })).rejects.toThrow();
+    expect(parseAccountsConfig(JSON.stringify({ accounts: [{ id: 'default', pausedUntil: NOW + HOUR }] })).accounts).toEqual([
+      { id: 'default' },
+    ]);
+  });
+
+  it('keeps the pause through a switch and a reorder', async () => {
+    const { paths } = await poolWith(['b', 'c']);
+    await updateAccount(paths, 'b', { pausedUntil: NOW + HOUR });
+    await switchToAccount(paths, 'c');
+    await reorderAccounts(paths, ['b']);
+    expect(readAccountsConfig(paths).accounts.find((a) => a.id === 'b')?.pausedUntil).toBe(NOW + HOUR);
+  });
+
+  it('hands the next message elsewhere once the kept process is on an account that got paused', async () => {
+    const { pool, paths } = await poolWith(['b']);
+    const sent: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const calls: string[] = [];
+    pool.promote('b');
+    await pool.flush();
+    // A capped run (课堂精练) does not follow the main account: only the pause moves it.
+    const run = runWithAccountFailover({ ...OPTS, accountLineCap: { five_hour: 80 } }, {
+      pool,
+      spawn: (_opts, account) => {
+        calls.push(account.id);
+        if (calls.length > 1) return fakeRun([{ type: 'done', sessionId: 's1', terminationReason: 'normal' }]);
+        return {
+          ...fakeRun([]),
+          events: (async function* () {
+            yield { type: 'system', sessionId: 's1' } as AgentEvent;
+            yield { type: 'done', sessionId: 's1', terminationReason: 'normal' } as AgentEvent;
+            await gate;
+            yield { type: 'done', terminationReason: 'interrupted' } as AgentEvent;
+          })(),
+          stop: async () => release(),
+          send: (prompt: string) => {
+            sent.push(prompt);
+            return true;
+          },
+        };
+      },
+      labelOf: async (account) => account.label ?? account.id,
+    });
+    const it = run.events[Symbol.asyncIterator]();
+    const seen: AgentEvent[] = [];
+    while (seen.at(-1)?.type !== 'done') seen.push((await it.next()).value as AgentEvent);
+    // The owner pauses `b` while its process is kept.
+    await updateAccount(paths, 'b', { pausedUntil: NOW + HOUR });
+    await pool.refresh();
+    expect(run.send?.('new message')).toBe(true);
+    for (let r = await it.next(); !r.done; r = await it.next()) seen.push(r.value);
+    expect(sent).toEqual([]);
+    expect(calls).toEqual(['b', 'default']);
+    expect(seen).toContainEqual(expect.objectContaining({ type: 'account', switchedFrom: 'b-name', reason: '账户已暂停' }));
+  });
+
+  it('reads a pause as a date (local midnight), a date and time, or a number of days', () => {
+    const now = new Date(2026, 9, 30, 18, 0).getTime();
+    expect(parsePauseUntil({ until: '2026-11-13' }, now)).toBe(new Date(2026, 10, 13).getTime());
+    expect(parsePauseUntil({ until: '2026-11-13T09:00' }, now)).toBe(new Date(2026, 10, 13, 9, 0).getTime());
+    expect(parsePauseUntil({ days: '14' }, now)).toBe(now + 14 * 24 * HOUR);
+    expect(parsePauseUntil({}, now)).toEqual(expect.any(String));
+    expect(parsePauseUntil({ until: '2026-11-13', days: '3' }, now)).toEqual(expect.any(String));
+    expect(parsePauseUntil({ until: '2026-10-01' }, now)).toEqual(expect.any(String));
+    expect(parsePauseUntil({ until: 'soon' }, now)).toEqual(expect.any(String));
+    expect(parsePauseUntil({ days: '-1' }, now)).toEqual(expect.any(String));
   });
 });
 

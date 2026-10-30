@@ -28,7 +28,9 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  *      way — accounts are used up one after another;
  *   3. once every account has been refused: the run waits for the soonest
  *      reset (it pauses and resumes on its own).
- * The account a run moves to becomes the main one (top of the list).
+ * The account a run moves to becomes the main one (top of the list). An
+ * account paused by the owner (`pausedUntil`) takes no part until then and
+ * comes back on its own.
  *
  * Files in the profile directory:
  *   - `claude-accounts.json`: the list, in order of preference, and the
@@ -77,6 +79,8 @@ export interface ClaudeAccountEntry {
    * Dropped as soon as runs move on to another account.
    */
   boost?: Partial<Record<WindowKind, LineBoost>>;
+  /** Paused by the owner: no run uses the account until then (epoch ms); it comes back on its own. */
+  pausedUntil?: number;
 }
 
 export interface ClaudeAccountsConfig {
@@ -158,12 +162,13 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
     if (!item || typeof item !== 'object') continue;
-    const { id, label, lines, reservePercent, boost } = item as {
+    const { id, label, lines, reservePercent, boost, pausedUntil } = item as {
       id?: unknown;
       label?: unknown;
       lines?: unknown;
       reservePercent?: unknown;
       boost?: unknown;
+      pausedUntil?: unknown;
     };
     if (typeof id !== 'string' || !isValidAccountId(id) || seen.has(id)) continue;
     seen.add(id);
@@ -178,6 +183,9 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
       ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
       ...(Object.keys(own).length > 0 ? { lines: own } : {}),
       ...(raised ? { boost: raised } : {}),
+      ...(typeof pausedUntil === 'number' && Number.isFinite(pausedUntil) && id !== DEFAULT_ACCOUNT_ID
+        ? { pausedUntil }
+        : {}),
     });
   }
   if (!seen.has(DEFAULT_ACCOUNT_ID)) accounts.unshift({ id: DEFAULT_ACCOUNT_ID });
@@ -223,6 +231,8 @@ export interface AccountChanges {
   label?: string;
   /** Per window; `0` drops the account's own line (back to the profile's). */
   lines?: Partial<Record<WindowKind, number>>;
+  /** Pause the account until then (epoch ms); `null` resumes it now. */
+  pausedUntil?: number | null;
 }
 
 /** Add (or replace the token of) an account; new ones go last in the preference order. */
@@ -300,6 +310,14 @@ function applyAccountChanges(config: ClaudeAccountsConfig, id: string, changes: 
     }
   }
   if (entry.lines && Object.keys(entry.lines).length === 0) delete entry.lines;
+  if (changes.pausedUntil === null) {
+    delete entry.pausedUntil;
+  } else if (changes.pausedUntil !== undefined) {
+    // The CLI's own login stays as the account of last resort.
+    if (id === DEFAULT_ACCOUNT_ID) throw new Error('default 是 CLI 自己的登录，不能暂停');
+    if (!Number.isFinite(changes.pausedUntil)) throw new Error(`暂停截止时间无效：${changes.pausedUntil}`);
+    entry.pausedUntil = changes.pausedUntil;
+  }
 }
 
 export async function deleteAccount(paths: ClaudeAccountsPaths, id: string): Promise<boolean> {
@@ -385,11 +403,30 @@ export class ClaudeAccountPool {
     return WINDOW_KINDS.some((kind) => this.lineOf(id, kind, now) > this.baseLineOf(id, kind));
   }
 
-  /** Accounts that can run, in order of preference: the CLI's own login and those with a token. */
+  /**
+   * Accounts that can run, in order of preference: the CLI's own login and
+   * those with a token, less any the owner paused.
+   */
   accounts(): PickedAccount[] {
+    const now = this.now();
     return this.config.accounts
       .filter((a) => a.id === DEFAULT_ACCOUNT_ID || this.tokens.has(a.id))
+      .filter((a) => !isPausedEntry(a, now))
       .map((a) => this.toPicked(a));
+  }
+
+  /** Accounts the owner paused, with until when, in order of preference. */
+  pausedAccounts(): Array<{ account: PickedAccount; until: number }> {
+    const now = this.now();
+    return this.config.accounts
+      .filter((a) => isPausedEntry(a, now))
+      .map((a) => ({ account: this.toPicked(a), until: a.pausedUntil! }));
+  }
+
+  /** The owner paused the account and the pause has not ended. */
+  isPaused(id: string, now = this.now()): boolean {
+    const entry = this.config.accounts.find((a) => a.id === id);
+    return entry !== undefined && isPausedEntry(entry, now);
   }
 
   /** More than one account to choose from. */
@@ -664,6 +701,10 @@ export class ClaudeAccountPool {
   }
 }
 
+function isPausedEntry(entry: ClaudeAccountEntry, now: number): boolean {
+  return entry.pausedUntil !== undefined && entry.pausedUntil > now;
+}
+
 const pools = new Map<string, ClaudeAccountPool>();
 
 /** The one pool per profile directory, shared by the adapter, quota reads and the Sponsor lookup. */
@@ -684,7 +725,13 @@ export function claudeAccountPool(profileDir: string): ClaudeAccountPool {
  */
 export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | undefined, now = Date.now()): string[] {
   const next = pool.pick()?.id;
-  return pool.status().map(({ account, state }, index) => {
+  const paused = pool
+    .pausedAccounts()
+    .map(
+      ({ account, until }) =>
+        `- **${account.label ?? account.id}**（已暂停，${account.id}；切换线 5h ${pool.lineOf(account.id, 'five_hour')}% · 周 ${pool.lineOf(account.id, 'seven_day')}%）：⏸ 暂停到 ${formatClock(until)}，到期自动恢复`,
+    );
+  const active = pool.status().map(({ account, state }, index) => {
     const name = account.id === DEFAULT_ACCOUNT_ID ? (defaultLabel ?? 'CLI 登录') : (account.label ?? account.id);
     const marker = account.id === next ? '▶ ' : '';
     const role = index === 0 ? '主账户' : `备用 ${index}`;
@@ -708,6 +755,29 @@ export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | u
           : '';
     return `- ${marker}**${name}**（${role}，${account.id}；${lines}）：${usage}${flag}`;
   });
+  return [...active, ...paused];
+}
+
+/** `⏸ 已暂停：Mia（backup2）到 11-13 00:00 …` under the `/accounts` table; undefined when none is paused. */
+export function pausedNote(pool: ClaudeAccountPool): string | undefined {
+  const paused = pool.pausedAccounts();
+  if (paused.length === 0) return undefined;
+  const names = paused.map(({ account, until }) => `${account.label ?? account.id}（${account.id}）到 ${formatClock(until)}`);
+  return `⏸ 已暂停：${names.join('、')}，期间不参与选号，到期自动恢复。`;
+}
+
+/** A paused account by id or label, ignoring case: why a switch by name may not go to it. */
+export function findPausedAccount(pool: ClaudeAccountPool, query: string): { id: string; name: string; until: number } | undefined {
+  const q = query.trim().toLowerCase();
+  const hit = pool
+    .pausedAccounts()
+    .find(({ account }) => account.id.toLowerCase() === q || account.label?.toLowerCase() === q);
+  return hit ? { id: hit.account.id, name: hit.account.label ?? hit.account.id, until: hit.until } : undefined;
+}
+
+/** `已暂停到 11-13 00:00` — the reason a switch by name does not go to a paused account. */
+export function pausedRefusal(until: number): string {
+  return `已暂停到 ${formatClock(until)}，到期自动恢复`;
 }
 
 /** `10-21 15:00` in the machine's time zone. */

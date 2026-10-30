@@ -9,7 +9,10 @@ import {
   claudeAccountPool,
   claudeAccountsPaths,
   findAccountRow,
+  findPausedAccount,
   parseSwitchQuery,
+  pausedNote,
+  pausedRefusal,
   SWITCH_SCORE_WEIGHTS,
   switchBoost,
   switchRefusal,
@@ -79,10 +82,12 @@ export async function agentAccountsTable(profileConfig: AccountProfile, profileD
   const pool = claudeAccountPool(profileDir);
   await pool.refresh();
   const rows = accountRows(pool, await claudeAccountName());
+  const paused = pausedNote(pool);
   return [
     '**Claude 订阅账户**（✅ 为新任务正在用的账户；到切换线后自动换到得分最高的可用账户，并设为主账户）',
     '',
     accountsTable(rows),
+    ...(paused ? ['', paused] : []),
     '',
     `_用量和重置时间取自各账户最近一次运行的报告。${SCORE_NOTE}_`,
     '',
@@ -118,6 +123,8 @@ export async function switchAgentAccount(
   let boost: ClaudeAccountEntry['boost'];
   if (parsed.name) {
     target = findAccountRow(rows, parsed.name);
+    const paused = target ? undefined : findPausedAccount(pool, parsed.name);
+    if (paused) return `⚠️ 没有切换：**${paused.name}** ${pausedRefusal(paused.until)}。`;
     if (!target) return `没有叫「${parsed.name}」的账户。可选：${rows.map((r) => `${r.name}（${r.id}）`).join('、')}`;
     const refusal = switchRefusal(pool, target, parsed.line);
     if (refusal) {

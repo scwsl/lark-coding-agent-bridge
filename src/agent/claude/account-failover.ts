@@ -112,6 +112,11 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       const to = elsewhere(on.id);
       return to ? { to, reason: '额度用尽' } : undefined;
     }
+    // The owner paused the account while the process was kept.
+    if (deps.pool.isPaused(on.id)) {
+      const to = elsewhere(on.id);
+      return to ? { to, reason: '账户已暂停' } : undefined;
+    }
     // The main account changed while the process was kept (`/accounts
     // switch`, or another run moved on and promoted its account): follow it.
     // A capped run (课堂精练) borrows its account and does not follow.
