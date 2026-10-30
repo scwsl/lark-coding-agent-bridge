@@ -108,7 +108,7 @@ rl.once('line', (line) => {
   out({ type: 'user', isReplay: true, uuid: msg.uuid });
   if (!token) {
     out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } });
-    out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3 * 3600 } } } });
     out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });
     setTimeout(() => {
       out({ type: 'assistant', message: { content: [{ type: 'text', text: 'kept going on the reserve' }] } });

@@ -30,7 +30,9 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  *      reset (it pauses and resumes on its own).
  * The account a run moves to becomes the main one (top of the list). An
  * account paused by the owner (`pausedUntil`) takes no part until then and
- * comes back on its own.
+ * comes back on its own. A window about to reset ({@link GRACE_MS}) has its
+ * line opened up to {@link GRACE_LINE}: the room a line keeps back for the
+ * account's owner comes back at the reset anyway, so runs may use it first.
  *
  * Files in the profile directory:
  *   - `claude-accounts.json`: the list, in order of preference, and the
@@ -61,6 +63,15 @@ export type SwitchLines = Record<WindowKind, number>;
  */
 export type LineCap = Partial<Record<WindowKind, number>>;
 export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
+/**
+ * The line a window about to reset ({@link GRACE_MS}) opens up to. What an
+ * account's own line keeps back is lost at the reset if nobody uses it, so
+ * runs may go past the line until then; a run's cap ({@link LineCap}) still
+ * holds.
+ */
+export const GRACE_LINE = 98;
+/** How close to its reset a window counts as about to reset: under an hour for 5 hours, 12 hours for the week. */
+export const GRACE_MS: Record<WindowKind, number> = { five_hour: 3_600_000, seven_day: 12 * 3_600_000 };
 
 /** A raised line and until when it holds (that window's next reset). */
 export interface LineBoost {
@@ -386,11 +397,21 @@ export class ClaudeAccountPool {
 
   /** The line (1–100) at which runs leave the account in `kind`'s window, a raised one included, under `cap`. */
   lineOf(id: string, kind: WindowKind, now = this.now(), cap?: LineCap): number {
+    const own = this.ownLineOf(id, kind, now);
+    return withCap(this.inGrace(id, kind, now) ? Math.max(own, GRACE_LINE) : own, kind, cap);
+  }
+
+  /** The line before any near-reset opening: the account's own, raised by a switch by name. */
+  private ownLineOf(id: string, kind: WindowKind, now: number): number {
     const base = this.baseLineOf(id, kind);
     const boost = this.config.accounts.find((a) => a.id === id)?.boost?.[kind];
-    const line = boost && boost.until > now ? Math.max(base, boost.line) : base;
-    const ceiling = cap?.[kind];
-    return ceiling !== undefined ? Math.min(line, ceiling) : line;
+    return boost && boost.until > now ? Math.max(base, boost.line) : base;
+  }
+
+  /** The window resets within {@link GRACE_MS}: its line is open up to {@link GRACE_LINE}. */
+  inGrace(id: string, kind: WindowKind, now = this.now()): boolean {
+    const resetsAt = this.loadState()[id]?.windows[kind]?.resetsAt;
+    return resetsAt !== undefined && resetsAt > now && resetsAt - now < GRACE_MS[kind];
   }
 
   /** The account's own line, or the profile's, without any raise. */
@@ -400,7 +421,7 @@ export class ClaudeAccountPool {
 
   /** Some window's line is raised right now (a switch by name). */
   isBoosted(id: string, now = this.now()): boolean {
-    return WINDOW_KINDS.some((kind) => this.lineOf(id, kind, now) > this.baseLineOf(id, kind));
+    return WINDOW_KINDS.some((kind) => this.ownLineOf(id, kind, now) > this.baseLineOf(id, kind));
   }
 
   /**
@@ -522,10 +543,12 @@ export class ClaudeAccountPool {
         continue;
       }
       const reset = window.resetsAt !== undefined && window.resetsAt <= now;
+      const own = withCap(this.ownLineOf(id, kind, now), kind, cap);
       windows[kind] = {
         line,
         usedPercent: reset ? 0 : window.usedPercent,
         ...(reset ? { reset: true } : window.resetsAt !== undefined ? { resetsInMs: window.resetsAt - now } : {}),
+        ...(line > own ? { graceFrom: own } : {}),
       };
     }
     return windows;
@@ -811,6 +834,8 @@ export interface AccountWindowView {
   reset?: boolean;
   /** The account's switch line for this window (1–100). */
   line: number;
+  /** The window is about to reset, so its line is open up to {@link GRACE_LINE}: the line it had before. */
+  graceFrom?: number;
 }
 
 export interface AccountRow {
@@ -847,9 +872,13 @@ export interface AccountRow {
  *   weekly room left at the reset is gone for good; multiplied so an account
  *   with nothing left gains nothing from a near reset;
  * - fiveHourRoom = 1 − 5-hour used ÷ 5-hour line: don't move to an account
- *   that is about to hit its 5-hour line and move again.
+ *   that is about to hit its 5-hour line and move again. In the last hour
+ *   before the 5-hour reset it rises towards 1 (by 1 − time to the reset ÷
+ *   1 hour): what is left comes back in full at the reset, so an account
+ *   about to reset is as good as an empty one.
  *
- * Room is measured against the account's own switch lines, and an account
+ * Room is measured against the account's switch lines (opened up to
+ * {@link GRACE_LINE} for a window about to reset), and an account
  * at or past either line scores 0: it is not a switch target until that
  * window resets. All clamped to 0–1. An account that never ran here counts as
  * half full with no reset known, so a proven account with room comes first.
@@ -858,13 +887,16 @@ export function switchScore(windows: Record<WindowKind, AccountWindowView>, know
   const room = (kind: WindowKind): number =>
     known ? clamp01(1 - (windows[kind].usedPercent ?? 0) / windows[kind].line) : UNKNOWN_ROOM;
   if (WINDOW_KINDS.some((kind) => room(kind) === 0)) return 0;
-  const left = windows.seven_day.resetsInMs;
-  const weekSoon = !known || left === undefined ? 0 : clamp01(1 - left / WEEK_MS);
+  const soon = (kind: WindowKind, span: number): number => {
+    const left = windows[kind].resetsInMs;
+    return !known || left === undefined ? 0 : clamp01(1 - left / span);
+  };
   const weekRoom = room('seven_day');
+  const fiveHourRoom = room('five_hour');
   return (
     SWITCH_SCORE_WEIGHTS.weekRoom * weekRoom +
-    SWITCH_SCORE_WEIGHTS.weekExpiring * weekRoom * weekSoon +
-    SWITCH_SCORE_WEIGHTS.fiveHourRoom * room('five_hour')
+    SWITCH_SCORE_WEIGHTS.weekExpiring * weekRoom * soon('seven_day', WEEK_MS) +
+    SWITCH_SCORE_WEIGHTS.fiveHourRoom * (fiveHourRoom + (1 - fiveHourRoom) * soon('five_hour', GRACE_MS.five_hour))
   );
 }
 
@@ -875,6 +907,12 @@ function windowsKnown(windows: Record<WindowKind, AccountWindowView>): boolean {
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
+}
+
+/** `line` under a run's cap for that window, if any; a cap never raises a line. */
+function withCap(line: number, kind: WindowKind, cap: LineCap | undefined): number {
+  const ceiling = cap?.[kind];
+  return ceiling !== undefined ? Math.min(line, ceiling) : line;
 }
 
 /** Every account with its usage, resets, lines, state and switch score, in preference order. */
@@ -924,7 +962,14 @@ function stateCell(row: AccountRow): string {
   if (row.refusedUntil !== undefined) return `⛔ 额度用尽，${formatClock(row.refusedUntil)} 恢复`;
   if (row.pastLine) return `⚠️ 已过${WINDOW_LABELS[row.pastLine]}切换线`;
   if (!row.known) return '还没运行过';
-  return row.next ? '使用中' : '可用';
+  const state = row.next ? '使用中' : '可用';
+  const opened = WINDOW_KINDS.filter((kind) => row.windows[kind].graceFrom !== undefined);
+  return opened.length > 0 ? `${state}（${opened.map((kind) => WINDOW_LABELS[kind]).join('、')}临近重置，切换线放宽）` : state;
+}
+
+/** `60%`, or `60→98%` while the window is about to reset and its line is opened. */
+function lineCell(view: AccountWindowView): string {
+  return view.graceFrom !== undefined ? `${view.graceFrom}→${view.line}%` : `${view.line}%`;
 }
 
 /** The accounts as one Markdown table; ✅ marks the account new runs use. */
@@ -938,7 +983,7 @@ export function accountsTable(rows: AccountRow[]): string {
     const week = row.windows.seven_day;
     const role = row.index === 0 ? '主' : `备 ${row.index}`;
     out.push(
-      `| ${row.next ? '✅ ' : ''}**${row.name}**（${role}，${row.id}） | ${windowCell(five, formatHoursMinutes)} | ${windowCell(week, formatDaysHours)} | ${five.line}% / ${week.line}%${row.boosted ? '（临时）' : ''} | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
+      `| ${row.next ? '✅ ' : ''}**${row.name}**（${role}，${row.id}） | ${windowCell(five, formatHoursMinutes)} | ${windowCell(week, formatDaysHours)} | ${lineCell(five)} / ${lineCell(week)}${row.boosted ? '（临时）' : ''} | ${Math.round(row.score * 100)} | ${stateCell(row)} |`,
     );
   }
   return out.join('\n');
@@ -1028,7 +1073,7 @@ export function switchRefusal(pool: ClaudeAccountPool, row: AccountRow, line?: n
   if (row.refusedUntil !== undefined) return `额度用尽，${formatClock(row.refusedUntil)} 恢复`;
   for (const kind of WINDOW_KINDS) {
     const used = row.windows[kind].usedPercent;
-    const limit = Math.max(pool.baseLineOf(row.id, kind), line ?? 0);
+    const limit = Math.max(pool.baseLineOf(row.id, kind), pool.inGrace(row.id, kind) ? GRACE_LINE : 0, line ?? 0);
     if (used !== undefined && used >= limit) return `${WINDOW_LABELS[kind]}用量 ${Math.round(used)}%，已到 ${limit}% 的切换线`;
   }
   return undefined;

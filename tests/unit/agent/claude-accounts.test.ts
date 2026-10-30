@@ -26,6 +26,7 @@ import {
   STICKY_MARGIN,
   switchScore,
   switchToAccount,
+  GRACE_LINE,
   reorderAccounts,
   updateDefaultLines,
   claudeAccountsPaths,
@@ -155,7 +156,7 @@ describe('ClaudeAccountPool', () => {
     const { pool } = await poolWith(['b'], { switchAtPercent: 90 });
     pool.observe('default', limit({ windows: [{ kind: 'seven_day_opus', usedPercent: 100, resetsAt: NOW + HOUR }] }));
     expect(pool.pick()?.id).toBe('default');
-    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 91, resetsAt: NOW + HOUR }] }));
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 91, resetsAt: NOW + 3 * 24 * HOUR }] }));
     expect(pool.pick()?.id).toBe('b');
   });
 
@@ -1398,6 +1399,81 @@ describe('quota check before a run (refreshPickQuota)', () => {
       throw new Error('offline');
     };
     await expect(refreshPickQuota(pool, { probe, checkedAt: new Map(), now: () => NOW + HOUR })).resolves.toBeUndefined();
+  });
+});
+
+describe('a window about to reset opens its switch line', () => {
+  const MIN = 60_000;
+  const DAY = 24 * HOUR;
+  /** The 2026-10-30 19:05 `/accounts` table: 焦银玲 past her 60% 5-hour line, 5 minutes from its reset. */
+  async function screenshot() {
+    const { pool, paths } = await poolInOrder(
+      [
+        { id: 'backup', label: 'shilong.wang' },
+        { id: 'backup3', label: '汤欢', lines: { five_hour: 60, seven_day: 90 } },
+        { id: 'backup4', label: '焦银玲', lines: { five_hour: 60, seven_day: 90 } },
+        { id: 'default', lines: { five_hour: 80, seven_day: 90 } },
+      ],
+      { five_hour: 98, seven_day: 98 },
+    );
+    pool.observe('backup', limit({ windows: [
+      { kind: 'five_hour', usedPercent: 21, resetsAt: NOW + HOUR + 55 * MIN },
+      { kind: 'seven_day', usedPercent: 64, resetsAt: NOW + 3 * DAY + 14 * HOUR },
+    ] }));
+    pool.observe('backup3', limit({ windows: [
+      { kind: 'five_hour', usedPercent: 40, resetsAt: NOW + 3 * HOUR },
+      { kind: 'seven_day', usedPercent: 0, resetsAt: NOW + 6 * DAY },
+    ] }));
+    pool.observe('backup4', limit({ windows: [
+      { kind: 'five_hour', usedPercent: 61, resetsAt: NOW + 5 * MIN },
+      { kind: 'seven_day', usedPercent: 35, resetsAt: NOW + 5 * DAY + 10 * HOUR },
+    ] }));
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 79, resetsAt: NOW + 2 * DAY }] }));
+    return { pool, paths };
+  }
+
+  it('lets runs go past the line until the reset, and scores what comes back at the reset as room', async () => {
+    const { pool } = await screenshot();
+    expect(pool.lineOf('backup4', 'five_hour', NOW)).toBe(GRACE_LINE);
+    expect(pool.pastLine('backup4', NOW)).toBeUndefined();
+    expect(pool.isBoosted('backup4', NOW)).toBe(false);
+    const rows = accountRows(pool, 'yu.ou', NOW);
+    const table = accountsTable(rows);
+    // Was 0 (past its line): now the best, far enough ahead of the main account to take the next run.
+    expect(table).toContain('| ✅ **焦银玲**（备 2，backup4） | 61% / 0h5m | 35% / 5d10h | 60→98% / 90% | 48 | 使用中（5 小时窗口临近重置，切换线放宽） |');
+    expect(table).toContain('| **shilong.wang**（主，backup） | 21% / 1h55m | 64% / 3d14h | 98% / 98% | 38 | 可用 |');
+    expect(pool.pick()?.id).toBe('backup4');
+    expect(switchRefusal(pool, findAccountRow(rows, '焦银玲')!)).toBeUndefined();
+  });
+
+  it('keeps the line while the reset is further off, and never past 98% or a run cap', async () => {
+    const { pool } = await screenshot();
+    // An hour and ten minutes before the reset: still the account's own line.
+    const early = NOW - HOUR - 5 * MIN;
+    expect(pool.lineOf('backup4', 'five_hour', early)).toBe(60);
+    expect(pool.pastLine('backup4', early)?.kind).toBe('five_hour');
+    expect(pool.score('backup4', early)).toBe(0);
+    // The run's cap (课堂精练 stops at 80%) still holds.
+    expect(pool.lineOf('backup4', 'five_hour', NOW, { five_hour: 50 })).toBe(50);
+    // 98% and up is past the opened line too.
+    pool.observe('backup4', limit({ windows: [{ kind: 'five_hour', usedPercent: 98, resetsAt: NOW + 5 * MIN }] }));
+    expect(pool.pastLine('backup4', NOW)?.kind).toBe('five_hour');
+    // The week opens in its last 12 hours.
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 11 * HOUR }] }));
+    expect(pool.lineOf('default', 'seven_day', NOW)).toBe(GRACE_LINE);
+    expect(pool.pastLine('default', NOW)).toBeUndefined();
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 13 * HOUR }] }));
+    expect(pool.pastLine('default', NOW)?.kind).toBe('seven_day');
+  });
+
+  it('scores 5-hour room near the reset as nearly full', () => {
+    const view = (five: number, fiveResetIn: number) => ({
+      five_hour: { usedPercent: five, line: 98, resetsInMs: fiveResetIn },
+      seven_day: { usedPercent: 30, line: 90, resetsInMs: 3 * DAY },
+    });
+    expect(switchScore(view(40, 10 * MIN), true)).toBeGreaterThan(switchScore(view(40, 2 * HOUR), true));
+    expect(switchScore(view(40, 2 * HOUR), true)).toBeCloseTo(switchScore(view(40, HOUR), true));
+    expect(switchScore(view(90, 1), true)).toBeCloseTo(switchScore(view(0, 1), true), 3);
   });
 });
 
