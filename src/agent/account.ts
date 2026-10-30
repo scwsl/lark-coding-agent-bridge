@@ -21,6 +21,7 @@ import {
   type ClaudeAccountEntry,
   type AccountRow,
 } from './claude/accounts';
+import { refreshAllQuota } from './claude/quota-probe';
 import { codexAccountName, effectiveCodexHome } from './codex/account';
 import type { AgentKind } from './registry';
 
@@ -73,14 +74,23 @@ function boostedWindows(boost: NonNullable<ClaudeAccountEntry['boost']>): string
     .join(' / ');
 }
 
+/** How `/accounts` got its figures: read just now, but for the accounts whose reading failed. */
+function freshnessNote(rows: AccountRow[], failed: string[]): string {
+  const how = '用量和重置时间是刚读的：CLI 登录账户读 `/usage`，备用账户的 token 读不了 `/usage`，各发一条 haiku 小请求读额度。';
+  const names = rows.filter((row) => failed.includes(row.id)).map((row) => row.name);
+  return names.length > 0 ? `${how}${names.join('、')} 没读到，沿用它最近一次运行的报告。` : how;
+}
+
 /**
  * `/accounts`: the profile's Claude subscription accounts as one table —
- * usage, resets and switch lines per window. Undefined for other agents.
+ * usage, resets and switch lines per window, each account's quota read just
+ * now ({@link refreshAllQuota}). Undefined for other agents.
  */
 export async function agentAccountsTable(profileConfig: AccountProfile, profileDir: string): Promise<string | undefined> {
   if (profileConfig.agentKind !== 'claude') return undefined;
   const pool = claudeAccountPool(profileDir);
   await pool.refresh();
+  const failed = await refreshAllQuota(pool);
   const rows = accountRows(pool, await claudeAccountName());
   const paused = pausedNote(pool);
   return [
@@ -89,7 +99,7 @@ export async function agentAccountsTable(profileConfig: AccountProfile, profileD
     accountsTable(rows),
     ...(paused ? ['', paused] : []),
     '',
-    `_用量和重置时间取自各账户最近一次运行的报告。${SCORE_NOTE}_`,
+    `_${freshnessNote(rows, failed)}${SCORE_NOTE}_`,
     '',
     `\`/accounts switch\` 切到得分最高的可用账户；\`/accounts switch <名字或 id>\` 切到指定账户（它要在切换线以下）；\`/accounts switch <名字或 id> <百分比>\` 同时把它的切换线临时调到该值，到该窗口重置恢复原线。`,
   ].join('\n');
@@ -113,6 +123,8 @@ export async function switchAgentAccount(
   if ('error' in parsed) return `❌ ${parsed.error}`;
   const pool = claudeAccountPool(profileDir);
   await pool.refresh();
+  // Pick by what the accounts hold now, not what their last runs said.
+  await refreshAllQuota(pool);
   const label = await claudeAccountName();
   const rows = accountRows(pool, label);
   if (rows.length < 2) return '只有一个账户，没有可切换的。添加备用账户见 `lark-channel-bridge claude-account add`。';

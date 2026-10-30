@@ -39,7 +39,7 @@ import {
   type AccountRow,
 } from '../../../src/agent/claude/accounts.js';
 import { readClaudeQuota } from '../../../src/agent/claude/quota.js';
-import { refreshPickQuota } from '../../../src/agent/claude/quota-probe.js';
+import { refreshAllQuota, refreshPickQuota } from '../../../src/agent/claude/quota-probe.js';
 import { translateEvent } from '../../../src/agent/claude/stream-json.js';
 import type { AgentEvent, AgentRun, AgentRunOptions } from '../../../src/agent/types.js';
 import { parsePauseUntil, readVerification } from '../../../src/cli/commands/claude-account.js';
@@ -1398,5 +1398,36 @@ describe('quota check before a run (refreshPickQuota)', () => {
       throw new Error('offline');
     };
     await expect(refreshPickQuota(pool, { probe, checkedAt: new Map(), now: () => NOW + HOUR })).resolves.toBeUndefined();
+  });
+});
+
+describe('reading every account for /accounts (refreshAllQuota)', () => {
+  const MIN = 60_000;
+
+  it('reads every stale account at once, skips fresh and paused ones, and names the ones that failed', async () => {
+    const { pool } = await poolInOrder([...ROSTER, { id: 'backup3', label: '焦银玲', pausedUntil: NOW + 24 * HOUR }]);
+    pool.observe('backup', weekly(5));
+    const probed: string[] = [];
+    let inFlight = 0;
+    let most = 0;
+    const probe = async (p: typeof pool, account: PickedAccount): Promise<boolean | void> => {
+      probed.push(account.id);
+      inFlight++;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      if (account.id === 'backup2') return false;
+      if (account.id === 'default') throw new Error('offline');
+      p.observe(account.id, weekly(40));
+    };
+    // `backup` reported 30 seconds ago: not read again; the others never reported.
+    expect(await refreshAllQuota(pool, { probe, now: () => NOW + MIN / 2 })).toEqual(expect.arrayContaining(['default', 'backup2']));
+    expect(probed.sort()).toEqual(['backup2', 'default']);
+    expect(most).toBe(2);
+    // Two minutes on, everything is stale again; the paused one is never read.
+    probed.length = 0;
+    const failed = await refreshAllQuota(pool, { probe, now: () => NOW + 2 * MIN });
+    expect(probed.sort()).toEqual(['backup', 'backup2', 'default']);
+    expect(failed.sort()).toEqual(['backup2', 'default']);
   });
 });
