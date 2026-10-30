@@ -110,3 +110,21 @@ describe('startAutoEffort', () => {
     expect(await plan(store).pick('sess-1', false)).toMatchObject({ label: 'high', via: 'stay' });
   });
 });
+
+describe('startAutoEffort Fable quota', () => {
+  beforeEach(() => {
+    classifyMock.mockReset();
+  });
+
+  it('skips Fable while its own weekly window is past the line on the run account', async () => {
+    const store = new AutoEffortStore();
+    store.set('p2p:ou_owner', { rung: 2, downVotes: 0, handle: 'sess-1' });
+    classifyMock.mockResolvedValue({ rung: 3 });
+    const full = plan(store, { windowUsed: (kind) => (kind === 'seven_day_fable' ? 92 : undefined) });
+    expect((await full.pick('sess-1', false))?.label).toBe('xhigh');
+    const room = plan(store, { windowUsed: () => 40 });
+    expect((await room.pick('sess-1', false))?.label).toBe('fable');
+    const unknown = plan(store, { windowUsed: () => undefined });
+    expect((await unknown.pick('sess-1', false))?.label).toBe('fable');
+  });
+});

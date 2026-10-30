@@ -52,6 +52,11 @@ const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export type WindowKind = 'five_hour' | 'seven_day';
 export const WINDOW_KINDS: readonly WindowKind[] = ['five_hour', 'seven_day'];
 export const WINDOW_LABELS: Record<WindowKind, string> = { five_hour: '5 小时窗口', seven_day: '本周' };
+/**
+ * Fable's own weekly window (`/usage`: "Current week (Fable)"). It limits Fable
+ * runs only, so it stays out of account picks; 自动分级 reads it before climbing to Fable.
+ */
+export const FABLE_WINDOW = 'seven_day_fable';
 
 /** Fill (1–100%) per window at which runs move to another account. */
 export type SwitchLines = Record<WindowKind, number>;
@@ -655,6 +660,26 @@ export class ClaudeAccountPool {
     this.persist();
   }
 
+  /** Record a model-specific window of `id` (e.g. {@link FABLE_WINDOW}); account picks ignore it. */
+  observeModelWindow(id: string, kind: string, window: { usedPercent: number; resetsAt?: number }): void {
+    const now = this.now();
+    const all = this.loadState();
+    const state: AccountQuotaState = all[id] ?? { windows: {}, updatedAt: now };
+    state.windows[kind] = {
+      usedPercent: window.usedPercent,
+      ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
+    };
+    all[id] = state;
+    this.persist();
+  }
+
+  /** How full `kind` of `id` is by the last reading (0 once its reset passed); undefined when never read. */
+  windowUsed(id: string, kind: string, now = this.now()): number | undefined {
+    const window = this.loadState()[id]?.windows[kind];
+    if (!window) return undefined;
+    return window.resetsAt !== undefined && window.resetsAt <= now ? 0 : window.usedPercent;
+  }
+
   /** Record what a run on `id` reported about its quota. */
   observe(id: string, evt: RateLimitEvent): void {
     const now = this.now();
@@ -783,6 +808,8 @@ export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | u
       })
         .filter((part): part is string => part !== undefined)
         .join(' · ') || '还没有运行记录';
+    const fable = pool.windowUsed(account.id, FABLE_WINDOW, now);
+    const fablePart = fable !== undefined ? ` · 本周 Fable ${Math.round(fable)}%` : '';
     const refused = pool.refusedUntil(account.id, now);
     const past = pool.pastLine(account.id, now);
     const flag =
@@ -791,7 +818,7 @@ export function accountsReport(pool: ClaudeAccountPool, defaultLabel: string | u
         : past
           ? ` · ⚠️ 已过${WINDOW_LABELS[past.kind]}切换线，其他账户也到线后才轮到它`
           : '';
-    return `- ${marker}**${name}**（${role}，${account.id}；${lines}）：${usage}${flag}`;
+    return `- ${marker}**${name}**（${role}，${account.id}；${lines}）：${usage}${fablePart}${flag}`;
   });
   return [...active, ...paused];
 }

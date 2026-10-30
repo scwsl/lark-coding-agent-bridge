@@ -1718,6 +1718,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             // The account a run would get now: the rating bills the same one.
             env: () => (deps.profileDir ? (claudeAccountPool(deps.profileDir).pick()?.env ?? {}) : {}),
           },
+          windowUsed: (kind) => {
+            if (!deps.profileDir) return undefined;
+            const pool = claudeAccountPool(deps.profileDir);
+            const id = pool.pick()?.id;
+            return id ? pool.windowUsed(id, kind) : undefined;
+          },
         })
       : undefined;
   let autoPicked: AutoEffortPick | undefined;

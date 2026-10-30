@@ -3,6 +3,7 @@ import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { mergeProcessEnv, spawnProcess } from '../platform/spawn';
 import type { AgentKind } from '../config/profile-schema';
+import { FABLE_WINDOW } from './claude/accounts';
 import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../config/schema';
 
 /**
@@ -29,6 +30,8 @@ export interface AutoEffortRung {
   ownerOnly?: boolean;
   /** What belongs on this rung, for the rating prompt. */
   hint?: string;
+  /** The model's own quota window (e.g. Fable's weekly one): past {@link AutoEffortSettings.quotaLine} on the run's account, the rung is skipped. */
+  quotaWindow?: string;
 }
 
 export interface AutoEffortSettings {
@@ -36,6 +39,8 @@ export interface AutoEffortSettings {
   classifierModel: string;
   classifierEffort: EffortLevel;
   timeoutMs: number;
+  /** Percent of a rung's `quotaWindow` past which it is skipped. */
+  quotaLine: number;
 }
 
 export const DEFAULT_AUTO_EFFORT_LADDER: readonly AutoEffortRung[] = [
@@ -62,6 +67,7 @@ export const DEFAULT_AUTO_EFFORT_LADDER: readonly AutoEffortRung[] = [
     model: 'fable',
     effort: 'xhigh',
     ownerOnly: true,
+    quotaWindow: FABLE_WINDOW,
     hint: '极难：架构级设计、大型改动、上一档反复失败或被用户指出不对仍没解决',
   },
 ];
@@ -429,5 +435,7 @@ export function resolveAutoEffort(
       : 'medium',
     timeoutMs:
       typeof timeout === 'number' && Number.isFinite(timeout) ? Math.min(Math.max(timeout, 3_000), 60_000) : 20_000,
+    quotaLine:
+      typeof pref.quotaLine === 'number' && pref.quotaLine > 0 && pref.quotaLine <= 100 ? pref.quotaLine : 90,
   };
 }

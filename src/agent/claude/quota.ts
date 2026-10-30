@@ -1,6 +1,6 @@
 import { runCapture } from '../../git/exec';
 import { quotaResetAt, type QuotaReading, type QuotaReadOptions, type QuotaWindow } from '../quota';
-import { claudeAccountPool, WINDOW_KINDS, WINDOW_LABELS, type ClaudeAccountPool, type WindowKind } from './accounts';
+import { claudeAccountPool, FABLE_WINDOW, WINDOW_KINDS, WINDOW_LABELS, type ClaudeAccountPool, type WindowKind } from './accounts';
 
 /**
  * Claude Code's subscription windows from `claude -p "/usage"` — a local
@@ -26,7 +26,9 @@ export async function readClaudeQuota(
   // what its last run reported; one never used yet is left out.
   const readings: QuotaReading[] = [];
   for (const account of pool.accounts()) {
-    const fresh = await readUsage(opts, binary, account.env);
+    const fresh = await readUsage(opts, binary, account.env, (fable) =>
+      pool.observeModelWindow(account.id, FABLE_WINDOW, fable),
+    );
     // What `/usage` just said beats what the account's last run reported,
     // which may be days old: account picks read the pool.
     if (fresh) pool.observeUsage(account.id, usageByKind(fresh));
@@ -49,13 +51,20 @@ export function usageByKind(reading: QuotaReading): Partial<Record<WindowKind, {
   return out;
 }
 
-async function readUsage(opts: QuotaReadOptions, binary: string, env: Record<string, string>): Promise<QuotaReading | undefined> {
+async function readUsage(
+  opts: QuotaReadOptions,
+  binary: string,
+  env: Record<string, string>,
+  onFable?: (window: { usedPercent: number; resetsAt?: number }) => void,
+): Promise<QuotaReading | undefined> {
   const result = await runCapture(binary, opts.cwd, ['-p', '/usage'], {
     timeoutMs: opts.timeoutMs ?? 60_000,
     maxBytes: 64_000,
     env,
   });
   if (!result.ok) return undefined;
+  const fable = parseFableWeek(result.stdout);
+  if (fable && onFable) onFable(fable);
   const windows = parseClaudeUsage(result.stdout);
   return windows.length > 0 ? { windows } : undefined;
 }
@@ -68,6 +77,14 @@ function mostRoom(readings: QuotaReading[], window: 'any' | 'week' = 'any'): Quo
     return week ? week.usedPercent : Math.max(0, ...reading.windows.map((w) => w.usedPercent));
   };
   return [...readings].sort((a, b) => fullness(a) - fullness(b))[0];
+}
+
+/** `Current week (Fable): 12% used · resets …` → its percentage and reset (epoch ms); undefined when absent. */
+export function parseFableWeek(text: string, now = Date.now()): { usedPercent: number; resetsAt?: number } | undefined {
+  const match = /^\s*Current week \(Fable\):\s*(\d+(?:\.\d+)?)%\s*used(?:\s*·\s*resets\s+(.+?))?\s*$/m.exec(text);
+  if (!match) return undefined;
+  const resetsAt = match[2] ? quotaResetAt(match[2], now) : undefined;
+  return { usedPercent: Number(match[1]), ...(resetsAt !== undefined ? { resetsAt } : {}) };
 }
 
 export function parseClaudeUsage(text: string): QuotaWindow[] {

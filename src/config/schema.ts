@@ -541,12 +541,14 @@ export const DREAM_DEFAULTS: DreamSettings = {
 export interface AutoEffortPreference {
   enabled?: boolean;
   /** Bottom to top. Default: opus·medium, opus·high, opus·xhigh, fable·xhigh (owner only). */
-  ladder?: Array<{ label: string; model: string; effort: EffortLevel; ownerOnly?: boolean; hint?: string }>;
+  ladder?: Array<{ label: string; model: string; effort: EffortLevel; ownerOnly?: boolean; hint?: string; quotaWindow?: string }>;
   /** Model and effort of the rating call. Default `opus` / `medium`. */
   classifierModel?: string;
   classifierEffort?: EffortLevel;
   /** Give up on the rating after this long and keep the current rung. Default 20000. */
   timeoutMs?: number;
+  /** A rung whose `quotaWindow` (Fable: its own weekly window) is this full on the run's account is skipped. Default 90. */
+  quotaLine?: number;
 }
 
 export interface SmartSessionTuning {

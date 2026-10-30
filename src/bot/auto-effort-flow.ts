@@ -45,6 +45,8 @@ export interface StartAutoEffortInput {
   /** The chat's effort (`chatEffort`, else `effort`): the ceiling for runs the owner didn't start. */
   cap?: EffortLevel;
   classify: { cwd: string; env: () => Record<string, string>; binary?: string };
+  /** How full a quota window is on the account the run would get; undefined when unknown (the rung stays usable). */
+  windowUsed?: (kind: string) => number | undefined;
   now?: () => number;
 }
 
@@ -87,6 +89,19 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         ).catch(() => undefined)
       : Promise.resolve(undefined);
   let picked: { rung: number; downVotes: number } | undefined;
+  // Models that just failed, plus those whose own window is past the line.
+  const blockedModels = (): Set<string> => {
+    const out = store.blockedModels(now());
+    for (const rung of ladder) {
+      if (!rung.quotaWindow || out.has(rung.model)) continue;
+      const used = input.windowUsed?.(rung.quotaWindow);
+      if (used !== undefined && used >= settings.quotaLine) {
+        out.add(rung.model);
+        log.info('auto-effort', 'quota-skip', { scope, model: rung.model, window: rung.quotaWindow, used });
+      }
+    }
+    return out;
+  };
 
   return {
     ...(forced !== undefined ? { forcedLabel: ladder[forced]!.label } : {}),
@@ -96,7 +111,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         const allowed = allowedRungs(ladder, {
           owner: input.owner,
           ...(input.cap ? { cap: input.cap } : {}),
-          blockedModels: store.blockedModels(now()),
+          blockedModels: blockedModels(),
         });
         if (allowed.length === 0) return undefined;
         let decision: RungDecision;

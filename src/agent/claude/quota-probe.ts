@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { runCapture } from '../../git/exec';
 import { log } from '../../core/logger';
-import type { ClaudeAccountPool, LineCap, PickedAccount } from './accounts';
-import { parseClaudeUsage, usageByKind } from './quota';
+import { FABLE_WINDOW, type ClaudeAccountPool, type LineCap, type PickedAccount } from './accounts';
+import { parseClaudeUsage, parseFableWeek, usageByKind } from './quota';
 import { translateEvent } from './stream-json';
 
 /**
@@ -84,6 +84,8 @@ export async function probeAccountQuota(pool: ClaudeAccountPool, account: Picked
     const result = await runCapture(binary, tmpdir(), ['-p', '/usage'], opts);
     const windows = result.ok ? parseClaudeUsage(result.stdout) : [];
     if (windows.length > 0) pool.observeUsage(account.id, usageByKind({ windows }));
+    const fable = result.ok ? parseFableWeek(result.stdout) : undefined;
+    if (fable) pool.observeModelWindow(account.id, FABLE_WINDOW, fable);
     log.info('claude-accounts', 'quota-probed', { id: account.id, via: 'usage', ok: windows.length > 0 });
     return windows.length > 0;
   }

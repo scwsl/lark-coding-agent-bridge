@@ -711,6 +711,7 @@ bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以�
 - **续聊**：每轮最多升或降一档；离开 Fable 这类换了模型的档位，要连续两轮判断都低于它。
 - **跳过判断**：消息不超过 6 个字且没有附件时（「继续」「好的」）沿用当前档，新会话则从最低档起步；消息以 `/medium`、`/high`、`/xhigh`、`/fable` 开头时直接用这一档。
 - **上限**：主人以外的人发起的任务，不超过该会话的 effort（`chatEffort`，没有则用 `effort`），也不用 Fable。
+- **Fable 额度**：Fable 有单独的周额度（`/usage` 里的 `Current week (Fable)`），读 `/usage` 时一并记下，`/accounts` 也会显示。本轮要用的账户这项超过 `quotaLine`（默认 90%）时不升到 Fable；读不到（如 token 账户）时不拦。
 - **兜底**：判断失败或超时（默认 20 秒）沿用当前档；Fable 档的运行报错后，1 小时内跳过 Fable。
 
 回复卡底部的 Effort 显示本轮档位，如 `xhigh（自动↑）`。各会话所在的档位存在 profile 目录的 `auto-effort.json`，重启不丢。配置文件里打开（profile 的 `preferences`，改完重启该 profile 生效），梯子和判断用的模型都可以改：
@@ -720,7 +721,8 @@ bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以�
   "enabled": true,
   "classifierModel": "opus",
   "classifierEffort": "medium",
-  "timeoutMs": 20000
+  "timeoutMs": 20000,
+  "quotaLine": 90
 }
 ```
 
