@@ -1,6 +1,6 @@
 import type { ProfileConfig } from '../config/profile-schema';
 import { claudeAccountPool } from './claude/accounts';
-import { readClaudeQuota } from './claude/quota';
+import { readClaudeQuota, readClaudeQuotaReadings } from './claude/quota';
 import { readCodexQuota } from './codex/quota';
 import type { AgentKind } from './registry';
 import type { AgentRunOptions } from './types';
@@ -82,6 +82,22 @@ export async function readAgentQuota(profileConfig: ProfileConfig, opts: QuotaRe
     return reading && (reading.windows.length > 0 || reading.blocked) ? reading : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Every account's reading — one for a single-account profile, one per
+ * account taking part with several (Claude). Empty when none can be read.
+ */
+export async function readAgentQuotaReadings(profileConfig: ProfileConfig, opts: QuotaReadOptions): Promise<QuotaReading[]> {
+  try {
+    const readings =
+      profileConfig.agentKind === 'claude'
+        ? await readClaudeQuotaReadings(opts)
+        : [await readAgentQuota(profileConfig, opts)].filter((r): r is QuotaReading => r !== undefined);
+    return readings.filter((r) => r.windows.length > 0 || r.blocked);
+  } catch {
+    return [];
   }
 }
 

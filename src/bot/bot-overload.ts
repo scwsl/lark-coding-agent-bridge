@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { quotaResetAt, readAgentQuota, type QuotaReading, type QuotaWindow } from '../agent/quota';
+import { quotaResetAt, readAgentQuotaReadings, type QuotaReading, type QuotaWindow } from '../agent/quota';
 import type { ProfileConfig } from '../config/profile-schema';
 import type { BotOverloadSettings } from '../config/schema';
 
@@ -43,6 +43,26 @@ export function planBotOverload(settings: BotOverloadSettings, reading: QuotaRea
   return tight.length > 0 ? { overload: true, windows: tight } : { overload: false };
 }
 
+/**
+ * With several accounts: runs move to whichever account still has room, so
+ * bots are refused only when every account is tight. The card then shows the
+ * account that frees up first (its tight windows' latest reset).
+ */
+export function planBotOverloadAcross(
+  settings: BotOverloadSettings,
+  readings: readonly QuotaReading[],
+  now: number,
+): OverloadDecision {
+  let best: { windows: OverloadWindow[]; freeAt: number } | undefined;
+  for (const reading of readings) {
+    const decision = planBotOverload(settings, reading, now);
+    if (!decision.overload) return decision;
+    const freeAt = Math.max(...decision.windows.map((w) => w.resetAt ?? Number.POSITIVE_INFINITY));
+    if (!best || freeAt < best.freeAt) best = { windows: decision.windows, freeAt };
+  }
+  return best ? { overload: true, windows: best.windows } : { overload: false };
+}
+
 /** A batch the rule applies to: every message comes from a bot. */
 export function isBotOnlyBatch<T>(batch: readonly T[], senderType: (msg: T) => 'user' | 'bot' | undefined): boolean {
   return batch.length > 0 && batch.every((msg) => senderType(msg) === 'bot');
@@ -71,8 +91,8 @@ const QUOTA_TTL_MS = 5 * 60_000;
  * seconds) and the per-chat cooldown of the overload card.
  */
 export class BotOverloadGuard {
-  private cached: { at: number; reading: QuotaReading | undefined } | undefined;
-  private reading: Promise<QuotaReading | undefined> | undefined;
+  private cached: { at: number; reading: readonly QuotaReading[] } | undefined;
+  private reading: Promise<readonly QuotaReading[]> | undefined;
   private readonly lastCard = new Map<string, number>();
 
   constructor(
@@ -80,7 +100,7 @@ export class BotOverloadGuard {
       profileConfig: () => ProfileConfig;
       scratchDir: string;
       profileDir?: string;
-      readQuota?: () => Promise<QuotaReading | undefined>;
+      readQuota?: () => Promise<QuotaReading | readonly QuotaReading[] | undefined>;
       now?: () => number;
     },
   ) {}
@@ -95,7 +115,7 @@ export class BotOverloadGuard {
   ): Promise<{ overload: false } | { overload: true; card: boolean; windows: OverloadWindow[] }> {
     if (!settings.chats.includes('*') && !settings.chats.includes(chatId)) return { overload: false };
     const now = this.now();
-    const decision = planBotOverload(settings, await this.quota(now), now);
+    const decision = planBotOverloadAcross(settings, await this.quota(now), now);
     if (!decision.overload) return decision;
     const last = this.lastCard.get(chatId);
     const card = last === undefined || now - last >= settings.cooldownMinutes * 60_000;
@@ -103,7 +123,7 @@ export class BotOverloadGuard {
     return { overload: true, card, windows: decision.windows };
   }
 
-  private async quota(now: number): Promise<QuotaReading | undefined> {
+  private async quota(now: number): Promise<readonly QuotaReading[]> {
     if (this.cached && now - this.cached.at < QUOTA_TTL_MS) return this.cached.reading;
     this.reading ??= this.read().finally(() => {
       this.reading = undefined;
@@ -113,10 +133,14 @@ export class BotOverloadGuard {
     return reading;
   }
 
-  private async read(): Promise<QuotaReading | undefined> {
-    if (this.deps.readQuota) return this.deps.readQuota().catch(() => undefined);
+  /** One reading per account taking part (see planBotOverloadAcross). */
+  private async read(): Promise<readonly QuotaReading[]> {
+    if (this.deps.readQuota) {
+      const reading = await this.deps.readQuota().catch(() => undefined);
+      return reading === undefined ? [] : Array.isArray(reading) ? reading : [reading as QuotaReading];
+    }
     await mkdir(this.deps.scratchDir, { recursive: true, mode: 0o700 });
-    return readAgentQuota(this.deps.profileConfig(), {
+    return readAgentQuotaReadings(this.deps.profileConfig(), {
       cwd: this.deps.scratchDir,
       ...(this.deps.profileDir ? { profileDir: this.deps.profileDir } : {}),
     });

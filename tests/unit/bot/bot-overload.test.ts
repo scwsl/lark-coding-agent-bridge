@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt, planBotOverload } from '../../../src/bot/bot-overload.js';
+import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt, planBotOverload, planBotOverloadAcross } from '../../../src/bot/bot-overload.js';
 import { overloadCard } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { resolveBotOverload, type BotOverloadSettings } from '../../../src/config/schema.js';
@@ -69,6 +69,28 @@ describe('planBotOverload', () => {
       overload: true,
       windows: [{ kind: 'week' }],
     });
+  });
+});
+
+describe('planBotOverloadAcross', () => {
+  const tightWeek = reading([81, 'Oct 20 at 9am (Asia/Shanghai)'], [13, 'Oct 17 at 12:20am (Asia/Shanghai)']);
+  const tightSession = reading([50, 'Oct 22 at 9am (Asia/Shanghai)'], [98, 'Oct 17 at 2am (Asia/Shanghai)']);
+
+  it('answers bots while any account still has room', () => {
+    const roomy = reading([15, 'Oct 22 at 9am (Asia/Shanghai)'], [10, 'Oct 17 at 2am (Asia/Shanghai)']);
+    expect(planBotOverloadAcross(settings, [tightWeek, roomy], NOW)).toEqual({ overload: false });
+  });
+
+  it('with every account tight, shows the one that frees up first', () => {
+    const decision = planBotOverloadAcross(settings, [tightWeek, tightSession], NOW);
+    expect(decision).toEqual({
+      overload: true,
+      windows: [expect.objectContaining({ kind: 'session', usedPercent: 98 })],
+    });
+  });
+
+  it('never blocks without a reading', () => {
+    expect(planBotOverloadAcross(settings, [], NOW)).toEqual({ overload: false });
   });
 });
 

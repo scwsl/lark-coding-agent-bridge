@@ -18,12 +18,26 @@ export async function readClaudeQuota(
   binary = 'claude',
   pool: ClaudeAccountPool | undefined = opts.profileDir ? claudeAccountPool(opts.profileDir) : undefined,
 ): Promise<QuotaReading | undefined> {
-  await pool?.refresh();
-  if (!pool?.multi) return readUsage(opts, binary, {});
   // Several accounts: the profile has as much room as its emptiest account,
-  // since runs move there once the others fill up. An account whose token
-  // cannot read `/usage` (setup-token logins may lack the scope) is judged by
-  // what its last run reported; one never used yet is left out.
+  // since runs move there once the others fill up.
+  return mostRoom(await readClaudeQuotaReadings(opts, binary, pool), opts.window);
+}
+
+/**
+ * One reading per account that takes part (paused ones do not). An account
+ * whose token cannot read `/usage` (setup-token logins may lack the scope) is
+ * judged by what its last run reported; one never used yet is left out.
+ */
+export async function readClaudeQuotaReadings(
+  opts: QuotaReadOptions,
+  binary = 'claude',
+  pool: ClaudeAccountPool | undefined = opts.profileDir ? claudeAccountPool(opts.profileDir) : undefined,
+): Promise<QuotaReading[]> {
+  await pool?.refresh();
+  if (!pool?.multi) {
+    const reading = await readUsage(opts, binary, {});
+    return reading ? [reading] : [];
+  }
   const readings: QuotaReading[] = [];
   for (const account of pool.accounts()) {
     const fresh = await readUsage(opts, binary, account.env, (fable) =>
@@ -35,7 +49,7 @@ export async function readClaudeQuota(
     const reading = fresh ?? pool.quotaReading(account.id);
     if (reading) readings.push(reading);
   }
-  return mostRoom(readings, opts.window);
+  return readings;
 }
 
 /** A `/usage` reading as the pool keeps it: windows by kind, resets as epoch ms. */
