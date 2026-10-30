@@ -157,6 +157,14 @@ export interface AppPreferences {
    */
   chatEffort?: Record<string, EffortLevel>;
   /**
+   * 自动分级 (chat runs only): rate each message with a quick model call and
+   * move the run's model / effort one rung at a time along a ladder. For
+   * runs the owner didn't start, the chat's effort (`chatEffort`, else
+   * `effort`) caps the climb. Config-file only; see src/agent/auto-effort.ts.
+   * Default off.
+   */
+  autoEffort?: AutoEffortPreference;
+  /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from
    * the legacy tool display; `detailed` also includes tool args/output.
@@ -528,6 +536,18 @@ export const DREAM_DEFAULTS: DreamSettings = {
   localClones: [],
   auto: DREAM_AUTO_DEFAULTS,
 };
+
+/** `preferences.autoEffort` as written in the config file; resolved by `resolveAutoEffort`. */
+export interface AutoEffortPreference {
+  enabled?: boolean;
+  /** Bottom to top. Default: opus·medium, opus·high, opus·xhigh, fable·xhigh (owner only). */
+  ladder?: Array<{ label: string; model: string; effort: EffortLevel; ownerOnly?: boolean; hint?: string }>;
+  /** Model and effort of the rating call. Default `opus` / `medium`. */
+  classifierModel?: string;
+  classifierEffort?: EffortLevel;
+  /** Give up on the rating after this long and keep the current rung. Default 20000. */
+  timeoutMs?: number;
+}
 
 export interface SmartSessionTuning {
   /** Idle this long with a large context starts a fresh session. Default 60. */
