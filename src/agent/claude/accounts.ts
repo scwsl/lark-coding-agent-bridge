@@ -30,7 +30,7 @@ import type { QuotaReading, QuotaWindow } from '../quota';
  *      reset (it pauses and resumes on its own).
  * The account a run moves to becomes the main one (top of the list). An
  * account paused by the owner (`pausedUntil`) takes no part until then and
- * comes back on its own. A window about to reset ({@link GRACE_MS}) has its
+ * comes back on its own. A window about to reset ({@link graceMs}) has its
  * line opened up to {@link GRACE_LINE}: the room a line keeps back for the
  * account's owner comes back at the reset anyway, so runs may use it first.
  *
@@ -64,14 +64,29 @@ export type SwitchLines = Record<WindowKind, number>;
 export type LineCap = Partial<Record<WindowKind, number>>;
 export const DEFAULT_LINES: SwitchLines = { five_hour: 98, seven_day: 98 };
 /**
- * The line a window about to reset ({@link GRACE_MS}) opens up to. What an
+ * The line a window about to reset ({@link graceMs}) opens up to. What an
  * account's own line keeps back is lost at the reset if nobody uses it, so
  * runs may go past the line until then; a run's cap ({@link LineCap}) still
  * holds.
  */
 export const GRACE_LINE = 98;
-/** How close to its reset a window counts as about to reset: under an hour for 5 hours, 12 hours for the week. */
-export const GRACE_MS: Record<WindowKind, number> = { five_hour: 3_600_000, seven_day: 12 * 3_600_000 };
+/**
+ * How close to its reset a window counts as about to reset, by the hour of
+ * day on the bridge's clock (owner's choice, 2026-10-30): shorter in the
+ * daytime, when the accounts' owners may still want what their line keeps
+ * back. `day` is [from, to) in hours.
+ */
+export const GRACE_SPANS: Record<WindowKind, { day: readonly [number, number]; dayMs: number; otherMs: number }> = {
+  five_hour: { day: [8, 21], dayMs: 30 * 60_000, otherMs: 3_600_000 },
+  seven_day: { day: [8, 20], dayMs: 2 * 3_600_000, otherMs: 6 * 3_600_000 },
+};
+
+/** The near-reset span of `kind` at `now` ({@link GRACE_SPANS}). */
+export function graceMs(kind: WindowKind, now: number): number {
+  const { day, dayMs, otherMs } = GRACE_SPANS[kind];
+  const hour = new Date(now).getHours();
+  return hour >= day[0] && hour < day[1] ? dayMs : otherMs;
+}
 
 /** A raised line and until when it holds (that window's next reset). */
 export interface LineBoost {
@@ -408,10 +423,10 @@ export class ClaudeAccountPool {
     return boost && boost.until > now ? Math.max(base, boost.line) : base;
   }
 
-  /** The window resets within {@link GRACE_MS}: its line is open up to {@link GRACE_LINE}. */
+  /** The window resets within {@link graceMs}: its line is open up to {@link GRACE_LINE}. */
   inGrace(id: string, kind: WindowKind, now = this.now()): boolean {
     const resetsAt = this.loadState()[id]?.windows[kind]?.resetsAt;
-    return resetsAt !== undefined && resetsAt > now && resetsAt - now < GRACE_MS[kind];
+    return resetsAt !== undefined && resetsAt > now && resetsAt - now < graceMs(kind, now);
   }
 
   /** The account's own line, or the profile's, without any raise. */
@@ -557,7 +572,7 @@ export class ClaudeAccountPool {
   /** The account's switch score, 0–1 ({@link switchScore}). */
   score(id: string, now = this.now(), cap?: LineCap): number {
     const windows = this.windowViews(id, now, cap);
-    return switchScore(windows, windowsKnown(windows));
+    return switchScore(windows, windowsKnown(windows), now);
   }
 
   /** The account is below all its lines (under `cap`) and not refused right now. */
@@ -872,9 +887,9 @@ export interface AccountRow {
  *   weekly room left at the reset is gone for good; multiplied so an account
  *   with nothing left gains nothing from a near reset;
  * - fiveHourRoom = 1 − 5-hour used ÷ 5-hour line: don't move to an account
- *   that is about to hit its 5-hour line and move again. In the last hour
- *   before the 5-hour reset it rises towards 1 (by 1 − time to the reset ÷
- *   1 hour): what is left comes back in full at the reset, so an account
+ *   that is about to hit its 5-hour line and move again. Near the 5-hour
+ *   reset ({@link graceMs}) it rises towards 1 (by 1 − time to the reset ÷
+ *   that span): what is left comes back in full at the reset, so an account
  *   about to reset is as good as an empty one.
  *
  * Room is measured against the account's switch lines (opened up to
@@ -883,7 +898,7 @@ export interface AccountRow {
  * window resets. All clamped to 0–1. An account that never ran here counts as
  * half full with no reset known, so a proven account with room comes first.
  */
-export function switchScore(windows: Record<WindowKind, AccountWindowView>, known: boolean): number {
+export function switchScore(windows: Record<WindowKind, AccountWindowView>, known: boolean, now = Date.now()): number {
   const room = (kind: WindowKind): number =>
     known ? clamp01(1 - (windows[kind].usedPercent ?? 0) / windows[kind].line) : UNKNOWN_ROOM;
   if (WINDOW_KINDS.some((kind) => room(kind) === 0)) return 0;
@@ -896,7 +911,7 @@ export function switchScore(windows: Record<WindowKind, AccountWindowView>, know
   return (
     SWITCH_SCORE_WEIGHTS.weekRoom * weekRoom +
     SWITCH_SCORE_WEIGHTS.weekExpiring * weekRoom * soon('seven_day', WEEK_MS) +
-    SWITCH_SCORE_WEIGHTS.fiveHourRoom * (fiveHourRoom + (1 - fiveHourRoom) * soon('five_hour', GRACE_MS.five_hour))
+    SWITCH_SCORE_WEIGHTS.fiveHourRoom * (fiveHourRoom + (1 - fiveHourRoom) * soon('five_hour', graceMs('five_hour', now)))
   );
 }
 
@@ -934,7 +949,7 @@ export function accountRows(pool: ClaudeAccountPool, defaultLabel: string | unde
       ...(pastLine ? { pastLine } : {}),
       ready: pool.underLinesAt(account.id, now) <= now,
       boosted: pool.isBoosted(account.id, now),
-      score: switchScore(windows, known),
+      score: switchScore(windows, known, now),
     };
   });
 }

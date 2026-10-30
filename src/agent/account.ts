@@ -66,7 +66,7 @@ export function agentAccountsReport(profileConfig: AccountProfile, profileDir: s
   return (ACCOUNT_REPORTS[profileConfig.agentKind]?.(profileDir) ?? Promise.resolve(undefined)).catch(() => undefined);
 }
 
-const SCORE_NOTE = `得分 = ${SWITCH_SCORE_WEIGHTS.weekRoom} × 本周余量 + ${SWITCH_SCORE_WEIGHTS.weekExpiring} × 本周余量 × 本周重置临近度 + ${SWITCH_SCORE_WEIGHTS.fiveHourRoom} × 5 小时余量。余量 = 1 − 用量 ÷ 切换线，临近度 = 1 − 距本周重置 ÷ 7 天；5 小时窗口最后 1 小时内，5 小时余量按 1 − 距重置 ÷ 1 小时 向满额靠拢。窗口临近重置（5 小时不到 1 小时、本周不到 12 小时）时切换线放宽到 ${GRACE_LINE}%，表里写成「原线→${GRACE_LINE}%」，反正重置后额度就回来了。已到任一切换线的账户记 0 分；没运行过的账户余量按一半算。`;
+const SCORE_NOTE = `得分 = ${SWITCH_SCORE_WEIGHTS.weekRoom} × 本周余量 + ${SWITCH_SCORE_WEIGHTS.weekExpiring} × 本周余量 × 本周重置临近度 + ${SWITCH_SCORE_WEIGHTS.fiveHourRoom} × 5 小时余量。余量 = 1 − 用量 ÷ 切换线，临近度 = 1 − 距本周重置 ÷ 7 天；窗口临近重置时（5 小时窗口：8–21 点剩不到 30 分钟、其他时间不到 1 小时；本周：8–20 点剩不到 2 小时、其他时间不到 6 小时）切换线放宽到 ${GRACE_LINE}%，5 小时余量还按 1 − 距重置 ÷ 临近时长 向满额靠拢，表里写成「原线→${GRACE_LINE}%」，反正重置后额度就回来了。已到任一切换线的账户记 0 分；没运行过的账户余量按一半算。`;
 
 /** `5 小时 / 本周` — the windows a switch by name raised. */
 function boostedWindows(boost: NonNullable<ClaudeAccountEntry['boost']>): string {

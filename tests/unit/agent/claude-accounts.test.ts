@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   BACKGROUND_FAILOVER_PROMPT,
   failoverPrompt,
@@ -1405,6 +1405,17 @@ describe('quota check before a run (refreshPickQuota)', () => {
 describe('a window about to reset opens its switch line', () => {
   const MIN = 60_000;
   const DAY = 24 * HOUR;
+  // The near-reset span follows the bridge's clock: NOW is 10:00 there, NIGHT 22:00.
+  const NIGHT = NOW + 12 * HOUR;
+  let tz: string | undefined;
+  beforeAll(() => {
+    tz = process.env.TZ;
+    process.env.TZ = 'Asia/Shanghai';
+  });
+  afterAll(() => {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  });
   /** The 2026-10-30 19:05 `/accounts` table: 焦银玲 past her 60% 5-hour line, 5 minutes from its reset. */
   async function screenshot() {
     const { pool, paths } = await poolInOrder(
@@ -1440,7 +1451,7 @@ describe('a window about to reset opens its switch line', () => {
     const rows = accountRows(pool, 'yu.ou', NOW);
     const table = accountsTable(rows);
     // Was 0 (past its line): now the best, far enough ahead of the main account to take the next run.
-    expect(table).toContain('| ✅ **焦银玲**（备 2，backup4） | 61% / 0h5m | 35% / 5d10h | 60→98% / 90% | 48 | 使用中（5 小时窗口临近重置，切换线放宽） |');
+    expect(table).toContain('| ✅ **焦银玲**（备 2，backup4） | 61% / 0h5m | 35% / 5d10h | 60→98% / 90% | 47 | 使用中（5 小时窗口临近重置，切换线放宽） |');
     expect(table).toContain('| **shilong.wang**（主，backup） | 21% / 1h55m | 64% / 3d14h | 98% / 98% | 38 | 可用 |');
     expect(pool.pick()?.id).toBe('backup4');
     expect(switchRefusal(pool, findAccountRow(rows, '焦银玲')!)).toBeUndefined();
@@ -1448,22 +1459,30 @@ describe('a window about to reset opens its switch line', () => {
 
   it('keeps the line while the reset is further off, and never past 98% or a run cap', async () => {
     const { pool } = await screenshot();
-    // An hour and ten minutes before the reset: still the account's own line.
-    const early = NOW - HOUR - 5 * MIN;
+    // 8–21: only the last 30 minutes of the 5 hours open; 40 minutes before is still the account's own line.
+    const early = NOW - 35 * MIN;
     expect(pool.lineOf('backup4', 'five_hour', early)).toBe(60);
     expect(pool.pastLine('backup4', early)?.kind).toBe('five_hour');
     expect(pool.score('backup4', early)).toBe(0);
+    // Other hours: the last hour.
+    pool.observe('backup3', limit({ windows: [{ kind: 'five_hour', usedPercent: 70, resetsAt: NIGHT + 45 * MIN }] }));
+    expect(pool.lineOf('backup3', 'five_hour', NIGHT)).toBe(GRACE_LINE);
+    expect(pool.lineOf('backup3', 'five_hour', NIGHT - HOUR)).toBe(60);
     // The run's cap (课堂精练 stops at 80%) still holds.
     expect(pool.lineOf('backup4', 'five_hour', NOW, { five_hour: 50 })).toBe(50);
     // 98% and up is past the opened line too.
     pool.observe('backup4', limit({ windows: [{ kind: 'five_hour', usedPercent: 98, resetsAt: NOW + 5 * MIN }] }));
     expect(pool.pastLine('backup4', NOW)?.kind).toBe('five_hour');
-    // The week opens in its last 12 hours.
-    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 11 * HOUR }] }));
+    // The week: its last 2 hours from 8 to 20, its last 6 hours otherwise.
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 90 * MIN }] }));
     expect(pool.lineOf('default', 'seven_day', NOW)).toBe(GRACE_LINE);
     expect(pool.pastLine('default', NOW)).toBeUndefined();
-    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 13 * HOUR }] }));
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NOW + 3 * HOUR }] }));
     expect(pool.pastLine('default', NOW)?.kind).toBe('seven_day');
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NIGHT + 5 * HOUR }] }));
+    expect(pool.pastLine('default', NIGHT)).toBeUndefined();
+    pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 93, resetsAt: NIGHT + 7 * HOUR }] }));
+    expect(pool.pastLine('default', NIGHT)?.kind).toBe('seven_day');
   });
 
   it('scores 5-hour room near the reset as nearly full', () => {
@@ -1471,9 +1490,11 @@ describe('a window about to reset opens its switch line', () => {
       five_hour: { usedPercent: five, line: 98, resetsInMs: fiveResetIn },
       seven_day: { usedPercent: 30, line: 90, resetsInMs: 3 * DAY },
     });
-    expect(switchScore(view(40, 10 * MIN), true)).toBeGreaterThan(switchScore(view(40, 2 * HOUR), true));
-    expect(switchScore(view(40, 2 * HOUR), true)).toBeCloseTo(switchScore(view(40, HOUR), true));
-    expect(switchScore(view(90, 1), true)).toBeCloseTo(switchScore(view(0, 1), true), 3);
+    expect(switchScore(view(40, 10 * MIN), true, NOW)).toBeGreaterThan(switchScore(view(40, 2 * HOUR), true, NOW));
+    // Daytime: 40 minutes out is not near yet; at night it is.
+    expect(switchScore(view(40, 40 * MIN), true, NOW)).toBeCloseTo(switchScore(view(40, 2 * HOUR), true, NOW));
+    expect(switchScore(view(40, 40 * MIN), true, NIGHT)).toBeGreaterThan(switchScore(view(40, 2 * HOUR), true, NIGHT));
+    expect(switchScore(view(90, 1), true, NOW)).toBeCloseTo(switchScore(view(0, 1), true, NOW), 3);
   });
 });
 
