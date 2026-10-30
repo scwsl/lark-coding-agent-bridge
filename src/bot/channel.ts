@@ -4,7 +4,7 @@ import type {
   LarkChannelOptions,
   NormalizedMessage,
 } from '@larksuite/channel';
-import { createLarkChannel, LarkChannelError } from '@larksuite/channel';
+import { createLarkChannel, LarkChannelError, normalize } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { agentAccountName } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -157,6 +157,18 @@ import {
   supplementSignal,
 } from './supplement';
 import { applyRecall, parseRecallEvent, RECALL_EVENT, RecalledMessages, settleEarlyRecalls } from './recall';
+import {
+  EDIT_EVENT,
+  type EditEvent,
+  EditedMessages,
+  editInstruction,
+  editPreview,
+  editSupplementInstruction,
+  isEdited,
+  markEdited,
+  parseEditEvent,
+  runForMessage,
+} from './edit';
 import { mediaPlaceholders } from './media-placeholders';
 import { planLongRunNotice, sendLongRunNotice, type LongRunRequester } from './long-run-notice';
 import { fetchKnownChats } from './lark-info';
@@ -775,6 +787,41 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     log.warn('recall', 'hook-unavailable', { reason: 'channel 不支持 onRawEvent' });
   }
 
+  // 消息被编辑: rides the same connection as the recall events above, and
+  // likewise only arrives once the app subscribes to "消息被编辑" in the
+  // developer console.
+  const edits = new EditedMessages();
+  if (typeof channel.onRawEvent === 'function') {
+    channel.onRawEvent(EDIT_EVENT, async (raw) => {
+      const evt = parseEditEvent(raw);
+      if (!evt) {
+        log.warn('edit', 'unparsed', {});
+        return;
+      }
+      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, () =>
+        intakeEdit({
+          evt,
+          edits,
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          media,
+          controls,
+          chatModeCache,
+          logThreadModeOverride,
+          executor,
+          pool,
+          autoResumer,
+          recalled,
+        }),
+      ).catch((err) => log.fail('edit', err));
+    });
+  }
+
   // In-meeting agent. Created before connect() so the `vc.bot.*` handlers are
   // installed on the event dispatcher before any push can arrive; sessions are
   // only created later (on /meeting join or an invite), so the late-bound
@@ -1353,6 +1400,79 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 }
 
 /**
+ * An edited message: swapped for its new content while it is still queued,
+ * folded into the run it started while that run is going, and otherwise taken
+ * in like a new message — which is how an @ added in the edit reaches the bot,
+ * and how an edit to a message already answered comes back as an update.
+ */
+async function intakeEdit(
+  deps: Omit<IntakeDeps, 'msg'> & { evt: EditEvent; edits: EditedMessages },
+): Promise<void> {
+  const { evt, edits, ...intake } = deps;
+  const { channel, activeRuns, pending, media, controls, recalled } = intake;
+  // Bots edit their own replies all the time; only people's edits count.
+  if (evt.senderType !== 'user') return;
+  if (!evt.event) {
+    log.warn('edit', 'no-sender', { chatId: evt.chatId, msgId: evt.messageId });
+    return;
+  }
+  if (!edits.firstSeen(evt)) {
+    log.info('edit', 'duplicate', { msgId: evt.messageId, updateTime: evt.updateTime });
+    return;
+  }
+  const botIdentity = channel.botIdentity;
+  if (!botIdentity || recalled?.has(evt.messageId)) return;
+  const msg = markEdited(
+    await normalize(evt.event, { botIdentity, stripBotMentions: true, includeRaw: true }),
+  );
+  log.info('edit', 'received', {
+    chatId: msg.chatId,
+    msgId: msg.messageId,
+    updateTime: evt.updateTime,
+    mentionedBot: msg.mentionedBot,
+  });
+
+  const queuedIn = pending.replace(msg.messageId, msg);
+  if (queuedIn) {
+    log.info('edit', 'requeued', { scope: queuedIn, msgId: msg.messageId });
+    return;
+  }
+
+  const running = runForMessage(activeRuns, msg.messageId);
+  const inject = running?.handle.run.inject?.bind(running.handle.run);
+  if (running && inject) {
+    const { scope, handle } = running;
+    const attachments = await media.resolve(
+      msg.resources.map((r) => ({ messageId: msg.messageId, resource: r })),
+      controls.profileConfig.attachments,
+    );
+    const prompt = buildPrompt(
+      [msg],
+      attachments,
+      [],
+      undefined,
+      botIdentity,
+      [editSupplementInstruction(msg.messageId)],
+      undefined,
+      isOwnerBatch(controls, [msg], (m) => senderTypeOf(m) === 'bot'),
+    );
+    // The run may have wrapped up (or the message been recalled) meanwhile.
+    const injected =
+      !recalled?.has(msg.messageId) &&
+      activeRuns.get(scope) === handle &&
+      inject(prompt, editPreview(msg.content));
+    if (injected) {
+      log.info('edit', 'injected', { scope, msgId: msg.messageId });
+      void addSupplementReaction(channel, msg.messageId);
+      return;
+    }
+    log.info('edit', 'fallback-queue', { scope, msgId: msg.messageId });
+  }
+
+  await intakeMessage({ ...intake, msg });
+}
+
+/**
  * Fold a follow-up into the run already going on this scope instead of
  * queueing it as a new question — only on an explicit signal (quote-reply to
  * the run, a 补充/追加/+ prefix, or posting in the same topic) and only from
@@ -1610,6 +1730,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const smartSession = getSmartSession(controls.cfg);
   // A restricted chat fences every run there, the owner's included.
   const restrictedChat = controls.profileConfig.access.restrictedChats?.[chatId];
+  const editedIds = batch.filter(isEdited).map((m) => m.messageId);
   const instructions = [
     ...(restrictedChat ? [restrictedChatInstruction(restrictedChat)] : []),
     ...(modelSwitched
@@ -1619,6 +1740,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         ]
       : []),
     ...(smartSession ? [SMART_SESSION_INSTRUCTION] : []),
+    ...(editedIds.length > 0 ? [editInstruction(editedIds)] : []),
   ];
   const extraInstructions = instructions.length > 0 ? instructions : undefined;
 

@@ -96,6 +96,21 @@ export class PendingQueue {
     return undefined;
   }
 
+  /**
+   * Swap a queued message for its edited version, in place: it keeps its spot
+   * and the scope's timer. Returns the scope it was in, if any.
+   */
+  replace(messageId: string, msg: NormalizedMessage): string | undefined {
+    for (const [scope, entry] of this.map.entries()) {
+      const index = entry.messages.findIndex((m) => m.messageId === messageId);
+      if (index < 0) continue;
+      entry.messages[index] = msg;
+      this.onChange?.(scope, entry.messages);
+      return scope;
+    }
+    return undefined;
+  }
+
   cancelAll(): void {
     for (const [scope, entry] of this.map.entries()) {
       if (entry.timer) clearTimeout(entry.timer);
