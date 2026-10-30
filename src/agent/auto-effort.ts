@@ -2,6 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { mergeProcessEnv, spawnProcess } from '../platform/spawn';
+import type { AgentKind } from '../config/profile-schema';
 import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../config/schema';
 
 /**
@@ -395,9 +396,16 @@ export class AutoEffortStore {
   }
 }
 
-/** `preferences.autoEffort` → settings, or undefined when off. Malformed parts fall back to the defaults. */
-export function resolveAutoEffort(pref: AutoEffortPreference | undefined): AutoEffortSettings | undefined {
-  if (pref?.enabled !== true) return undefined;
+/**
+ * `preferences.autoEffort` → settings, or undefined when off. Malformed parts
+ * fall back to the defaults. Claude only: the ladder names Claude models and
+ * the rating call runs `claude`.
+ */
+export function resolveAutoEffort(
+  pref: AutoEffortPreference | undefined,
+  agentKind: AgentKind = 'claude',
+): AutoEffortSettings | undefined {
+  if (pref?.enabled !== true || agentKind !== 'claude') return undefined;
   const validRung = (r: unknown): r is AutoEffortRung => {
     const x = r as Partial<AutoEffortRung> | undefined;
     return (

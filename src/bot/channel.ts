@@ -63,6 +63,9 @@ import {
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { tmpdir } from 'node:os';
+import { AutoEffortStore, resolveAutoEffort } from '../agent/auto-effort';
+import { claudeAccountPool } from '../agent/claude/accounts';
+import { autoEffortByline, startAutoEffort, type AutoEffortPick, type AutoEffortPlan } from './auto-effort-flow';
 import { overloadCard } from '../card/templates';
 import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
 import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
@@ -460,6 +463,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const pendingRotations = new PendingRotationStore(deps.appPaths?.rotationsFile);
   await pendingRotations.load();
   controls.pendingRotations = pendingRotations;
+  // 自动分级: each scope's rung on the effort ladder, on disk across restarts.
+  const autoEfforts = new AutoEffortStore(
+    deps.appPaths?.profileDir ? join(deps.appPaths.profileDir, 'auto-effort.json') : undefined,
+  );
+  await autoEfforts.load();
   // 复制代码: finished cards' copy buttons carry a key into this store.
   if (deps.appPaths?.mediaDir) {
     const codeSnippets = new CodeSnippetStore(join(dirname(deps.appPaths.mediaDir), 'code-snippets.json'));
@@ -604,8 +612,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           botOverload,
           activeRuns,
           recalled,
+          autoEfforts,
           ...(knowledge ? { knowledge } : {}),
-          ...(deps.appPaths?.profileDir ? { knowledgeSnapshotDir: join(deps.appPaths.profileDir, 'knowledge-snapshots') } : {}),
+          ...(deps.appPaths?.profileDir
+            ? {
+                knowledgeSnapshotDir: join(deps.appPaths.profileDir, 'knowledge-snapshots'),
+                profileDir: deps.appPaths.profileDir,
+              }
+            : {}),
         });
       } catch (err) {
         log.fail('flush', err);
@@ -1567,6 +1581,10 @@ interface RunBatchDeps {
   botOverload?: BotOverloadGuard;
   activeRuns?: ActiveRuns;
   recalled?: RecalledMessages;
+  /** 自动分级 state; unset: runs keep the profile's model and effort. */
+  autoEfforts?: AutoEffortStore;
+  /** For the rating call's scratch directory and account. */
+  profileDir?: string;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -1677,6 +1695,33 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
+  // 自动分级: rate the message while the rest of the run is prepared; the
+  // rung is settled once startRunFlow knows which conversation it resumes.
+  const autoEffortSettings = deps.autoEfforts
+    ? resolveAutoEffort(controls.profileConfig.preferences.autoEffort, controls.profileConfig.agentKind)
+    : undefined;
+  const chatEffortCap = effortPrefForChat(controls.profileConfig.preferences, chatId);
+  const autoEffortPlan: AutoEffortPlan | undefined =
+    autoEffortSettings && deps.autoEfforts
+      ? startAutoEffort({
+          settings: autoEffortSettings,
+          store: deps.autoEfforts,
+          scope,
+          texts: batch.map((m) => m.content ?? ''),
+          attachments: attachments.length,
+          ...(quotes[0] ? { quoted: quotes[0].content } : {}),
+          chatType: mode === 'p2p' ? 'p2p' : 'group',
+          owner: isOwnerBatch(controls, batch, (m) => senderTypeOf(m) === 'bot'),
+          ...(chatEffortCap ? { cap: chatEffortCap } : {}),
+          classify: {
+            cwd: join(deps.profileDir ?? tmpdir(), 'auto-effort-scratch'),
+            // The account a run would get now: the rating bills the same one.
+            env: () => (deps.profileDir ? (claudeAccountPool(deps.profileDir).pick()?.env ?? {}) : {}),
+          },
+        })
+      : undefined;
+  let autoPicked: AutoEffortPick | undefined;
+
   // 群聊 / 话题上下文: Feishu only delivers the group messages that @ the bot,
   // so read back what was said around them — see chat-context.ts for which
   // slice each situation gets.
@@ -1733,6 +1778,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const editedIds = batch.filter(isEdited).map((m) => m.messageId);
   const instructions = [
     ...(restrictedChat ? [restrictedChatInstruction(restrictedChat)] : []),
+    ...(autoEffortPlan?.forcedLabel
+      ? [
+          `消息开头的「/${autoEffortPlan.forcedLabel}」是给 bridge 的档位指令，本轮已按这个档位运行；` +
+            '它不是请求内容，忽略它，按其余文字处理。',
+        ]
+      : []),
     ...(modelSwitched
       ? [
           `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
@@ -1905,6 +1956,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(firstMsg.senderName ? { actorName: firstMsg.senderName } : {}),
     ...(knowledgeDedupe ? { knowledge: knowledgeDedupe } : {}),
     ...(gate ? { gate } : {}),
+    ...(autoEffortPlan
+      ? {
+          pickLevel: async (resumeFrom: string | undefined) => {
+            autoPicked = await autoEffortPlan.pick(resumeFrom, executor.hasLiveProcess(scope));
+            return autoPicked ? { model: autoPicked.model, effort: autoPicked.effort } : undefined;
+          },
+        }
+      : {}),
     onBackgroundTurn: (turn) => deliverBackgroundTurn?.(turn) ?? Promise.resolve(),
     observability: {
       profile: controls.profile,
@@ -2009,13 +2068,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // an id this claude build/account doesn't recognize).
     if (evt.type === 'system' && evt.model) {
       log.info('session', 'model', {
-        requested: requestedModel ?? 'default',
+        requested: autoPicked?.model ?? requestedModel ?? 'default',
         actual: evt.model,
       });
       // Same ground truth for the reader: the byline shows the concrete model
       // (e.g. Opus 5.5) instead of only the "always latest" alias picked in /config.
       if (cardRenderOptions.meta) {
-        cardRenderOptions.meta.model = resolvedModelLabel(agentKind, modelPref, evt.model);
+        cardRenderOptions.meta.model = resolvedModelLabel(agentKind, autoPicked?.model ?? modelPref, evt.model);
       }
     }
     if (evt.type === 'system' && evt.threadId) {
@@ -2082,8 +2141,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     meta: {
       title: channel.botIdentity?.name ?? controls.profile,
       agent: capability.agentId,
-      model: modelLabel(agentKind, modelPref),
-      effort: resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)),
+      model: modelLabel(agentKind, autoPicked?.model ?? modelPref),
+      effort: autoPicked
+        ? autoEffortByline(autoPicked)
+        : resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)),
       provider: capability.descriptor.provider,
       ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
     },
@@ -2506,6 +2567,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } finally {
     runs?.finish(execution.runId);
     activePolicyFingerprints.delete(scope);
+    autoEffortPlan?.finish({
+      ...(conversationHandle ? { handle: conversationHandle } : {}),
+      ...(runTerminal ? { terminal: runTerminal } : {}),
+      durationMs: Date.now() - runSubmittedAt,
+    });
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
     if (runTerminal === 'done') void addDoneReaction(channel, lastMsg.messageId);
     if (autoResumer) {

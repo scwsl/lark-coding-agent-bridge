@@ -162,9 +162,10 @@ describe('classifierUserPrompt', () => {
 });
 
 describe('resolveAutoEffort', () => {
-  it('is off unless enabled', () => {
+  it('is off unless enabled, and on Claude only', () => {
     expect(resolveAutoEffort(undefined)).toBeUndefined();
     expect(resolveAutoEffort({})).toBeUndefined();
+    expect(resolveAutoEffort({ enabled: true }, 'codex')).toBeUndefined();
   });
 
   it('fills in the defaults', () => {

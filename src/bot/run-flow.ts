@@ -20,7 +20,7 @@ import type { GateContext } from '../runtime/approvals';
 import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import { sessionHasKnowledge, type AgentSessionProbe } from '../agent/session-probe';
 import { log } from '../core/logger';
-import { effortPrefForChat, type SmartSessionSettings } from '../config/schema';
+import { effortPrefForChat, type EffortLevel, type SmartSessionSettings } from '../config/schema';
 import type { SessionCatalog } from '../session/catalog';
 import {
   decideRotation,
@@ -80,6 +80,12 @@ export interface StartRunFlowInput {
     source: string;
     stage: string;
   };
+  /**
+   * 自动分级: the run's model / effort, settled once the conversation it
+   * resumes is known (`resumeFrom` undefined: a new one). Undefined fields,
+   * or no result, keep the profile's.
+   */
+  pickLevel?: (resumeFrom: string | undefined) => Promise<{ model?: string; effort?: EffortLevel } | undefined>;
 }
 
 export type RunFlowRejectCode =
@@ -209,6 +215,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   const sessionId = descriptor.sessionHandle === 'sessionId' ? resumeFrom : undefined;
   const threadId = descriptor.sessionHandle === 'threadId' ? resumeFrom : undefined;
 
+  const level = input.pickLevel ? await input.pickLevel(resumeFrom).catch(() => undefined) : undefined;
+
   let execution: RunExecution;
   try {
     execution = await input.executor.submit({
@@ -218,11 +226,11 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       threadId,
       model: resolveModelArg(
         input.profileConfig.agentKind,
-        input.profileConfig.preferences.model,
+        level?.model ?? input.profileConfig.preferences.model,
       ),
       effort: resolveEffortArg(
         input.profileConfig.agentKind,
-        effortPrefForChat(input.profileConfig.preferences, input.scope.chatId),
+        level?.effort ?? effortPrefForChat(input.profileConfig.preferences, input.scope.chatId),
       ),
       images:
         descriptor.imageArgs

@@ -703,6 +703,27 @@ bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以�
 }
 ```
 
+### 自动分级（默认关闭，仅 Claude）
+
+每条聊天消息开跑前，先用一次不带工具、不续会话的 `claude -p`（默认 Opus · medium，约 3–5 秒，和拉引用、群上下文并行）判断难度，再沿档位梯子逐级升降本轮的模型和 effort。默认梯子从低到高：`medium`（Opus · medium）→ `high`（Opus · high）→ `xhigh`（Opus · xhigh）→ `fable`（Fable · xhigh，只给 bot 主人本人发起的任务）。
+
+- **新会话**：直接从判断出的档位起步，但最高只到和第一档同模型的那一档；换模型会让整段会话的 prompt 缓存失效，Fable 只能从 xhigh 逐级升上去。
+- **续聊**：每轮最多升或降一档；离开 Fable 这类换了模型的档位，要连续两轮判断都低于它。
+- **跳过判断**：消息不超过 6 个字且没有附件时（「继续」「好的」）沿用当前档，新会话则从最低档起步；消息以 `/medium`、`/high`、`/xhigh`、`/fable` 开头时直接用这一档。
+- **上限**：主人以外的人发起的任务，不超过该会话的 effort（`chatEffort`，没有则用 `effort`），也不用 Fable。
+- **兜底**：判断失败或超时（默认 20 秒）沿用当前档；Fable 档的运行报错后，1 小时内跳过 Fable。
+
+回复卡底部的 Effort 显示本轮档位，如 `xhigh（自动↑）`。各会话所在的档位存在 profile 目录的 `auto-effort.json`，重启不丢。配置文件里打开（profile 的 `preferences`，改完重启该 profile 生效），梯子和判断用的模型都可以改：
+
+```json
+"autoEffort": {
+  "enabled": true,
+  "classifierModel": "opus",
+  "classifierEffort": "medium",
+  "timeoutMs": 20000
+}
+```
+
 ### Worktree 自动清理（默认关闭）
 
 在 `/config` 的「运行与权限」或 Web 控制台「配置 → 回复与运行」打开「Worktree 自动清理」，保存后生效。bridge 每小时检查一次，通过 `/worktree add` 创建并登记的 worktree 默认闲置 7 天后才参与清理；已有的、或 agent 在终端自行创建的 worktree 不会自动纳入。
