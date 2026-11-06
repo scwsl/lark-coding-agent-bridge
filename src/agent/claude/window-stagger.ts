@@ -41,7 +41,11 @@ export const AFTER_RESET_MS = MIN;
  * minutes would only shift the grid round and round.
  */
 const SLOT_TOLERANCE_MS = 15 * MIN;
-const TICK_MS = MIN;
+/**
+ * How often the plan is checked: a window opens up to this late after its
+ * slot (well inside the 5h ÷ N spacing), for a sixth of the wake-ups.
+ */
+const TICK_MS = 10 * MIN;
 /** The plan is exact over subsets of accounts; past this many the rest are left as runs open them. */
 const MAX_ACCOUNTS = 12;
 /** A warm-up that failed, or did not open a window, is tried again after this. */
@@ -214,7 +218,7 @@ export interface WindowStagger {
   stop(): Promise<void>;
 }
 
-/** Check every minute and open each account's next window at its slot. */
+/** Check every 10 minutes and open each account's next window once its slot has come. */
 export function startWindowStagger(opts: WindowStaggerOptions): WindowStagger {
   const now = opts.now ?? Date.now;
   const warm = opts.warm ?? ((pool, account) => warmAccountWindow(pool, account, opts.binary));

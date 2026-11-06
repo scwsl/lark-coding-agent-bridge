@@ -257,7 +257,7 @@ export async function runClaudeAccountStagger(state: string | undefined, opts: A
       process.exit(1);
     }
     await updateStagger(paths, state === 'on');
-    console.log(`✓ 5 小时窗口错峰已${state === 'on' ? '开启' : '关闭'}，运行中的 bridge 下一分钟生效\n`);
+    console.log(`✓ 5 小时窗口错峰已${state === 'on' ? '开启' : '关闭'}，运行中的 bridge 10 分钟内生效\n`);
   }
   const pool = new ClaudeAccountPool({ paths });
   await pool.refresh();
