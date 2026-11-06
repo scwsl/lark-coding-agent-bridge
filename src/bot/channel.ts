@@ -6,7 +6,7 @@ import type {
 } from '@larksuite/channel';
 import { createLarkChannel, LarkChannelError, normalize } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
-import { agentAccountName } from '../agent/account';
+import { agentAccountName, startAgentWindowStagger } from '../agent/account';
 import { agentCapability } from '../agent/capability';
 import {
   modelLabel,
@@ -1058,6 +1058,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   }) : undefined;
 
+  // Claude accounts: keep their 5-hour windows evenly staggered.
+  const windowStagger = deps.appPaths?.profileDir
+    ? startAgentWindowStagger(controls.profileConfig, deps.appPaths.profileDir)
+    : undefined;
+
   // Knowledge repo auto-sync (`/knowledge bind`): a no-op until the directory
   // is bound to a remote; first round shortly after start-up, then every
   // `knowledge.syncIntervalMinutes`. Repeated failures reach the owner's DM.
@@ -1079,6 +1084,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     disconnect: async () => {
       activeRuns.pauseNewRuns('bridge-disconnect');
       await worktreeCleanup?.stop();
+      await windowStagger?.stop();
       // Side by side: each gives its in-flight git a few seconds at most.
       await Promise.all([skillLibraries?.stop(), knowledgeAutoSync?.stop()]);
       controls.skillLibraries = undefined;

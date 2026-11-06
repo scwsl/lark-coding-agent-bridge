@@ -20,10 +20,13 @@ import {
   saveAccount,
   updateAccount,
   updateDefaultLines,
+  updateStagger,
   type SwitchLines,
   parseNicknameMood,
   type NicknameMood,
 } from '../../agent/claude/accounts';
+import { currentStaggerPlan } from '../../agent/claude/window-stagger';
+import { staggerNote } from '../../agent/account';
 import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
 import { promptPassword } from '../prompt';
 import { resolveSecretProfilePaths } from './secrets';
@@ -242,6 +245,29 @@ export async function runClaudeAccountResume(id: string, opts: AccountCliOptions
   await updateAccount(claudeAccountsPaths(appPaths.profileDir), id, { pausedUntil: null });
   console.log(`✓ 已恢复账户 ${id}，运行中的 bridge 下一次运行前生效\n`);
   await runClaudeAccountList(opts);
+}
+
+/** `stagger [on|off]`: turn the 5-hour window stagger on or off, then show the plan. */
+export async function runClaudeAccountStagger(state: string | undefined, opts: AccountCliOptions = {}): Promise<void> {
+  const appPaths = await resolveSecretProfilePaths(opts);
+  const paths = claudeAccountsPaths(appPaths.profileDir);
+  if (state !== undefined) {
+    if (state !== 'on' && state !== 'off') {
+      console.error('✗ 用法：claude-account stagger [on|off]');
+      process.exit(1);
+    }
+    await updateStagger(paths, state === 'on');
+    console.log(`✓ 5 小时窗口错峰已${state === 'on' ? '开启' : '关闭'}，运行中的 bridge 下一分钟生效\n`);
+  }
+  const pool = new ClaudeAccountPool({ paths });
+  await pool.refresh();
+  if (!pool.staggerEnabled) {
+    console.log('5 小时窗口错峰：关（窗口由运行自然打开）。开启：claude-account stagger on');
+    return;
+  }
+  const rows = accountRows(pool, await claudeAccountName(), Date.now(), { private: true });
+  const note = staggerNote(currentStaggerPlan(pool), rows);
+  console.log(note ? note.replace(/\*\*/g, '') : '只有一个可用账户，不需要错峰。');
 }
 
 /** `--until 2026-11-13` (local midnight) / `2026-11-13T09:00`, or `--days 14`: epoch ms in the future, else why not. */

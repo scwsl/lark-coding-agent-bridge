@@ -35,6 +35,9 @@ export async function refreshPickQuota(
   for (let i = 0; i < MAX_PROBES_PER_RUN; i++) {
     const account = pool.pick(undefined, opts.cap);
     if (!account) return;
+    // Its 5-hour window is over (so that one is empty) and the stagger opens
+    // the next; a probe would open it now. The run itself may still.
+    if (pool.heldForStagger(account.id, now())) return;
     const at = now();
     const seen = Math.max(pool.reportedAt(account.id) ?? 0, opts.checkedAt.get(account.id) ?? 0);
     if (at - seen < QUOTA_FRESH_MS) return;
@@ -60,7 +63,11 @@ export async function refreshAllQuota(
   const now = opts.now ?? Date.now;
   const probe = opts.probe ?? probeAccountQuota;
   const failed: string[] = [];
-  const stale = pool.accounts().filter((account) => now() - (pool.reportedAt(account.id) ?? 0) >= ACCOUNTS_FRESH_MS);
+  const stale = pool
+    .accounts()
+    .filter((account) => now() - (pool.reportedAt(account.id) ?? 0) >= ACCOUNTS_FRESH_MS)
+    // Probing every idle account at once is what bunched their resets up.
+    .filter((account) => !pool.heldForStagger(account.id, now()));
   await Promise.all(
     stale.map(async (account) => {
       const ok = await probe(pool, account).catch((err: unknown) => {
@@ -89,11 +96,25 @@ export async function probeAccountQuota(pool: ClaudeAccountPool, account: Picked
     log.info('claude-accounts', 'quota-probed', { id: account.id, via: 'usage', ok: windows.length > 0 });
     return windows.length > 0;
   }
+  return haikuProbe(pool, account, binary, 'haiku');
+}
+
+/**
+ * Open the account's next 5-hour window now (the window starts at the first
+ * request after the last one ran out): one tiny haiku request, also for the
+ * CLI's own login — its `/usage` read opens nothing. Records the quota the
+ * reply carries; true when it carried some.
+ */
+export function warmAccountWindow(pool: ClaudeAccountPool, account: PickedAccount, binary = 'claude'): Promise<boolean> {
+  return haikuProbe(pool, account, binary, 'warm');
+}
+
+async function haikuProbe(pool: ClaudeAccountPool, account: PickedAccount, binary: string, via: 'haiku' | 'warm'): Promise<boolean> {
   const result = await runCapture(
     binary,
     tmpdir(),
     ['-p', 'Reply with exactly: OK', '--output-format', 'stream-json', '--verbose', '--model', 'haiku', '--no-session-persistence'],
-    opts,
+    { timeoutMs: PROBE_TIMEOUT_MS, maxBytes: 256_000, env: account.env },
   );
   let seen = 0;
   for (const line of result.stdout.split('\n')) {
@@ -109,6 +130,6 @@ export async function probeAccountQuota(pool: ClaudeAccountPool, account: Picked
       seen++;
     }
   }
-  log.info('claude-accounts', 'quota-probed', { id: account.id, via: 'haiku', ok: seen > 0 });
+  log.info('claude-accounts', 'quota-probed', { id: account.id, via, ok: seen > 0 });
   return seen > 0;
 }

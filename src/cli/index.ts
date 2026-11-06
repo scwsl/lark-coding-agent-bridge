@@ -10,6 +10,7 @@ import {
   runClaudeAccountPause,
   runClaudeAccountRemove,
   runClaudeAccountResume,
+  runClaudeAccountStagger,
   runClaudeAccountSet,
   runClaudeAccountSwitch,
 } from './commands/claude-account';
@@ -385,6 +386,14 @@ claudeAccount
   .option('--profile <name>', 'profile name (defaults to active profile)')
   .action(async (id: string, opts: { profile?: string }) => {
     await runClaudeAccountResume(id, { profile: opts.profile });
+  });
+
+claudeAccount
+  .command('stagger [state]')
+  .description('Show the 5-hour window stagger plan; `on` / `off` turns it on or off')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (state: string | undefined, opts: { profile?: string }) => {
+    await runClaudeAccountStagger(state, { profile: opts.profile });
   });
 
 claudeAccount

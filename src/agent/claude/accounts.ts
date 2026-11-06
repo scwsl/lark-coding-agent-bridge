@@ -168,6 +168,11 @@ export interface ClaudeAccountsConfig {
   lines: SwitchLines;
   /** Preference order; `default` is always present. */
   accounts: ClaudeAccountEntry[];
+  /**
+   * `false`: leave the 5-hour windows where runs open them. Otherwise they are
+   * kept evenly staggered (see `window-stagger.ts`).
+   */
+  stagger?: false;
 }
 
 export interface AccountQuotaWindow {
@@ -232,7 +237,7 @@ export function defaultAccountsConfig(): ClaudeAccountsConfig {
  */
 export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const config = defaultAccountsConfig();
-  let raw: { lines?: unknown; switchAtPercent?: unknown; accounts?: unknown };
+  let raw: { lines?: unknown; switchAtPercent?: unknown; accounts?: unknown; stagger?: unknown };
   try {
     raw = JSON.parse(text) as typeof raw;
   } catch {
@@ -241,6 +246,7 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   if (!raw || typeof raw !== 'object') return config;
   if (isValidLine(raw.switchAtPercent)) config.lines = { five_hour: raw.switchAtPercent, seven_day: raw.switchAtPercent };
   config.lines = { ...config.lines, ...parseLines(raw.lines) };
+  if (raw.stagger === false) config.stagger = false;
   const accounts: ClaudeAccountEntry[] = [];
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
@@ -366,6 +372,15 @@ export async function updateDefaultLines(
 }
 
 /** Put the named accounts first, in the order given; the rest keep their order after them. */
+/** Turn the 5-hour window stagger on or off for the profile. */
+export async function updateStagger(paths: ClaudeAccountsPaths, enabled: boolean): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  if (enabled) delete config.stagger;
+  else config.stagger = false;
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
 export async function reorderAccounts(paths: ClaudeAccountsPaths, ids: string[]): Promise<ClaudeAccountsConfig> {
   const config = readAccountsConfig(paths);
   const known = new Set(config.accounts.map((a) => a.id));
@@ -478,6 +493,29 @@ export class ClaudeAccountPool {
     this.config = config;
     this.tokens = tokens;
     this.configStamp = stamp;
+  }
+
+  /** The 5-hour windows are kept staggered (see `window-stagger.ts`); on unless the owner turned it off. */
+  get staggerEnabled(): boolean {
+    return this.config.stagger !== false;
+  }
+
+  /** When the account's 5-hour window resets by the last reading (epoch ms, possibly past); undefined when never read. */
+  fiveHourResetsAt(id: string): number | undefined {
+    return this.loadState()[id]?.windows.five_hour?.resetsAt;
+  }
+
+  /**
+   * A token account whose 5-hour window has run out waits for the stagger to
+   * open its next one at its slot: a quota probe on a token is a model request
+   * and would open the window right away — on `/accounts`, every idle account
+   * in the same minute, which is how their resets bunched up. The CLI's own
+   * login reads `/usage`, which opens nothing, so it is never held.
+   */
+  heldForStagger(id: string, now = this.now()): boolean {
+    if (!this.staggerEnabled || !this.multi || id === DEFAULT_ACCOUNT_ID || !this.tokens.has(id)) return false;
+    const resetsAt = this.fiveHourResetsAt(id);
+    return resetsAt !== undefined && resetsAt <= now;
   }
 
   /** The profile's lines (accounts without their own follow these). */
