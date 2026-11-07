@@ -42,6 +42,8 @@ export class Scheduler {
   private timer: NodeJS.Timeout | undefined;
   private ticking = false;
   private readonly inFlight = new Set<string>();
+  /** Set by {@link stop}: runs that end after this were cut short by the shutdown. */
+  private stopping = false;
 
   constructor(opts: SchedulerOptions) {
     this.opts = opts;
@@ -57,10 +59,17 @@ export class Scheduler {
   /** Arm every enabled job and start ticking. */
   start(): void {
     if (this.timer) return;
+    this.stopping = false;
     let armed = 0;
+    const now = this.now();
     for (const job of this.store.list()) {
       if (!job.enabled) continue;
-      const next = this.computeNextRun(job);
+      // A slot that is already due was never completed: the bridge was down,
+      // the job was queued behind another one, or a restart cut it short.
+      // Keep it so the next tick replays it (or, past the catch-up window,
+      // logs it as missed); recomputing from now would silently drop it.
+      const pending = job.nextRunAt !== undefined && job.nextRunAt <= now;
+      const next = pending ? job.nextRunAt : this.computeNextRun(job);
       if (next !== job.nextRunAt) this.store.update(job.id, { nextRunAt: next });
       if (next !== undefined) armed++;
     }
@@ -75,6 +84,7 @@ export class Scheduler {
 
   stop(): void {
     if (!this.timer) return;
+    this.stopping = true;
     clearInterval(this.timer);
     this.timer = undefined;
     log.info('scheduler', 'stopped', { inFlight: this.inFlight.size });
@@ -165,6 +175,15 @@ export class Scheduler {
       };
     } finally {
       this.inFlight.delete(job.id);
+    }
+
+    // Cut short by our own shutdown (a restart): the slot was not really run.
+    // Leave nextRunAt on it and do not count a failure — the restarted bridge
+    // replays it within the catch-up window. Manual runs have no slot to keep.
+    if (this.stopping && !opts.manual && !record.ok && record.terminal === 'interrupted') {
+      log.info('scheduler', 'job-interrupted-by-shutdown', { jobId: job.id });
+      this.store.update(job.id, { lastRun: record });
+      return record;
     }
 
     // A one-shot has done its whole job; keeping a dead record around would

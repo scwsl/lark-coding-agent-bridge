@@ -147,6 +147,54 @@ describe('scheduler ticking', () => {
     expect(runJob).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a due slot across a restart instead of re-arming past it', async () => {
+    // 06:00 slot was due (queued behind another job, or cut short) when the bridge restarted.
+    const now = new Date('2026-11-07T06:03:27').getTime();
+    const runJob = vi.fn(async () => ok());
+    const created = store.add(job({ schedule: { kind: 'cron', expr: '0 6 * * *' } }));
+    store.update(created.id, { nextRunAt: new Date('2026-11-07T06:00:00').getTime() });
+    const scheduler = makeScheduler({ now: () => now, runJob });
+    scheduler.start();
+    scheduler.stop();
+    expect(store.get(created.id)?.nextRunAt).toBe(new Date('2026-11-07T06:00:00').getTime());
+
+    await scheduler.tick();
+    expect(runJob).toHaveBeenCalledTimes(1);
+    expect(store.get(created.id)?.nextRunAt).toBe(new Date('2026-11-08T06:00:00').getTime());
+  });
+
+  it('still re-arms future slots on start', () => {
+    const now = new Date('2026-11-07T05:00:00').getTime();
+    const created = store.add(job({ schedule: { kind: 'cron', expr: '0 6 * * *' } }));
+    store.update(created.id, { nextRunAt: new Date('2026-11-09T06:00:00').getTime() });
+    const scheduler = makeScheduler({ now: () => now, runJob: async () => ok() });
+    scheduler.start();
+    scheduler.stop();
+    expect(store.get(created.id)?.nextRunAt).toBe(new Date('2026-11-07T06:00:00').getTime());
+  });
+
+  it('keeps the slot and the streak when a shutdown interrupts the run', async () => {
+    const now = new Date('2026-11-07T06:00:30').getTime();
+    let release!: (r: JobRunRecord) => void;
+    const runJob = vi.fn(() => new Promise<JobRunRecord>((r) => { release = r; }));
+    const created = store.add(job({ schedule: { kind: 'cron', expr: '0 6 * * 6' } }));
+    const slot = new Date('2026-11-07T06:00:00').getTime();
+    store.update(created.id, { nextRunAt: slot });
+    const scheduler = makeScheduler({ now: () => now, runJob });
+    scheduler.start();
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(runJob).toHaveBeenCalledTimes(1));
+    scheduler.stop();
+    release({ startedAt: 1, finishedAt: 2, ok: false, terminal: 'interrupted', error: 'interrupted' });
+    await ticking;
+
+    const after = store.get(created.id);
+    expect(after?.nextRunAt).toBe(slot);
+    expect(after?.failureStreak ?? 0).toBe(0);
+    expect(after?.lastRun?.terminal).toBe('interrupted');
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
   it('removes a one-shot after it fires', async () => {
     const now = new Date('2026-09-22T09:00:00').getTime();
     const runJob = vi.fn(async () => ok());
