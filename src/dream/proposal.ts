@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseSkillHeader, skillFrontmatterValue, type MemoryEntry, type SkillSummary } from '../knowledge/store';
+import { excludedTerm } from './exclude';
 import type { DreamSourceRef } from './prompt';
 import { findSecret } from './secrets';
 
@@ -125,6 +126,8 @@ export interface ValidateContext {
   reservedSkillNames?: ReadonlySet<string>;
   /** Non-empty: a new skill must be named `<project>:<skill>` with one of these projects. */
   skillProjects?: Readonly<Record<string, string>>;
+  /** Text containing one of these may not enter the libraries. See DreamTuning.excludeTerms. */
+  excludeTerms?: readonly string[];
   /** Caps for this one call; default {@link MAX_MEMORY_PER_SCOPE} / {@link MAX_SKILLS_PER_SCOPE}. */
   maxMemory?: number;
   maxSkills?: number;
@@ -198,6 +201,8 @@ function validateMemoryItem(
   if (text === '') return { error: '条目内容为空或过长' };
   const secret = findSecret(`${text ?? ''}\n${reason}`);
   if (secret) return { error: `疑似包含凭证（${secret}）` };
+  const term = excludedTerm(`${text ?? ''}\n${reason}\n${typeof item.note === 'string' ? item.note : ''}`, ctx.excludeTerms ?? []);
+  if (term) return { error: `涉及单独存放的项目（${term}），不进本库` };
 
   const action = item.action;
   if (action === 'add') {
@@ -294,6 +299,8 @@ function validateSkillItem(raw: unknown, ctx: ValidateContext): SkillProposal | 
   }
   if (parseSkillHeader(name, body).name !== name) return { error: 'skill 正文的 name 与提案不一致' };
   if (ctx.requireArgumentHint && !hasArgumentHint(body)) return { error: 'skill 的 frontmatter 缺少 argument-hint 参数说明' };
+  const excluded = excludedTerm(`${name}\n${body}\n${description}\n${reason}`, ctx.excludeTerms ?? []);
+  if (excluded) return { error: `涉及单独存放的项目（${excluded}），不进本库` };
   const secret = findSecret(`${body}\n${description}\n${reason}`);
   if (secret) return { error: `skill 疑似包含凭证（${secret}）` };
   const existing = ctx.skills.find((skill) => skill.name === name);

@@ -389,6 +389,17 @@ export interface DreamTuning {
   skillLibrary?: string;
   /** Only these chat / topic scopes. Absent: every chat scope. */
   scopes?: string[];
+  /**
+   * Never read these chats (a chat id covers all its topics): a project kept in
+   * its own private repository. Applied after {@link scopes}.
+   */
+  excludeScopes?: string[];
+  /**
+   * Reject any note, memory or skill whose text, reason or body contains one of
+   * these (case-insensitive) — keeps a separately stored project out of the
+   * shared libraries. Pool candidates that match are dropped too.
+   */
+  excludeTerms?: string[];
   /** 自动整理: hours a run may start in, `HH:MM-HH:MM` (may wrap midnight). Default `01:00-07:00`. */
   window?: string;
   /** IANA time zone of {@link window}. Default: the host's. */
@@ -520,6 +531,10 @@ export interface DreamSettings {
   minIdleMinutes: number;
   skillLibrary?: string;
   scopes?: string[];
+  /** See {@link DreamTuning.excludeScopes}. */
+  excludeScopes: string[];
+  /** See {@link DreamTuning.excludeTerms}. */
+  excludeTerms: string[];
   publish: 'pr' | 'push';
   skillUpdates: 'pr' | 'push';
   external: DreamExternalLibraryConfig[];
@@ -556,6 +571,8 @@ export const DREAM_DEFAULTS: DreamSettings = {
   maxRunMinutes: 20,
   drainRounds: 6,
   minIdleMinutes: 30,
+  excludeScopes: [],
+  excludeTerms: [],
   publish: 'pr',
   skillUpdates: 'pr',
   external: [],
@@ -813,9 +830,11 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
   const pick = (value: unknown, min: number, max: number, fallback: number): number =>
     typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? Math.floor(value) : fallback;
   const library = typeof raw.skillLibrary === 'string' ? raw.skillLibrary.trim() : '';
-  const scopes = Array.isArray(raw.scopes)
-    ? raw.scopes.filter((scope): scope is string => typeof scope === 'string' && scope.trim() !== '').map((scope) => scope.trim())
-    : [];
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map((item) => item.trim())
+      : [];
+  const scopes = strings(raw.scopes);
   const daily = typeof raw.dailyAt === 'string' ? parseDreamClock(raw.dailyAt) : undefined;
   const resetBefore = typeof raw.quotaResetBefore === 'string' ? parseDreamClock(raw.quotaResetBefore) : undefined;
   const notifyChat = typeof raw.notifyChat === 'string' && /^o[cu]_[\w-]+$/.test(raw.notifyChat.trim()) ? raw.notifyChat.trim() : '';
@@ -827,6 +846,8 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     minIdleMinutes: pick(raw.minIdleMinutes, 0, 7 * 24 * 60, DREAM_DEFAULTS.minIdleMinutes),
     ...(library ? { skillLibrary: library } : {}),
     ...(scopes.length > 0 ? { scopes } : {}),
+    excludeScopes: strings(raw.excludeScopes),
+    excludeTerms: strings(raw.excludeTerms),
     publish: raw.publish === 'push' ? 'push' : 'pr',
     skillUpdates: raw.skillUpdates === 'pr' || raw.skillUpdates === 'push' ? raw.skillUpdates : raw.publish === 'push' ? 'push' : 'pr',
     external: resolveExternalLibraries(raw.externalLibraries),

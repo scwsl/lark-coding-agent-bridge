@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AgentTranscript, TranscriptExchange } from '../agent/session-transcript';
 import type { DreamSettings } from '../config/schema';
+import { excludedScope } from './exclude';
 import type { DreamSessionRecord } from './state';
 
 /**
@@ -92,6 +93,7 @@ function candidateRecords(records: readonly DreamSessionRecord[], settings: Drea
   const allowed = settings.scopes ? new Set(settings.scopes) : undefined;
   return records
     .filter((record) => isChatScope(record.scopeId) && (!allowed || allowed.has(record.scopeId)))
+    .filter((record) => !excludedScope(record.scopeId, settings.excludeScopes ?? []))
     // Nothing ran in it since it was last read: no need to open the transcript.
     .filter((record) => record.consumedAt === undefined || record.lastSeenAt > record.consumedAt)
     .sort((a, b) => b.lastSeenAt - a.lastSeenAt);

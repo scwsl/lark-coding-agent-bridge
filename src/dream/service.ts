@@ -114,6 +114,7 @@ import {
   type DreamAutoCheck,
   type DreamAutoLedger,
 } from './schedule';
+import { excludedTerm } from './exclude';
 import { measureNewInput, selectDreamInputs, type DreamScopeInput } from './select';
 import type { DreamMaterial } from './schedule';
 import { DreamStateStore, sessionKey, type DreamRun, type DreamSessionRecord, type DreamTarget } from './state';
@@ -1053,6 +1054,7 @@ export class DreamService {
         signal,
         requireArgumentHint: settings.requireArgumentHint,
         skillProjects: settings.skillProjects,
+        excludeTerms: settings.excludeTerms,
       });
       if (signal.aborted) return stopped('游标未移动');
       if ('error' in outcome) {
@@ -1090,7 +1092,8 @@ export class DreamService {
     // 候选池: tonight's inferred notes join it; what recurred or whose note is being read is promoted.
     const reads = this.recall.counter(POOL_READ_DAYS, this.now(), timezone);
     const pooled = planPool({
-      entries: this.pool.entries(),
+      // A candidate naming a separately stored project leaves the pool instead of being promoted.
+      entries: this.pool.entries().filter((entry) => !excludedTerm(`${entry.text}\n${entry.reason}`, settings.excludeTerms)),
       candidates,
       ...(themes ? { themes } : {}),
       now: this.now(),
@@ -1242,6 +1245,7 @@ export class DreamService {
       signal: AbortSignal;
       requireArgumentHint: boolean;
       skillProjects: Readonly<Record<string, string>>;
+      excludeTerms: readonly string[];
     },
   ): Promise<ReturnType<typeof validateDreamProposals> | { error: string }> {
     const built = buildDreamScopePrompt({
@@ -1266,6 +1270,7 @@ export class DreamService {
       isPublished: (hash) => this.state.isPublished(hash),
       requireArgumentHint: ctx.requireArgumentHint,
       skillProjects: ctx.skillProjects,
+      excludeTerms: ctx.excludeTerms,
     });
   }
 
@@ -1372,6 +1377,7 @@ export class DreamService {
       isPublished: (hash) => this.state.isPublished(hash),
       requireArgumentHint: settings.requireArgumentHint,
       skillProjects: settings.skillProjects,
+      excludeTerms: settings.excludeTerms,
       external: { ...(ownLibrary ? { ownLibrary } : {}) },
       reservedSkillNames: new Set(localSkills.map((skill) => skill.name).filter((name) => !ownNames.has(name))),
       maxMemory: MAX_LEARNING_MEMORY,
