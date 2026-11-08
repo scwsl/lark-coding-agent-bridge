@@ -5,6 +5,7 @@ import { formatAgentPreflightDiagnostic, getAgentPreflightDiagnostic } from '../
 import {
   runClaudeAccountAdd,
   runClaudeAccountLines,
+  runClaudeAccountOffDay,
   runClaudeAccountList,
   runClaudeAccountOrder,
   runClaudeAccountPause,
@@ -350,6 +351,22 @@ claudeAccount
   .action(async (opts: { fiveHour?: string; weekly?: string; profile?: string }) => {
     await runClaudeAccountLines(opts);
   });
+
+claudeAccount
+  .command('off-day')
+  .description(
+    'Rest-day (weekend / statutory holiday) rules for every account: lines raised to these, and longer near-reset spans in hours; 0 drops one',
+  )
+  .option('--five-hour <percent>', '5-hour window switch line on rest days')
+  .option('--weekly <percent>', 'weekly window switch line on rest days')
+  .option('--five-hour-grace <hours>', 'on rest days the 5-hour window counts as about to reset this many hours before (5 = always)')
+  .option('--weekly-grace <hours>', 'on rest days the weekly window counts as about to reset this many hours before')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(
+    async (opts: { fiveHour?: string; weekly?: string; fiveHourGrace?: string; weeklyGrace?: string; profile?: string }) => {
+      await runClaudeAccountOffDay(opts);
+    },
+  );
 
 claudeAccount
   .command('order <ids...>')

@@ -1,10 +1,11 @@
 import { readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { getSecret, removeSecret, setSecret, type KeystorePaths } from '../../config/keystore';
 import { log } from '../../core/logger';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import type { AgentEvent } from '../types';
 import type { QuotaReading, QuotaWindow } from '../quota';
+import { isOffDay, refreshHolidays } from './off-days';
 
 /**
  * Several Claude subscription accounts behind one profile, so a run can move
@@ -166,6 +167,18 @@ function parseNicknames(raw: unknown): Nicknames | undefined {
 
 export interface ClaudeAccountsConfig {
   lines: SwitchLines;
+  /**
+   * On rest days (weekends and statutory holidays, `off-days.ts`) every
+   * account's line in a window listed here is raised to it (never lowered).
+   */
+  offDayLines?: Partial<SwitchLines>;
+  /**
+   * On rest days a window counts as about to reset ({@link GRACE_LINE}) this
+   * many hours before its reset, where longer than {@link GRACE_SPANS}; a
+   * weekly window in it also scores as the first to use ({@link switchScore}).
+   * Owner's choice 2026-11-08: 5-hour 5 (the whole window), weekly 24.
+   */
+  offDayGraceHours?: Partial<Record<WindowKind, number>>;
   /** Preference order; `default` is always present. */
   accounts: ClaudeAccountEntry[];
   /**
@@ -237,7 +250,7 @@ export function defaultAccountsConfig(): ClaudeAccountsConfig {
  */
 export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const config = defaultAccountsConfig();
-  let raw: { lines?: unknown; switchAtPercent?: unknown; accounts?: unknown; stagger?: unknown };
+  let raw: { lines?: unknown; offDayLines?: unknown; offDayGraceHours?: unknown; switchAtPercent?: unknown; accounts?: unknown; stagger?: unknown };
   try {
     raw = JSON.parse(text) as typeof raw;
   } catch {
@@ -246,6 +259,10 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   if (!raw || typeof raw !== 'object') return config;
   if (isValidLine(raw.switchAtPercent)) config.lines = { five_hour: raw.switchAtPercent, seven_day: raw.switchAtPercent };
   config.lines = { ...config.lines, ...parseLines(raw.lines) };
+  const offDay = parseLines(raw.offDayLines);
+  if (Object.keys(offDay).length > 0) config.offDayLines = offDay;
+  const offDayGrace = parseGraceHours(raw.offDayGraceHours);
+  if (offDayGrace) config.offDayGraceHours = offDayGrace;
   if (raw.stagger === false) config.stagger = false;
   const accounts: ClaudeAccountEntry[] = [];
   const seen = new Set<string>();
@@ -281,6 +298,20 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   if (!seen.has(DEFAULT_ACCOUNT_ID)) accounts.unshift({ id: DEFAULT_ACCOUNT_ID });
   config.accounts = accounts;
   return config;
+}
+
+function isValidGraceHours(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 7 * 24;
+}
+
+function parseGraceHours(raw: unknown): Partial<Record<WindowKind, number>> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Partial<Record<WindowKind, number>> = {};
+  for (const kind of WINDOW_KINDS) {
+    const value = (raw as Record<string, unknown>)[kind];
+    if (isValidGraceHours(value)) out[kind] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function parseBoost(raw: unknown): ClaudeAccountEntry['boost'] {
@@ -371,6 +402,37 @@ export async function updateDefaultLines(
   return config;
 }
 
+/** Rest-day lines for every account; `0` drops a window's (it keeps the usual lines on rest days). */
+export async function updateOffDayLines(
+  paths: ClaudeAccountsPaths,
+  lines: Partial<Record<WindowKind, number>>,
+  graceHours: Partial<Record<WindowKind, number>> = {},
+): Promise<ClaudeAccountsConfig> {
+  const config = readAccountsConfig(paths);
+  const grace: Partial<Record<WindowKind, number>> = { ...config.offDayGraceHours };
+  for (const kind of WINDOW_KINDS) {
+    const value = graceHours[kind];
+    if (value === undefined) continue;
+    if (value === 0) delete grace[kind];
+    else if (!isValidGraceHours(value)) throw new Error(`临近重置时长要在 0–168 小时之间：${value}`);
+    else grace[kind] = value;
+  }
+  if (Object.keys(grace).length > 0) config.offDayGraceHours = grace;
+  else delete config.offDayGraceHours;
+  const next: Partial<SwitchLines> = { ...config.offDayLines };
+  for (const kind of WINDOW_KINDS) {
+    const value = lines[kind];
+    if (value === undefined) continue;
+    if (value === 0) delete next[kind];
+    else if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
+    else next[kind] = value;
+  }
+  if (Object.keys(next).length > 0) config.offDayLines = next;
+  else delete config.offDayLines;
+  await writeAccountsConfig(paths, config);
+  return config;
+}
+
 /** Put the named accounts first, in the order given; the rest keep their order after them. */
 /** Turn the 5-hour window stagger on or off for the profile. */
 export async function updateStagger(paths: ClaudeAccountsPaths, enabled: boolean): Promise<ClaudeAccountsConfig> {
@@ -451,6 +513,8 @@ export interface ClaudeAccountPoolOptions {
   now?: () => number;
   /** Decrypt one token. Injected in tests. */
   readSecret?: (id: string) => Promise<string | undefined>;
+  /** `now` is a rest day ({@link ClaudeAccountsConfig.offDayLines}). Injected in tests; else `off-days.ts`. */
+  isOffDay?: (now: number) => boolean;
 }
 
 type RateLimitEvent = Extract<AgentEvent, { type: 'rate_limit' }>;
@@ -463,15 +527,20 @@ export class ClaudeAccountPool {
   private writing: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly readSecret: (id: string) => Promise<string | undefined>;
+  private readonly holidaysDir: string;
+  private readonly offDay: (now: number) => boolean;
 
   constructor(private readonly opts: ClaudeAccountPoolOptions) {
     this.now = opts.now ?? Date.now;
     this.readSecret = opts.readSecret ?? ((id) => getSecret(id, opts.paths.keystore));
+    this.holidaysDir = join(dirname(opts.paths.configFile), 'holidays');
+    this.offDay = opts.isOffDay ?? ((now) => isOffDay(now, this.holidaysDir));
   }
 
   /** Re-read the account list when its file changed and decrypt the tokens. Never throws. */
   async refresh(): Promise<void> {
     this.loadState();
+    if ((this.config.offDayLines || this.config.offDayGraceHours) && !this.opts.isOffDay) refreshHolidays(this.holidaysDir, this.now());
     let stamp = 0;
     try {
       stamp = statSync(this.opts.paths.configFile).mtimeMs;
@@ -523,6 +592,34 @@ export class ClaudeAccountPool {
     return { ...this.config.lines };
   }
 
+  /** The rest-day lines, if the owner set any. */
+  get offDayLines(): Partial<SwitchLines> | undefined {
+    return this.config.offDayLines ? { ...this.config.offDayLines } : undefined;
+  }
+
+  /** The rest-day near-reset spans in hours, if the owner set any. */
+  get offDayGraceHours(): Partial<Record<WindowKind, number>> | undefined {
+    return this.config.offDayGraceHours ? { ...this.config.offDayGraceHours } : undefined;
+  }
+
+  /** `now` is a rest day and rest-day lines or spans are set: they are in force. */
+  offDayLinesActive(now = this.now()): boolean {
+    return (this.config.offDayLines !== undefined || this.config.offDayGraceHours !== undefined) && this.offDay(now);
+  }
+
+  /** The rest-day span of `kind` in ms when it is in force at `now` and longer than the usual one. */
+  private offDayGraceMs(kind: WindowKind, now: number): number | undefined {
+    const hours = this.config.offDayGraceHours?.[kind];
+    if (hours === undefined) return undefined;
+    const ms = hours * 3_600_000;
+    return ms > graceMs(kind, now) && this.offDay(now) ? ms : undefined;
+  }
+
+  /** How close to its reset `kind`'s window counts as about to reset at `now`: {@link graceMs}, longer on rest days. */
+  graceSpanMs(kind: WindowKind, now = this.now()): number {
+    return this.offDayGraceMs(kind, now) ?? graceMs(kind, now);
+  }
+
   /** The line (1–100) at which runs leave the account in `kind`'s window, a raised one included, under `cap`. */
   lineOf(id: string, kind: WindowKind, now = this.now(), cap?: LineCap): number {
     const own = this.ownLineOf(id, kind, now);
@@ -531,7 +628,7 @@ export class ClaudeAccountPool {
 
   /** The line before any near-reset opening: the account's own, raised by a switch by name. */
   private ownLineOf(id: string, kind: WindowKind, now: number): number {
-    const base = this.baseLineOf(id, kind);
+    const base = this.baseLineOf(id, kind, now);
     const boost = this.config.accounts.find((a) => a.id === id)?.boost?.[kind];
     return boost && boost.until > now ? Math.max(base, boost.line) : base;
   }
@@ -539,17 +636,19 @@ export class ClaudeAccountPool {
   /** The window resets within {@link graceMs}: its line is open up to {@link GRACE_LINE}. */
   inGrace(id: string, kind: WindowKind, now = this.now()): boolean {
     const resetsAt = this.loadState()[id]?.windows[kind]?.resetsAt;
-    return resetsAt !== undefined && resetsAt > now && resetsAt - now < graceMs(kind, now);
+    return resetsAt !== undefined && resetsAt > now && resetsAt - now < this.graceSpanMs(kind, now);
   }
 
-  /** The account's own line, or the profile's, without any raise. */
-  baseLineOf(id: string, kind: WindowKind): number {
-    return this.config.accounts.find((a) => a.id === id)?.lines?.[kind] ?? this.config.lines[kind];
+  /** The account's own line, or the profile's, raised to the rest-day line on rest days; no other raise. */
+  baseLineOf(id: string, kind: WindowKind, now = this.now()): number {
+    const line = this.config.accounts.find((a) => a.id === id)?.lines?.[kind] ?? this.config.lines[kind];
+    const offDay = this.config.offDayLines?.[kind];
+    return offDay !== undefined && offDay > line && this.offDay(now) ? offDay : line;
   }
 
   /** Some window's line is raised right now (a switch by name). */
   isBoosted(id: string, now = this.now()): boolean {
-    return WINDOW_KINDS.some((kind) => this.ownLineOf(id, kind, now) > this.baseLineOf(id, kind));
+    return WINDOW_KINDS.some((kind) => this.ownLineOf(id, kind, now) > this.baseLineOf(id, kind, now));
   }
 
   /**
@@ -677,11 +776,14 @@ export class ClaudeAccountPool {
       }
       const reset = window.resetsAt !== undefined && window.resetsAt <= now;
       const own = withCap(this.ownLineOf(id, kind, now), kind, cap);
+      const restDaySpan = this.offDayGraceMs(kind, now);
       windows[kind] = {
         line,
         usedPercent: reset ? 0 : window.usedPercent,
         ...(reset ? { reset: true } : window.resetsAt !== undefined ? { resetsInMs: window.resetsAt - now } : {}),
         ...(line > own ? { graceFrom: own } : {}),
+        ...(restDaySpan !== undefined ? { graceSpanMs: restDaySpan } : {}),
+        ...(restDaySpan !== undefined && !reset && this.inGrace(id, kind, now) ? { restDayGrace: true } : {}),
       };
     }
     return windows;
@@ -948,6 +1050,29 @@ export function accountsReport(
   return [...active, ...paused];
 }
 
+/**
+ * `🏖 休息日（周末和法定节假日）…` — the rest-day rules and whether they are in
+ * force now; undefined when none are set.
+ */
+export function offDayNote(pool: ClaudeAccountPool, now = Date.now()): string | undefined {
+  const lines = pool.offDayLines;
+  const grace = pool.offDayGraceHours;
+  if (!lines && !grace) return undefined;
+  const parts: string[] = [];
+  if (lines) {
+    const each = WINDOW_KINDS.filter((kind) => lines[kind] !== undefined).map((kind) => `${WINDOW_LABELS[kind]} ${lines[kind]}%`);
+    parts.push(`切换线至少 ${each.join(' · ')}`);
+  }
+  if (grace) {
+    const each = WINDOW_KINDS.filter((kind) => grace[kind] !== undefined).map(
+      (kind) => `${WINDOW_LABELS[kind]}重置前 ${grace[kind]} 小时`,
+    );
+    parts.push(`临近重置放开到 ${GRACE_LINE}% 并优先使用：${each.join(' · ')}`);
+  }
+  const active = pool.offDayLinesActive(now) ? '今天是休息日，正在生效' : '今天是工作日，未生效';
+  return `🏖 休息日（周末和法定节假日，调休上班日除外）：${parts.join('；')}（${active}）`;
+}
+
 /** `⏸ 已暂停：Mia（backup2）到 11-13 00:00 …` under the `/accounts` table; undefined when none is paused. */
 export function pausedNote(pool: ClaudeAccountPool, view: AccountNameView = {}): string | undefined {
   const paused = pool.pausedAccounts();
@@ -1018,6 +1143,10 @@ export interface AccountWindowView {
   line: number;
   /** The window is about to reset, so its line is open up to {@link GRACE_LINE}: the line it had before. */
   graceFrom?: number;
+  /** A rest day's longer near-reset span ({@link ClaudeAccountsConfig.offDayGraceHours}) is in force for it. */
+  graceSpanMs?: number;
+  /** Within that rest-day span of its reset. */
+  restDayGrace?: boolean;
 }
 
 export interface AccountRow {
@@ -1084,11 +1213,16 @@ export function switchScore(windows: Record<WindowKind, AccountWindowView>, know
   };
   const weekRoom = room('seven_day');
   const fiveHourRoom = room('five_hour');
-  const worth = Math.min(1, weekRoom / WORTH_MOVING_ROOM);
+  // A rest day's weekly near-reset span: whatever is left goes at the reset
+  // and its owner is not using it, so it is the first to use, few points or many.
+  const weekGrace = known && windows.seven_day.restDayGrace === true;
+  const worth = weekGrace ? 1 : Math.min(1, weekRoom / WORTH_MOVING_ROOM);
+  const weekSoon = weekGrace ? 1 : soon('seven_day', WEEK_MS);
+  const fiveHourSpan = windows.five_hour.graceSpanMs ?? graceMs('five_hour', now);
   return (
-    SWITCH_SCORE_WEIGHTS.weekExpiring * soon('seven_day', WEEK_MS) * worth +
+    SWITCH_SCORE_WEIGHTS.weekExpiring * weekSoon * worth +
     SWITCH_SCORE_WEIGHTS.weekRoom * weekRoom +
-    SWITCH_SCORE_WEIGHTS.fiveHourRoom * (fiveHourRoom + (1 - fiveHourRoom) * soon('five_hour', graceMs('five_hour', now)))
+    SWITCH_SCORE_WEIGHTS.fiveHourRoom * (fiveHourRoom + (1 - fiveHourRoom) * soon('five_hour', fiveHourSpan))
   );
 }
 
@@ -1290,7 +1424,7 @@ export function switchBoost(pool: ClaudeAccountPool, id: string, line: number, n
   const windows = pool.windowViews(id, now);
   const boost: Partial<Record<WindowKind, LineBoost>> = {};
   for (const kind of WINDOW_KINDS) {
-    if (pool.baseLineOf(id, kind) >= line) continue;
+    if (pool.baseLineOf(id, kind, now) >= line) continue;
     boost[kind] = { line, until: now + (windows[kind].resetsInMs ?? WINDOW_MS[kind]) };
   }
   return Object.keys(boost).length > 0 ? boost : undefined;

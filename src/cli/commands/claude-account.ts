@@ -20,6 +20,8 @@ import {
   saveAccount,
   updateAccount,
   updateDefaultLines,
+  updateOffDayLines,
+  offDayNote,
   updateStagger,
   type SwitchLines,
   parseNicknameMood,
@@ -51,6 +53,8 @@ export async function runClaudeAccountList(opts: AccountCliOptions = {}): Promis
   console.log(
     `# profile ${appPaths.profile} 的 Claude 账户（按优先顺序；默认切换线 5 小时 ${lines.five_hour}% · 本周 ${lines.seven_day}%）\n`,
   );
+  const offDay = offDayNote(pool);
+  if (offDay) console.log(`${offDay}\n`);
   for (const line of accountsReport(pool, await claudeAccountName(), Date.now(), { private: true })) console.log(line.replace(/\*\*/g, ''));
   if (!pool.multi) {
     console.log('\n只有 CLI 自己的登录。添加备用账户：先用备用账户执行 `claude setup-token`，再运行');
@@ -156,6 +160,34 @@ export async function runClaudeAccountLines(opts: AccountCliOptions & LineOption
   const appPaths = await resolveSecretProfilePaths(opts);
   await updateDefaultLines(claudeAccountsPaths(appPaths.profileDir), lines);
   console.log('✓ 已更新默认切换线，运行中的 bridge 下一次运行前生效\n');
+  await runClaudeAccountList(opts);
+}
+
+/** Rest-day lines and near-reset spans for every account (`0` drops one). */
+export async function runClaudeAccountOffDay(
+  opts: AccountCliOptions & LineOptions & { fiveHourGrace?: string; weeklyGrace?: string },
+): Promise<void> {
+  const lines = parseLineOptions(opts, true) ?? {};
+  const grace: Partial<SwitchLines> = {};
+  for (const [kind, raw] of [
+    ['five_hour', opts.fiveHourGrace],
+    ['seven_day', opts.weeklyGrace],
+  ] as const) {
+    if (raw === undefined) continue;
+    const value = Number(raw.trim().replace(/h$/i, ''));
+    if (!Number.isFinite(value) || value < 0 || value > 168) {
+      console.error(`✗ 临近重置时长要是 0–168 小时（0 表示去掉）：${raw}`);
+      process.exit(1);
+    }
+    grace[kind] = value;
+  }
+  if (Object.keys(lines).length === 0 && Object.keys(grace).length === 0) {
+    console.error('✗ 至少给一项：--five-hour、--weekly、--five-hour-grace、--weekly-grace');
+    process.exit(1);
+  }
+  const appPaths = await resolveSecretProfilePaths(opts);
+  await updateOffDayLines(claudeAccountsPaths(appPaths.profileDir), lines, grace);
+  console.log('✓ 已更新休息日规则，运行中的 bridge 下一次运行前生效\n');
   await runClaudeAccountList(opts);
 }
 

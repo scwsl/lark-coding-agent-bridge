@@ -14,6 +14,7 @@ import {
   GRACE_LINE,
   parseSwitchQuery,
   pausedNote,
+  offDayNote,
   pausedRefusal,
   SWITCH_SCORE_WEIGHTS,
   switchBoost,
@@ -139,6 +140,7 @@ export async function agentAccountsTable(
   const failed = await refreshAllQuota(pool);
   const rows = accountRows(pool, await claudeAccountName(), Date.now(), view);
   const paused = pausedNote(pool, view);
+  const offDay = offDayNote(pool);
   const expiring = expiringFirstNote(rows);
   const stagger = staggerNote(currentStaggerPlan(pool), rows);
   return [
@@ -148,6 +150,7 @@ export async function agentAccountsTable(
     ...(expiring ? ['', expiring] : []),
     ...(stagger ? ['', stagger] : []),
     ...(paused ? ['', paused] : []),
+    ...(offDay ? ['', offDay] : []),
     '',
     `_${freshnessNote(rows, failed)}${SCORE_NOTE}_`,
     '',
