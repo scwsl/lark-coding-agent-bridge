@@ -47,6 +47,22 @@ const SKILL_MAX_FIELDS = 6;
 const SKILL_FORM_KEY = /^[a-z0-9_]{1,32}$/;
 const SKILL_FORM_VALUE = /^[A-Za-z0-9_.:,/@ -]{0,120}$/;
 const SKILL_FORM_MAX_FIELDS = 40;
+/** The one exception to the no-free-text rule: a form field whose name ends
+ * in `_text` (antelope:jira-dev's 「补充分析」 textarea) may carry what the
+ * clicker typed — any language, line breaks included — up to
+ * SKILL_FORM_TEXT_MAX characters, at most SKILL_FORM_TEXT_MAX_FIELDS of them
+ * per click. It reaches the agent as the clicker's own words, the same as a
+ * message they sent, so it borrows no one else's authority; a skill that
+ * accepts it must still check that the card is one its own script sent
+ * (message id in the skill's state) and that the clicker is the person the
+ * card is waiting on, and must never pre-fill the box (default_value) with
+ * text it did not get from that person. Button values stay identifier-only. */
+const SKILL_FORM_TEXT_KEY = /^[a-z0-9_]{1,27}_text$/;
+const SKILL_FORM_TEXT_MAX = 2000;
+const SKILL_FORM_TEXT_MAX_FIELDS = 2;
+// Control characters other than tab / line feed / carriage return.
+// eslint-disable-next-line no-control-regex
+const SKILL_FORM_TEXT_BAD = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 export interface CardDispatchDeps {
   channel: LarkChannel;
@@ -326,14 +342,29 @@ function skillClick(payload: Record<string, unknown>): Record<string, string> | 
 }
 
 /** The form values of a skill card, or null when any of them is free text,
- * too long, or not a boolean / short identifier (see SKILL_FORM_VALUE). */
+ * too long, or not a boolean / short identifier (see SKILL_FORM_VALUE) —
+ * except the `_text` fields, which may hold what the clicker typed (see
+ * SKILL_FORM_TEXT_KEY). */
 function skillForm(form: Record<string, unknown>): Record<string, unknown> | null {
   const entries = Object.entries(form);
   if (entries.length > SKILL_FORM_MAX_FIELDS) return null;
   const okValue = (v: unknown): boolean =>
     typeof v === 'boolean' || (typeof v === 'string' && SKILL_FORM_VALUE.test(v));
+  let texts = 0;
   for (const [key, value] of entries) {
     if (!SKILL_FORM_KEY.test(key)) return null;
+    if (SKILL_FORM_TEXT_KEY.test(key)) {
+      texts += 1;
+      if (
+        texts > SKILL_FORM_TEXT_MAX_FIELDS ||
+        typeof value !== 'string' ||
+        value.length > SKILL_FORM_TEXT_MAX ||
+        SKILL_FORM_TEXT_BAD.test(value)
+      ) {
+        return null;
+      }
+      continue;
+    }
     if (Array.isArray(value) ? value.length > SKILL_FORM_MAX_FIELDS || !value.every(okValue) : !okValue(value)) {
       return null;
     }

@@ -149,6 +149,49 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
+  it('forwards what the clicker typed into a _text field, as the clicker', async () => {
+    const h = await createHarness();
+    const typed = '方案没考虑配置缺失的情况：\n1. 地址为空时返回 null\n2. 补一条测试';
+
+    await h.dispatch(
+      { __skill_cb: 'antelope:jira-dev', action: 'supplement', key: 'API-597', ver: '1' },
+      { supplement_text: typed },
+      'ou_clicker',
+    );
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.senderId).toBe('ou_clicker');
+    expect(queued[0]?.content).toBe(
+      '[card-click] ' +
+        JSON.stringify({
+          skill: 'antelope:jira-dev',
+          action: 'supplement',
+          key: 'API-597',
+          ver: '1',
+          form_value: { supplement_text: typed },
+        }),
+    );
+  });
+
+  it('drops _text fields that are too long, not text, too many, or carry control characters', async () => {
+    const h = await createHarness();
+
+    for (const form of [
+      { supplement_text: 'x'.repeat(2001) },
+      { supplement_text: ['a', 'b'] },
+      { supplement_text: 42 },
+      { a_text: '1', b_text: '2', c_text: '3' },
+      { supplement_text: 'ok\u0000hidden' },
+      // Free text in a field that does not end in _text is still refused.
+      { supplement: '补充一下' },
+    ]) {
+      await h.dispatch({ __skill_cb: 'antelope:jira-dev', action: 'supplement', key: 'API-597' }, form);
+    }
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
+
   it('drops skill button values that carry free text or command fields', async () => {
     const h = await createHarness();
 
