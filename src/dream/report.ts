@@ -77,7 +77,7 @@ export function knowledgePrBody(input: {
     lines.push('合并后这个 profile 下的所有会话都会看到这些条目。', '');
     for (const item of promoted) {
       lines.push(`- \`MEMORY.md\`：${item.text}`);
-      lines.push(`  - 理由：${item.reason}`, `  - 来源：${sources(item.sources)}（含管理员直接指令）`, `  - 原会话范围：\`${item.scopeId}\``);
+      lines.push(`  - 理由：${item.reason}`, `  - 来源：${sources(item.sources)}${item.lesson ? '（错题本：对话证实的错误）' : '（含管理员直接指令）'}`, `  - 原会话范围：\`${item.scopeId}\``);
     }
     lines.push('');
   }

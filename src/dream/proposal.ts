@@ -27,6 +27,12 @@ export interface MemoryAddition {
   /** Asked for `profile` without an admin's own words behind it: kept for the chat only. */
   downgraded?: boolean;
   /**
+   * 错题本: a mistake of mine the conversation proved, with how to avoid it.
+   * Goes to the profile memory without an admin's words, but may only make
+   * the bot more careful — never relax a permission or a confirmation.
+   */
+  lesson?: boolean;
+  /**
    * What it rests on: an admin's own words, a result the conversation
    * verified, or only an inference. An inferred note waits in the 候选池
    * until it recurs; absent counts as inferred.
@@ -36,6 +42,16 @@ export interface MemoryAddition {
 }
 
 export type DreamEvidence = 'admin' | 'verified' | 'inferred';
+
+/** Every 错题本 entry starts with this, so the memory reads as a lesson. */
+export const LESSON_PREFIX = '【教训】';
+
+/**
+ * Words that would turn a lesson into a loosening: a non-admin conversation
+ * could otherwise talk the bot into "I was wrong to refuse" and widen its own
+ * permissions through the profile memory.
+ */
+const LESSON_RELAX_RE = /放行|放开|放宽|开放(?:权限|给)|不用(?:再)?确认|无需确认|跳过(?:确认|检查|校验|审批)|可以直接(?:写|改|删|发布|下发|执行)|允许(?:写|改|删|发布|下发)|绕过|解除(?:限制|拦截)|取消(?:限制|拦截)|不必拒绝|不用拒绝|不该拒绝|不应拒绝/;
 
 /** Merge / conflict / stale: listed in the PR for a human, never applied to a file. */
 export interface MemoryFlag {
@@ -216,28 +232,40 @@ function validateMemoryItem(
       if (!NOTE_SLUG_RE.test(note)) return { error: 'note 名称不合法' };
     }
     let downgraded = false;
-    if (target === 'profile' && !sources.some((source) => source.admin)) {
+    let lesson = false;
+    let lessonText = text;
+    if (item.lesson === true) {
+      if (ctx.external) return { error: '外部库学习不记错题' };
+      if (item.evidence !== 'verified' && item.evidence !== 'admin') return { error: '错题要有对话证实（evidence 为 verified 或 admin）' };
+      const relaxed = LESSON_RELAX_RE.exec(text);
+      if (relaxed) return { error: `错题只能让我更谨慎，不能放宽限制（「${relaxed[0]}」）` };
+      lesson = true;
+      target = 'profile';
+      if (!lessonText.startsWith(LESSON_PREFIX)) lessonText = `${LESSON_PREFIX}${lessonText}`;
+    }
+    if (target === 'profile' && !lesson && !sources.some((source) => source.admin)) {
       // Only an admin's own words can change what every chat is told; anything
       // else stays with the chat it came from.
       target = 'chat';
       downgraded = true;
     }
-    const key = normalizeText(text);
+    const key = normalizeText(lessonText);
     if (target !== 'note' && (existingText.chat.has(key) || existingText.profile.has(key))) {
       return { error: '与已有记忆重复' };
     }
     // An admin's words only when an admin's turn is among the sources; anything unclear is an inference.
     let evidence: DreamEvidence = item.evidence === 'admin' || item.evidence === 'verified' ? item.evidence : 'inferred';
-    if (evidence === 'admin' && !sources.some((source) => source.admin)) evidence = 'inferred';
+    if (evidence === 'admin' && !sources.some((source) => source.admin)) evidence = lesson ? 'verified' : 'inferred';
     return {
       kind: 'add',
       scopeId: ctx.scopeId,
       target: target as MemoryTarget,
       ...(note ? { note } : {}),
-      text,
+      text: lessonText,
       reason,
       sources,
       ...(downgraded ? { downgraded } : {}),
+      ...(lesson ? { lesson } : {}),
       evidence,
       hash: hashOf(['add', target as string, target === 'profile' ? '' : ctx.scopeId, note ?? '', key]),
     };

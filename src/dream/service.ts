@@ -1221,6 +1221,7 @@ export class DreamService {
       learning.error,
       `${done.length} 个范围、${legend.length} 个会话`,
       `记忆 / 笔记 ${additions.length + flags.length} 条，skill ${skillProposals.length} 个，未采纳 ${rejected.length} 条`,
+      additions.some((item) => item.lesson) ? `错题本 ${additions.filter((item) => item.lesson).length} 条（写进全局记忆）` : undefined,
       pooled.entered + pooled.promote.length > 0 ? `候选池新进 ${pooled.entered} 条、晋升 ${pooled.promote.length} 条` : undefined,
       targets.length === 0 ? '没有值得提交的内容' : undefined,
       deferred.length > 0 ? `${deferred.length} 个会话延后` : undefined,

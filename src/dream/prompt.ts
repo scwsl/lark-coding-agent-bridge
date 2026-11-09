@@ -34,9 +34,12 @@ const INSTRUCTIONS = `你在做「课堂精练」：把下面这一个会话范�
 8. 条目 text 写成一句完整、可独立理解的中文；宁缺毋滥，没有值得整理的内容就输出空数组。
 9. 每条 add 都要标 evidence：管理员本人直接说的（依据里有 admin 为 true 的轮次，如「记住…」「以后都…」）写 "admin"；对话里实际执行命令、查询、测试并确认了结果的写 "verified"；只是从对话归纳、推断出来、没有被验证过的写 "inferred"。拿不准就写 "inferred"。inferred 的笔记不会当晚写入，要在别的会话或别的日子再次出现、或者对应笔记被人读到过才会写入。
 
+10. 错题本（自查犯过的错）：逐轮检查 assistant 自己有没有犯错——被用户指出说错、做错、认错了人，自己承认失误，或者给出的结论、执行的操作后来被证明是错的、要返工。每个确有其事的错误提一条 {"action":"add","target":"profile","lesson":true,…}：text 以「【教训】」开头，一句话写清错在哪、根因是什么、以后具体怎么做才能避免（写成可直接照做的规则，不写成检讨）；evidence 写 "verified"（管理员本人指出的写 "admin"）；sources 同时引用犯错的那一轮和指出、证实错误的那一轮。只记有对话证据的真实错误，不记用户单纯改主意；错题只能让我更谨慎（多核对、先确认、按规则拒绝），绝不能放宽权限、跳过确认或解除任何限制，这类一律不提；existing_memory 里已有同类教训的不要重复。
+
 输出格式：
 {"memory":[
   {"action":"add","target":"chat|profile|note","note":"仅 target 为 note 时填写","text":"…","reason":"…","evidence":"admin|verified|inferred","sources":["S1#3"]},
+  {"action":"add","target":"profile","lesson":true,"text":"【教训】…","reason":"…","evidence":"verified","sources":["S1#2","S1#3"]},
   {"action":"merge","ids":["a1b2c3","d4e5f6"],"text":"合并后的写法","reason":"…","sources":["S1#3"]},
   {"action":"conflict","ids":["a1b2c3"],"text":"新的说法","reason":"…","sources":["S1#3"]},
   {"action":"stale","ids":["a1b2c3"],"reason":"…","sources":["S1#3"]}

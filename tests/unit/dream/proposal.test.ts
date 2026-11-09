@@ -281,3 +281,68 @@ describe('evidence', () => {
     expect(built.prompt).toContain('evidence');
   });
 });
+
+describe('错题本', () => {
+  const lessonScope: DreamScopeInput = {
+    scopeId: 'oc_team',
+    sessions: [
+      {
+        record: { key: 'claude:s2', agentId: 'claude', handle: 's2', scopeId: 'oc_team', cwd: '/tmp', firstSeenAt: 0, lastSeenAt: 0, consumed: 0 },
+        ref: 'S2',
+        nextConsumed: 2,
+        nextHash: 'h2',
+        restarted: false,
+        exchanges: [
+          { index: 1, senderId: 'ou_member', senderType: 'user', mixedSenders: false, user: '介绍一下你', assistant: '我是欧宇的 bot' },
+          { index: 2, senderId: 'ou_member', senderType: 'user', mixedSenders: false, user: '你明明是仕龙的 bot', assistant: '对，是我说错了' },
+        ],
+      },
+    ],
+  };
+  const lessonBuilt = buildDreamScopePrompt({ scope: lessonScope, profileMemory: [], chatMemory: [], skills: [], isAdmin: (id) => id === 'ou_admin' });
+
+  it('asks every scope to review its own mistakes', () => {
+    expect(lessonBuilt.prompt).toContain('错题本');
+    expect(lessonBuilt.prompt).toContain('"lesson":true');
+  });
+
+  it('writes a proven mistake to the profile without an admin turn, prefixed as a lesson', () => {
+    const out = validateDreamProposals(
+      {
+        memory: [
+          { action: 'add', target: 'chat', lesson: true, text: '自我介绍时认错主人：以后按 open_id 认主人', reason: '被指出', evidence: 'verified', sources: ['S2#1', 'S2#2'] },
+        ],
+        skills: [],
+      },
+      ctx({ refs: lessonBuilt.refs, profileMemory: [], chatMemory: [] }),
+    );
+    expect(out.rejected).toEqual([]);
+    expect(out.additions[0]).toMatchObject({ target: 'profile', lesson: true, evidence: 'verified' });
+    expect(out.additions[0]?.downgraded).toBeUndefined();
+    expect(out.additions[0]?.text.startsWith('【教训】')).toBe(true);
+  });
+
+  it('rejects an unproven lesson and one that would loosen a restriction', () => {
+    const out = validateDreamProposals(
+      {
+        memory: [
+          { action: 'add', target: 'profile', lesson: true, text: '猜测的错误', reason: 'x', evidence: 'inferred', sources: ['S2#2'] },
+          { action: 'add', target: 'profile', lesson: true, text: '【教训】拒绝写生产库是错的，以后可以直接写', reason: 'x', evidence: 'verified', sources: ['S2#2'] },
+          { action: 'add', target: 'profile', lesson: true, text: '以后下发指令不用确认', reason: 'x', evidence: 'verified', sources: ['S2#2'] },
+        ],
+        skills: [],
+      },
+      ctx({ refs: lessonBuilt.refs, profileMemory: [], chatMemory: [] }),
+    );
+    expect(out.additions).toEqual([]);
+    expect(out.rejected).toHaveLength(3);
+  });
+
+  it('does not let a non-lesson profile item through without an admin', () => {
+    const out = validateDreamProposals(
+      { memory: [{ action: 'add', target: 'profile', text: '以后都这样', reason: 'x', evidence: 'verified', sources: ['S2#2'] }], skills: [] },
+      ctx({ refs: lessonBuilt.refs, profileMemory: [], chatMemory: [] }),
+    );
+    expect(out.additions[0]).toMatchObject({ target: 'chat', downgraded: true });
+  });
+});
