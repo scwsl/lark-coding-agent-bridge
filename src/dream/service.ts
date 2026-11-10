@@ -58,6 +58,7 @@ import { DIGEST_MANIFEST, digestView, isDigestScope, parseManifest } from '../kn
 import { sanitizeScopeId } from '../knowledge/store';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
 import { formatDreamRun } from './format';
+import { formatAfterRun, runAfterAutoCommands } from './after-run';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
 import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, scopeFamily, type PoolCandidate, type PoolTheme } from './pool';
@@ -349,6 +350,8 @@ export class DreamService {
   /** 续跑: deciding on / starting the run that follows the one just finished. */
   private draining: Promise<void> | undefined;
   private disposed = false;
+  /** Local day (YYYY-MM-DD) the `afterAutoRun` commands last ran; once a day is enough. */
+  private afterRunDay: string | undefined;
 
   constructor(private readonly deps: DreamServiceDeps) {
     this.state = new DreamStateStore(deps.stateFile);
@@ -530,6 +533,8 @@ export class DreamService {
           this.draining = draining;
           void draining.finally(() => {
             if (this.draining === draining) this.draining = undefined;
+            // The automatic chain is over (no next round started): run the daily 收尾命令.
+            if (final.trigger === 'auto' && !this.current && !this.starting) this.afterAutoChain('自动整理跑完');
           });
         });
       return { run: this.state.run(id)! };
@@ -732,6 +737,7 @@ export class DreamService {
         // The weekly window will not empty within the hours left: today is skipped, once, and said so.
         this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
         this.tell(settings.notifyChat, `**📚 今天的课堂精练跳过**\n\n${reason}，明天 ${auto.daily.text} 再看。`);
+        this.afterAutoChain('今天的课堂精练跳过');
       }
       return this.noteCheck({ at: now, block: 'quota', reason, ...context });
     }
@@ -853,6 +859,25 @@ export class DreamService {
       worst = Math.max(worst, (live ?? 0) + waiting);
     }
     return worst;
+  }
+
+  /**
+   * `dreamTuning.afterAutoRun` (e.g. `claude upgrade`), at most once per local
+   * day, after the automatic chain ends or the day is skipped.
+   */
+  private afterAutoChain(reason: string): void {
+    if (this.disposed) return;
+    const settings = resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning);
+    if (settings.afterAutoRun.length === 0) return;
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: settings.auto.timezone }).format(new Date(this.now()));
+    if (this.afterRunDay === day) return;
+    this.afterRunDay = day;
+    void runAfterAutoCommands(settings.afterAutoRun)
+      .then((results) => {
+        log.info('dream', 'after-auto-run', { reason, results });
+        this.tell(settings.notifyChat, formatAfterRun(results, reason));
+      })
+      .catch((err: unknown) => log.fail('dream', err, { step: 'after-auto-run' }));
   }
 
   /** One message to `dreamTuning.notifyChat`; failures are only logged. */

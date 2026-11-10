@@ -483,6 +483,13 @@ export interface DreamTuning {
    * that repository is fast-forwarded (`git pull --ff-only`).
    */
   localClones?: string[];
+  /**
+   * Shell commands run once a day after the automatic chain ends (all 续跑
+   * rounds done, or the day skipped for quota) — e.g. `claude upgrade` so the
+   * agent CLI never falls many versions behind. Each runs with a timeout; the
+   * outcome goes to `notifyChat`.
+   */
+  afterAutoRun?: string[];
   /** Chat (`oc_…`) or user (`ou_…`) told the outcome of every automatic run. Absent: automatic runs stay silent. */
   notifyChat?: string;
 }
@@ -545,6 +552,7 @@ export interface DreamSettings {
   skillProjects: Record<string, string>;
   localSkillDirs: string[];
   localClones: string[];
+  afterAutoRun: string[];
   notifyChat?: string;
   auto: DreamAutoSettings;
 }
@@ -581,6 +589,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
   skillProjects: {},
   localSkillDirs: [],
   localClones: [],
+  afterAutoRun: [],
   auto: DREAM_AUTO_DEFAULTS,
 };
 
@@ -856,6 +865,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
     skillProjects: resolveSkillProjects(raw.skillProjects),
     localSkillDirs: absoluteDirs(raw.localSkillDirs),
     localClones: absoluteDirs(raw.localClones),
+    afterAutoRun: strings(raw.afterAutoRun),
     ...(notifyChat ? { notifyChat } : {}),
     auto: {
       window:
