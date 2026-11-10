@@ -26,6 +26,7 @@ vi.mock('@larksuite/channel', async (importOriginal) => {
 });
 
 import { startChannel } from '../../../src/bot/channel.js';
+import { resetTopicClaims } from '../../../src/bot/topic-claims.js';
 
 interface MessageHandlerMap {
   message?: (msg: NormalizedMessage) => Promise<void> | void;
@@ -68,6 +69,7 @@ const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  resetTopicClaims();
   sdkMock.channel = undefined;
   sdkMock.createLarkChannel.mockClear();
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -272,6 +274,70 @@ describe('自动开话题', () => {
   });
 });
 
+describe('转发 + 备注合并开话题', () => {
+  const forward = (id: string) =>
+    message({
+      messageId: id,
+      chatType: 'p2p',
+      mentionedBot: false,
+      rawContentType: 'merge_forward',
+      content: '<forwarded_messages>\n陈玮: 电池 SOC 也放到 0xA3 吗\n</forwarded_messages>',
+    });
+  const note = (id: string, forwardId: string) =>
+    message({ messageId: id, chatType: 'p2p', mentionedBot: false, parentId: forwardId, content: '对比一下通讯协议' });
+
+  it('opens one topic under the note when the note comes in first', async () => {
+    const h = await createHarness({ chatMode: 'group', autoTopic: true, autoEffort: false, rawThreadIds: { om_note: 'omt_note', om_fwd: 'omt_fwd' } });
+    await startTestBridge(h);
+
+    const first = h.channel.handlers.message?.(note('om_note', 'om_fwd'));
+    await new Promise((r) => setTimeout(r, 30));
+    const second = h.channel.handlers.message?.(forward('om_fwd'));
+    await Promise.all([first, second]);
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await new Promise((r) => setTimeout(r, 800));
+
+    expect(openers(h.channel)).toHaveLength(1);
+    expect(openers(h.channel)[0]).toMatchObject({ options: { replyTo: 'om_note', replyInThread: true } });
+    expect(h.agent.runOptions).toHaveLength(1);
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('"threadId":"omt_note"');
+    expect(prompt).toContain('对比一下通讯协议');
+    expect(prompt).toContain('0xA3');
+  });
+
+  it('holds the forward back for its note when the forward comes in first', async () => {
+    const h = await createHarness({ chatMode: 'group', autoTopic: true, autoEffort: false, rawThreadIds: { om_note2: 'omt_note2', om_fwd2: 'omt_fwd2' } });
+    await startTestBridge(h);
+
+    const first = h.channel.handlers.message?.(forward('om_fwd2'));
+    await new Promise((r) => setTimeout(r, 200));
+    const second = h.channel.handlers.message?.(note('om_note2', 'om_fwd2'));
+    await Promise.all([first, second]);
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await new Promise((r) => setTimeout(r, 800));
+
+    expect(openers(h.channel)).toHaveLength(1);
+    expect(openers(h.channel)[0]).toMatchObject({ options: { replyTo: 'om_note2' } });
+    expect(h.agent.runOptions).toHaveLength(1);
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('"threadId":"omt_note2"');
+    expect(prompt).toContain('0xA3');
+  });
+
+  it('still gives a lone forward a topic of its own', async () => {
+    const h = await createHarness({ chatMode: 'group', autoTopic: true, autoEffort: false, rawThreadIds: { om_fwd3: 'omt_fwd3' } });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(forward('om_fwd3'));
+    await waitFor(() => h.agent.runOptions.length === 1, 3000);
+
+    expect(openers(h.channel)).toHaveLength(1);
+    expect(openers(h.channel)[0]).toMatchObject({ options: { replyTo: 'om_fwd3' } });
+    expect(h.agent.runOptions[0]?.prompt ?? '').toContain('"threadId":"omt_fwd3"');
+  });
+});
+
 /** Replies that opened a topic: the opener card (or the notice it falls back to), sent in thread. */
 function openers(channel: FakeLarkChannel) {
   return channel.sent.filter((s) => {
@@ -291,6 +357,7 @@ async function createHarness(options: {
   onStream?: () => void;
   topicPrefix?: boolean;
   autoTopic?: boolean | { chats?: string[]; exceptChats?: string[] };
+  autoEffort?: boolean;
 } = {}):Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
@@ -320,7 +387,7 @@ async function createHarness(options: {
     ...baseProfileConfig,
     preferences: {
       ...baseProfileConfig.preferences,
-      autoEffort: { enabled: true },
+      autoEffort: { enabled: options.autoEffort ?? true },
       ...(options.topicPrefix !== undefined ? { topicPrefix: options.topicPrefix } : {}),
       ...(options.autoTopic !== undefined ? { autoTopic: options.autoTopic } : {}),
       ...(options.messageReply ? { messageReply: options.messageReply } : {}),

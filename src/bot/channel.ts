@@ -161,6 +161,7 @@ import {
   topicOpenedText,
   topicRunText,
 } from './topic-prefix';
+import { claimQuotedForTopic, claimedTopicFor, FORWARD_NOTE_HOLD_MS, holdsForNote } from './topic-claims';
 import { adoptCardStream, holdTopicOpener, releaseTopicOpener, takeTopicOpener, topicOpenedNoticeCard } from './topic-opener';
 import {
   addDoneReaction,
@@ -1442,31 +1443,42 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // opened under the message itself — not in this conversation, and not as a
   // supplement to a run going on in it.
   const stays = resolvedMode === 'topic' || Boolean(deps.recalled?.has(emsg.messageId));
-  let routed = stays ? undefined : await routeTopicPrefix(channel, controls, emsg, scope);
-  // 自动开话题: any other message from a person gets a topic too — unless it
-  // follows up on a run going on right here, which it joins instead.
-  if (
-    !routed &&
-    !stays &&
-    !emsg.threadId &&
-    senderTypeOf(emsg) !== 'bot' &&
-    autoTopicEnabled(controls.profileConfig.preferences.autoTopic, emsg.chatId)
-  ) {
+  const fromPerson = !stays && !emsg.threadId && senderTypeOf(emsg) !== 'bot';
+  // 转发 + 备注: the note claims the forward it quotes, so the two share the
+  // note's topic instead of opening one each.
+  const claim = fromPerson ? claimQuotedForTopic(emsg) : undefined;
+  let routed: { msg: NormalizedMessage; scope: string } | undefined;
+  try {
+    routed = stays ? undefined : await routeTopicPrefix(channel, controls, emsg, scope);
+    // 自动开话题: any other message from a person gets a topic too — unless it
+    // follows up on a run going on right here, which it joins instead.
     if (
-      await tryInjectSupplement({
-        channel,
-        activeRuns,
-        media,
-        controls,
-        msg: emsg,
-        scope,
-        mode: chatMode,
-        ...(deps.recalled ? { recalled: deps.recalled } : {}),
-      })
+      !routed &&
+      fromPerson &&
+      autoTopicEnabled(controls.profileConfig.preferences.autoTopic, emsg.chatId)
     ) {
-      return;
+      if (
+        await tryInjectSupplement({
+          channel,
+          activeRuns,
+          media,
+          controls,
+          msg: emsg,
+          scope,
+          mode: chatMode,
+          ...(deps.recalled ? { recalled: deps.recalled } : {}),
+        })
+      ) {
+        return;
+      }
+      routed =
+        (await joinClaimedTopic(emsg, scope)) ??
+        (await openTopicFor(channel, emsg, scope, autoTopicPrefix(emsg.content ?? '')));
     }
-    routed = await openTopicFor(channel, emsg, scope, autoTopicPrefix(emsg.content ?? ''));
+    const threadId = routed?.msg.threadId;
+    claim?.settle(routed && threadId ? { threadId, scope: routed.scope } : undefined);
+  } finally {
+    claim?.settle(undefined);
   }
   const runMsg = routed?.msg ?? emsg;
   const runScope = routed?.scope ?? scope;
@@ -1520,6 +1532,23 @@ async function routeTopicPrefix(
   );
   if (!prefix) return undefined;
   return openTopicFor(channel, msg, scope, prefix);
+}
+
+/**
+ * The topic a message from the same sender quoting `msg` is opening — the
+ * note of a 转发 + 备注 pair — with `msg` moved into it; undefined when none
+ * claims it. A merge_forward waits briefly for its note to come in.
+ */
+async function joinClaimedTopic(
+  msg: NormalizedMessage,
+  scope: string,
+): Promise<{ msg: NormalizedMessage; scope: string } | undefined> {
+  const topic = await claimedTopicFor(msg, holdsForNote(msg) ? FORWARD_NOTE_HOLD_MS : 0);
+  if (!topic) return undefined;
+  const moved: NormalizedMessage = { ...msg, threadId: topic.threadId };
+  if (isEdited(msg)) markEdited(moved);
+  log.info('topic-prefix', 'joined-claimed', { from: scope, scope: topic.scope, msgId: msg.messageId });
+  return { msg: moved, scope: topic.scope };
 }
 
 /** Open a topic under `msg` and hand back the message as it runs there; undefined when Feishu gives no topic back. */
