@@ -92,3 +92,26 @@ describe('prefixBridgeSystemPrompt', () => {
     expect(prompt.endsWith('hello world')).toBe(true);
   });
 });
+
+describe('bridge system prompt owner identity', () => {
+  it('states the owner by name and open_id and pins owner judgement to it', () => {
+    const prompt = buildBridgeSystemPrompt({
+      openId: 'ou_self',
+      name: 'Occam',
+      ownerOpenId: 'ou_owner',
+      ownerName: '王仕龙',
+    });
+    expect(prompt).toContain('你的主人是「王仕龙」，open_id 是 `ou_owner`');
+    expect(prompt).toContain('不看 userEmail、Sponsor');
+  });
+
+  it('omits the owner line until the owner is known', () => {
+    const prompt = buildBridgeSystemPrompt({ openId: 'ou_self', name: 'Occam' });
+    expect(prompt).not.toContain('你的主人');
+  });
+
+  it('still states the owner open_id when the name is unknown', () => {
+    const prompt = buildBridgeSystemPrompt({ openId: 'ou_self', ownerOpenId: 'ou_owner' });
+    expect(prompt).toContain('你的主人的 open_id 是 `ou_owner`');
+  });
+});

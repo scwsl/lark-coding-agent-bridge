@@ -214,6 +214,9 @@ export interface AgentRun {
 export interface AgentBotIdentity {
   openId: string;
   name?: string;
+  /** The bot's owner (Lark application owner), so "whose bot are you" never depends on recall. */
+  ownerOpenId?: string;
+  ownerName?: string;
 }
 
 export interface AgentAdapter {

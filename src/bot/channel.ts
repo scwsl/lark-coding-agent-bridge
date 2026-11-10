@@ -1020,9 +1020,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // prompt can state "this open_id is you" with the real value. Covers both
   // initial start and credential-swap reconnects (both go through here).
   if (identity?.openId) {
+    const ownerOpenId = controls.botOwnerId;
+    const ownerName = ownerOpenId
+      ? resolveBotOverload(controls.cfg)?.botOwners.find((entry) => entry.owner === ownerOpenId && entry.ownerName)?.ownerName
+      : undefined;
     agent.setBotIdentity?.({
       openId: identity.openId,
       ...(identity.name ? { name: identity.name } : {}),
+      ...(ownerOpenId ? { ownerOpenId } : {}),
+      ...(ownerName ? { ownerName } : {}),
     });
   }
   log.info('ws', 'connected', {
