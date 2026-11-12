@@ -183,6 +183,7 @@ import {
   supplementSignal,
 } from './supplement';
 import { applyRecall, parseRecallEvent, RECALL_EVENT, RecalledMessages, settleEarlyRecalls } from './recall';
+import { attachEventHooks, resolveEventHooks } from '../events/hooks';
 import {
   EDIT_EVENT,
   type EditEvent,
@@ -885,6 +886,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ).catch((err) => log.fail('edit', err));
     });
   }
+
+  // 事件钩子: console-subscribed events (meeting starts, …) handed to local
+  // commands, riding this connection for the same reason as recall/edit.
+  attachEventHooks(channel, resolveEventHooks(controls.profileConfig.preferences.eventHooks));
 
   // In-meeting agent. Created before connect() so the `vc.bot.*` handlers are
   // installed on the event dispatcher before any push can arrive; sessions are

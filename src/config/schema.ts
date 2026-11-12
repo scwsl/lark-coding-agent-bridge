@@ -1,3 +1,5 @@
+import type { EventHookConfig } from '../events/hooks';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -223,6 +225,13 @@ export interface AppPreferences {
    * Config-file only. See {@link resolveBotOverload}.
    */
   botOverload?: BotOverloadConfig;
+  /**
+   * 事件钩子: platform events (subscribed in the developer console) handed to
+   * a local command over the bridge's existing connection, e.g. meeting
+   * pushes to the auto-join script. Config-file only; restart to apply.
+   * See {@link resolveEventHooks}.
+   */
+  eventHooks?: EventHookConfig[];
   /**
    * Whether the bot only responds to messages that @-mention it in groups
    * (regular and topic groups). p2p is always unrestricted. Default true:
