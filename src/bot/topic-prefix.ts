@@ -20,9 +20,9 @@ import { lookupMessageThreadId } from './thread-id';
 export const NEW_TOPIC_COMMAND = 'new-topic';
 
 export interface TopicPrefix {
-  /** `new-topic`, or the rung label as configured. */
+  /** `new-topic`, the rung label as configured, or the pinned model. */
   label: string;
-  kind: 'new-topic' | 'effort' | 'auto';
+  kind: 'new-topic' | 'effort' | 'auto' | 'model';
   /** The text after the prefix. */
   rest: string;
 }
@@ -62,12 +62,14 @@ export function autoTopicEnabled(pref: boolean | AutoTopicPreference | undefined
 
 /** The line the bot opens the topic with. */
 export function topicOpenedText(prefix: TopicPrefix): string {
-  return prefix.kind === 'effort' ? `🧵 已开话题，按「/${prefix.label}」档在这里处理。` : '🧵 已开话题，在这里处理。';
+  if (prefix.kind === 'effort') return `🧵 已开话题，按「/${prefix.label}」档在这里处理。`;
+  if (prefix.kind === 'model') return `🧵 已开话题，本话题固定用 ${prefix.label} 模型处理。`;
+  return '🧵 已开话题，在这里处理。';
 }
 
-/** The message text the topic's run gets: `/new-topic` taken off, a rung prefix kept. */
+/** The message text the topic's run gets: `/new-topic` and `/model <name>` taken off, a rung prefix kept. */
 export function topicRunText(text: string, prefix: TopicPrefix): string {
-  if (prefix.kind !== 'new-topic') return text;
+  if (prefix.kind !== 'new-topic' && prefix.kind !== 'model') return text;
   return prefix.rest || '请处理我引用的消息或发来的附件。';
 }
 

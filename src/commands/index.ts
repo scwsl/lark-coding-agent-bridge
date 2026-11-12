@@ -1,3 +1,4 @@
+import type { ModelPinStore } from '../agent/model-pin';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -231,6 +232,8 @@ export interface Controls {
   pendingRotations?: Pick<PendingRotationStore, 'get'>;
   /** Code blocks behind finished cards' 「复制代码」 buttons (see /copycode). */
   codeSnippets?: Pick<CodeSnippetStore, 'get' | 'put'>;
+  /** 指定模型: each topic's `/model` pin. Late-bound by startChannel. */
+  modelPins?: ModelPinStore;
   /** 课堂精练 backing `/practice` and the console's dream panel. Late-bound by startChannel. */
   dream?: DreamService;
 }

@@ -108,3 +108,12 @@ describe('autoTopicEnabled', () => {
     expect(topicOpenedText(autoTopicPrefix('看看'))).toContain('已开话题');
   });
 });
+
+describe('model prefix', () => {
+  it('opens the topic naming the model and runs the task without the prefix', () => {
+    const prefix = { label: 'sonnet', kind: 'model' as const, rest: '帮我看下' };
+    expect(topicOpenedText(prefix)).toContain('sonnet');
+    expect(topicRunText('/model sonnet 帮我看下', prefix)).toBe('帮我看下');
+    expect(topicRunText('/model sonnet', { ...prefix, rest: '' })).toBe('请处理我引用的消息或发来的附件。');
+  });
+});

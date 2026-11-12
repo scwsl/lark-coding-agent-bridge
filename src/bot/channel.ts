@@ -1,3 +1,9 @@
+import {
+  MODEL_COMMAND_USAGE,
+  ModelPinStore,
+  OWNER_ONLY_PINS,
+  parseModelCommand,
+} from '../agent/model-pin';
 import { protectedWorkspacePaths, startWorktreeCleanup } from '../git/worktree-cleanup';
 import type {
   LarkChannel,
@@ -503,6 +509,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     deps.appPaths?.profileDir ? join(deps.appPaths.profileDir, 'auto-effort.json') : undefined,
   );
   await autoEfforts.load();
+  // 指定模型: `/model sonnet …` pins a topic's model, on disk across restarts.
+  const modelPins = new ModelPinStore(
+    deps.appPaths?.profileDir ? join(deps.appPaths.profileDir, 'model-pins.json') : undefined,
+  );
+  await modelPins.load();
+  controls.modelPins = modelPins;
   // 复制代码: finished cards' copy buttons carry a key into this store.
   if (deps.appPaths?.mediaDir) {
     const codeSnippets = new CodeSnippetStore(join(dirname(deps.appPaths.mediaDir), 'code-snippets.json'));
@@ -1322,7 +1334,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Carry the (possibly backfilled) threadId on the message so the batched
   // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
   // sees it.
-  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
+  let emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
   // Some groups are converted into topic groups after creation. In that state
   // getChatMode can lag behind the message event shape, so threadId is the
   // stronger signal for topic-scoped sessions and reply routing.
@@ -1436,6 +1448,18 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // 指定模型: `/model sonnet 帮我…` pins the topic's model — opening a topic
+  // first when it comes outside one. Bare `/model`, `/model auto` and a pin
+  // with no task are answered here and go no further.
+  let modelRouted: { msg: NormalizedMessage; scope: string } | undefined;
+  const modelCmd = controls.modelPins ? parseModelCommand(emsg.content ?? '') : undefined;
+  if (modelCmd && controls.modelPins) {
+    const out = await intakeModelCommand(channel, controls, controls.modelPins, emsg, scope, chatMode, modelCmd);
+    if (!out) return;
+    if ('routed' in out) modelRouted = out.routed;
+    else emsg = out.msg;
+  }
+
   // User tasks come first: an automatic 课堂精练 still drafting stops here.
   deps.controls.dream?.preempt('有新的用户消息');
 
@@ -1449,7 +1473,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const claim = fromPerson ? claimQuotedForTopic(emsg) : undefined;
   let routed: { msg: NormalizedMessage; scope: string } | undefined;
   try {
-    routed = stays ? undefined : await routeTopicPrefix(channel, controls, emsg, scope);
+    routed = modelRouted ?? (stays ? undefined : await routeTopicPrefix(channel, controls, emsg, scope));
     // 自动开话题: any other message from a person gets a topic too — unless it
     // follows up on a run going on right here, which it joins instead.
     if (
@@ -1532,6 +1556,82 @@ async function routeTopicPrefix(
   );
   if (!prefix) return undefined;
   return openTopicFor(channel, msg, scope, prefix);
+}
+
+/** The reply card's Effort line on a run whose topic is pinned with `/model`. */
+function pinnedByline<T extends string>(effort: T | undefined, pinned: boolean): T | string | undefined {
+  return pinned ? `${effort ?? 'default'}（指定模型）` : effort;
+}
+
+/**
+ * `/model …` (see model-pin.ts). Undefined: answered, nothing to run. `msg`:
+ * run it in this topic, prefix taken off. `routed`: a topic was opened for it.
+ */
+async function intakeModelCommand(
+  channel: LarkChannel,
+  controls: Controls,
+  pins: ModelPinStore,
+  msg: NormalizedMessage,
+  scope: string,
+  chatMode: ChatMode,
+  cmd: NonNullable<ReturnType<typeof parseModelCommand>>,
+): Promise<{ msg: NormalizedMessage } | { routed: { msg: NormalizedMessage; scope: string } } | undefined> {
+  const inTopic = chatMode === 'topic' && Boolean(msg.threadId);
+  const say = async (markdown: string): Promise<void> => {
+    try {
+      await channel.send(msg.chatId, { markdown }, { replyTo: msg.messageId, ...(inTopic ? { replyInThread: true as const } : {}) });
+    } catch (err) {
+      log.warn('model-pin', 'reply-failed', { scope, err: String(err) });
+    }
+  };
+  const label = (model: string): string => modelLabel(controls.profileConfig.agentKind, model);
+  if (cmd.kind === 'show') {
+    const pin = pins.get(scope);
+    await say(
+      pin
+        ? `本话题固定用 **${label(pin.model)}**。\`/model auto\` 恢复自动分级。`
+        : `本话题没有指定模型，按自动分级选模型。\n\n${MODEL_COMMAND_USAGE}`,
+    );
+    return undefined;
+  }
+  if (cmd.kind === 'clear') {
+    const had = pins.delete(scope);
+    if (had) log.info('model-pin', 'cleared', { scope });
+    await say(had ? '已取消指定模型，本话题恢复自动分级。' : '本话题本来就没有指定模型，按自动分级运行。');
+    return undefined;
+  }
+  if (cmd.kind === 'invalid') {
+    await say(`不认识的模型「${cmd.name}」。${MODEL_COMMAND_USAGE}`);
+    return undefined;
+  }
+  if (OWNER_ONLY_PINS.has(cmd.model) && (senderTypeOf(msg) === 'bot' || !isCreator(controls, msg.senderId))) {
+    await say(`${label(cmd.model)} 只限 bot 主人指定。`);
+    return undefined;
+  }
+  const hasTask = Boolean(cmd.rest) || msg.resources.length > 0 || Boolean(msg.replyToMessageId);
+  if (inTopic) {
+    pins.set(scope, cmd.model, msg.senderId);
+    log.info('model-pin', 'set', { scope, model: cmd.model, msgId: msg.messageId });
+    if (!hasTask) {
+      await say(`本话题改用 **${label(cmd.model)}**，之后的消息都用这个模型。`);
+      return undefined;
+    }
+    const moved: NormalizedMessage = { ...msg, content: cmd.rest || '请处理我引用的消息或发来的附件。' };
+    if (isEdited(msg)) markEdited(moved);
+    return { msg: moved };
+  }
+  if (!hasTask) {
+    await say(`话题外请把问题跟在后面：\`/model ${cmd.model} 问题\`，我会单独开一个话题处理。`);
+    return undefined;
+  }
+  const routed = await openTopicFor(channel, msg, scope, { label: cmd.model, kind: 'model', rest: cmd.rest });
+  if (!routed) {
+    await say('没能开出话题，请稍后再发一次。');
+    return undefined;
+  }
+  pins.set(routed.scope, cmd.model, msg.senderId);
+  log.info('model-pin', 'set', { scope: routed.scope, model: cmd.model, msgId: msg.messageId });
+  return { routed };
 }
 
 /**
@@ -1887,8 +1987,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ? resolveAutoEffort(controls.profileConfig.preferences.autoEffort, controls.profileConfig.agentKind)
     : undefined;
   const chatEffortCap = effortPrefForChat(controls.profileConfig.preferences, chatId);
+  // 指定模型: a topic pinned with `/model` keeps its model; it is not rated.
+  const modelPin = controls.modelPins?.get(scope);
+  if (modelPin) controls.modelPins?.touch(scope);
   const autoEffortPlan: AutoEffortPlan | undefined =
-    autoEffortSettings && deps.autoEfforts
+    autoEffortSettings && deps.autoEfforts && !modelPin
       ? startAutoEffort({
           settings: autoEffortSettings,
           store: deps.autoEfforts,
@@ -1959,7 +2062,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // changed. `requestedModel` (the `--model` value, or undefined for default)
   // is reused below to log requested-vs-actual against the init event.
   const agentKind = controls.profileConfig.agentKind;
-  const modelPref = controls.profileConfig.preferences.model;
+  const modelPref = modelPin?.model ?? controls.profileConfig.preferences.model;
   const modelSelection = normalizeModelSelection(agentKind, modelPref);
   const requestedModel = resolveModelArg(agentKind, modelPref);
   const prevModel = lastRunModelByScope.get(scope);
@@ -2181,7 +2284,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(firstMsg.senderName ? { actorName: firstMsg.senderName } : {}),
     ...(knowledgeDedupe ? { knowledge: knowledgeDedupe } : {}),
     ...(gate ? { gate } : {}),
-    ...(autoEffortPlan
+    ...(modelPin
+      ? { pickLevel: async () => ({ model: modelPin.model }) }
+      : autoEffortPlan
       ? {
           pickLevel: async (resumeFrom: string | undefined) => {
             autoPicked = await autoEffortPlan.pick(resumeFrom, executor.hasLiveProcess(scope));
@@ -2369,7 +2474,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       model: modelLabel(agentKind, autoPicked?.model ?? modelPref),
       effort: autoPicked
         ? autoEffortByline(autoPicked)
-        : resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)),
+        : pinnedByline(resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)), Boolean(modelPin)),
       provider: capability.descriptor.provider,
       ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
     },
