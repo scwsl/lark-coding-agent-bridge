@@ -78,14 +78,36 @@ function inScope(path, cfg) {
   return (cfg.allowPatterns ?? []).some((re) => new RegExp(`^${re}`).test(path));
 }
 
+// Commands that walk or read whatever path they are given: a bare `/` after
+// one of these really means the whole disk (`find / -name`, `grep -r x /`).
+const PATH_WALKER =
+  /^(?:find|ls|du|tree|cd|pushd|cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|fd|locate|mdfind|tar|zip|rsync|scp|cp|mv|rm|chmod|chown|stat|file|open|xargs|wc|strings|sort|diff)$/;
+
+/**
+ * A run of slashes standing alone between spaces — "SEA / EUR" in report text,
+ * jq's `a // b` — is prose or an operator, not the root directory, unless a
+ * command that takes paths comes earlier in the same shell segment.
+ */
+function isLoneSlash(cmd, start, end) {
+  const before = start === 0 ? ' ' : cmd[start - 1];
+  const after = end >= cmd.length ? ' ' : cmd[end];
+  if (!/\s/.test(before) || !/\s/.test(after)) return false;
+  const segment = cmd.slice(0, start).split(/&&|\|\||;|\||\n/).pop() ?? '';
+  return !segment
+    .split(/\s+/)
+    .map((w) => w.replace(/^[\s'"`({[$]+/, '').split('/').pop() ?? '')
+    .some((w) => PATH_WALKER.test(w));
+}
+
 /** Path-like words of a shell command, resolved against `cwd`. */
 function commandPaths(cmd, cwd) {
   const out = [];
-  for (const raw of cmd.split(/[\s;|&<>()'"`=,]+/)) {
-    const token = raw.replace(/^[{[]+|[}\],:]+$/g, '');
+  for (const m of cmd.matchAll(/[^\s;|&<>()'"`=,]+/g)) {
+    const token = m[0].replace(/^[{[]+|[}\],:]+$/g, '');
     if (!token || /^[a-z][a-z0-9+.-]*:\/\//i.test(token)) continue;
     if (!(token.startsWith('/') || token.startsWith('.') || token.includes('/'))) continue;
     if (token.startsWith('-')) continue;
+    if (/^\/+$/.test(m[0]) && isLoneSlash(cmd, m.index, m.index + m[0].length)) continue;
     out.push(isAbsolute(token) ? resolve(token) : resolve(cwd, token));
   }
   return out;
@@ -152,12 +174,19 @@ function decideBash(command, cfg, cwd) {
     }
   }
   if (BARE_CD.test(cmd)) return '这条命令会进入主人的主目录';
-  for (const path of commandPaths(cmd, cwd)) {
-    if (!inScope(path, cfg)) return `这条命令会访问未对外开放的位置 ${path}`;
-    // `<open path>/../<fenced>` names an allowed place but resolves into a fenced one.
-    for (const rule of cfg.rules ?? []) {
-      if (rule.bash === 'any' && fenced(path, rule)) return `这条命令会读取或改动 ${rule.path}`;
+  // Relative paths count from wherever the earlier `cd`s of this command left
+  // the shell, so `cd a/b && ls ../..` stays in the workspace it started in.
+  let here = cwd;
+  for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
+    for (const path of commandPaths(segment, here)) {
+      if (!inScope(path, cfg)) return `这条命令会访问未对外开放的位置 ${path}`;
+      // `<open path>/../<fenced>` names an allowed place but resolves into a fenced one.
+      for (const rule of cfg.rules ?? []) {
+        if (rule.bash === 'any' && fenced(path, rule)) return `这条命令会读取或改动 ${rule.path}`;
+      }
     }
+    const cd = segment.trim().match(/^cd\s+(['"]?)([^\s'"$`]+)\1$/);
+    if (cd) here = isAbsolute(cd[2]) ? resolve(cd[2]) : resolve(here, cd[2]);
   }
   return null;
 }

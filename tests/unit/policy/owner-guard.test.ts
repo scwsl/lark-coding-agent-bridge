@@ -110,6 +110,28 @@ describe('guest runs: file scope', () => {
     expect(bash("cat <<\"EOF\" > /tmp/a.md\nA / B\nEOF").code).toBe(0);
   });
 
+  it('reads a lone slash in prose or a jq expression as text, not the disk root', () => {
+    expect(bash("lark-cli im +messages-reply --file ./a.html --jq '.data.message_id // .'").code).toBe(0);
+    expect(bash("python3 - <<'EOF'\ns = '<li>SEA 1,971 / 2,830</li>'\nEOF").code).toBe(0);
+    expect(bash('echo "A / B" && ls ./out').code).toBe(0);
+  });
+
+  it('resolves relative paths from where earlier cds of the command left off', () => {
+    expect(bash('cd out/scripts && python3 render.py && cd ../.. && ls -la').code).toBe(0);
+    expect(bash('cd out && cat ../../../Desktop/coding/lark/thing-hub/README.md').code).toBe(2);
+    expect(bash('cd /tmp && cat ../Users/someone/Documents/notes.txt').code).toBe(2);
+  });
+
+  it.each([
+    ['ls of the root', 'ls -la /'],
+    ['grep over the root', 'grep -r secret / | head'],
+    ['a shell -c walking the root', "bash -c 'du -sh / '"],
+    ['a heredoc script walking the root', "python3 - <<'EOF'\nimport os; os.walk('/')\nEOF"],
+    ['a double slash after find', 'find // -name "*.pem"'],
+  ])('still refuses %s', (_label, command) => {
+    expect(bash(command).code).toBe(2);
+  });
+
   it.each([
     ['a heredoc run by a shell', "bash <<'EOF'\ncat ~/Documents/notes.txt\nEOF"],
     ['a heredoc piped to a shell', "cat <<'EOF' | sh\nls ~\nEOF"],
