@@ -81,6 +81,8 @@ export interface RunStrings {
   pointer(code: string): string;
   /** Left on the card when the answer, holding code, went out as a rich-text message below it. */
   answerBelow: string;
+  /** Left on the card where a code block was, when the code (not the answer) went out as a rich-text message below it. */
+  codeBelow: string;
   resumedNote(at: string): string;
   paused(label: string, reset: string | undefined): string;
   autoResumeAt(at: string): string;
@@ -138,6 +140,7 @@ const zh: RunStrings = {
     `⚠️ 进度卡片更新不了了（飞书错误 ${code}），任务还在继续。卡片恢复不了的话，结束后结果会另发一条消息。`,
   pointer: (code) => `_卡片更新失败（飞书错误 ${code}），完整回复见下一条消息。_`,
   answerBelow: '👇 _答复见下一条消息，里面的代码块可以一键复制。_',
+  codeBelow: '👇 _代码见下一条消息，可以一键复制。_',
   resumedNote: (at) => `▶️ **已于 ${at} 自动继续**，见下方新卡片。`,
   paused: (label, reset) => `⏸ **任务暂停**：Claude ${label}已用完${reset ? `（${reset} 重置）` : ''}。`,
   autoResumeAt: (at) =>
@@ -208,6 +211,7 @@ const en: RunStrings = {
     `⚠️ The progress card can no longer be updated (Feishu error ${code}). The task is still running; if the card doesn't recover, the result will follow as a separate message.`,
   pointer: (code) => `_The card could not be updated (Feishu error ${code}); the full reply is in the next message._`,
   answerBelow: '👇 _The answer is in the next message, where every code block can be copied in one click._',
+  codeBelow: '👇 _The code is in the next message, ready to copy in one click._',
   resumedNote: (at) => `▶️ **Resumed automatically at ${at}**, see the new card below.`,
   paused: (label, reset) => `⏸ **Task paused**: the Claude ${label} is used up${reset ? ` (resets ${reset})` : ''}.`,
   autoResumeAt: (at) =>

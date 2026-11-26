@@ -1,6 +1,13 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { LarkChannelError } from '@larksuite/channel';
-import { answerPosts, codeOnlyPosts, hasCodeBlock, hasMarkdownTable } from '../card/answer-post';
+import {
+  answerPosts,
+  codeBlocksAllShort,
+  codeOnlyPosts,
+  hasCodeBlock,
+  hasMarkdownTable,
+  replaceCodeBlocks,
+} from '../card/answer-post';
 import { CARD_BYTE_BUDGET, cardBytes, fullText } from '../card/card-budget';
 import { finalCardText, renderFinalCard } from '../card/final-card';
 import { runStrings, type Locale } from '../card/i18n';
@@ -134,14 +141,30 @@ export function answerMovedState(state: RunState, locale: Locale): RunState {
   };
 }
 
+/** The finished card with each code block of its answer replaced by a line pointing down at the post holding it. */
+export function codeMovedState(state: RunState, locale: Locale): RunState {
+  const start = answerStart(state.blocks);
+  const placeholder = runStrings(locale).codeBelow;
+  return {
+    ...state,
+    blocks: state.blocks.map((b, i) =>
+      i >= start && b.kind === 'text' ? { ...b, content: replaceCodeBlocks(b.content, placeholder) } : b,
+    ),
+  };
+}
+
 /**
  * Make the code in a finished answer copyable. A code block on a card has no
  * copy icon (and a card can't write the clipboard); one in a rich-text (post)
  * message does, and copies the block whole. So an answer holding code goes
  * out as posts of its own, and the card keeps the process with a line
  * pointing down at them. A post can't draw tables, so an answer with one
- * stays on the card and only its code blocks follow as a post; so does every
- * answer when there is no card to point from (`updateCard` absent).
+ * stays on the card and only its code blocks follow as a post (the card's
+ * copies then turn into a line pointing down at it, so the code isn't shown
+ * twice); so does every answer when there is no card to point from
+ * (`updateCard` absent). Code that would only follow as a post is not sent
+ * when every block is one short line ({@link codeBlocksAllShort}): selecting
+ * it on the card is as easy as a copy icon.
  *
  * `state` is the finished run as the user sees it (`filterForPrefs`-projected).
  * Nothing is sent for an answer without code, or a run that didn't finish
@@ -161,6 +184,10 @@ export async function deliverCodeNatively(input: {
   const answer = answerFrom(state.blocks, answerStart(state.blocks));
   if (!hasCodeBlock(answer)) return 'none';
   const as = input.updateCard && !hasMarkdownTable(answer) ? 'answer' : 'code';
+  if (as === 'code' && codeBlocksAllShort(answer)) {
+    log.info('outbound', 'code-post-skipped', { scope, reason: 'short' });
+    return 'none';
+  }
   try {
     const ids = await sendPosts(
       input.channel,
@@ -173,11 +200,11 @@ export async function deliverCodeNatively(input: {
     log.fail('stream', err, { step: 'answer-post', as });
     return 'none';
   }
-  if (as === 'answer') {
+  if (input.updateCard) {
     try {
-      await input.updateCard!(answerMovedState(state, input.locale));
+      await input.updateCard(as === 'answer' ? answerMovedState(state, input.locale) : codeMovedState(state, input.locale));
     } catch (err) {
-      log.warn('stream', 'answer-pointer-failed', { scope, code: larkErrorCode(err) ?? null });
+      log.warn('stream', 'answer-pointer-failed', { scope, as, code: larkErrorCode(err) ?? null });
     }
   }
   return as;
@@ -401,6 +428,9 @@ export async function sendFinalReply(input: {
     requireMessageReceipt(result, 'card');
     log.info('outbound', 'sent', outboundLogFields(input, 'card', body, result));
     if (code) {
+      // The answer stays on this card (it has a table or a background note):
+      // only its code follows, and the card points down at it.
+      const messageId = result.messageId;
       await deliverCodeNatively({
         channel: input.channel,
         chatId: input.chatId,
@@ -408,6 +438,9 @@ export async function sendFinalReply(input: {
         sendOpts: input.sendOpts,
         state: input.state,
         locale: input.cardRenderOptions.locale ?? 'zh',
+        updateCard: async (state) => {
+          await input.channel.updateCard(messageId, renderCard(state, input.cardRenderOptions));
+        },
       });
     }
   } else if (input.replyMode === 'markdown') {

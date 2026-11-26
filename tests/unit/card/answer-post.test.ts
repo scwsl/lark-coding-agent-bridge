@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   answerPosts,
+  codeBlocksAllShort,
   codeOnlyPosts,
   hasCodeBlock,
   hasMarkdownTable,
   POST_BODY_BUDGET,
   postOf,
+  replaceCodeBlocks,
+  SHORT_CODE_MAX,
 } from '../../../src/card/answer-post.js';
 
 /** The `md` text of each post. */
@@ -105,6 +108,31 @@ describe('hasMarkdownTable / hasCodeBlock', () => {
     expect(hasCodeBlock('```\n\n```')).toBe(false);
     expect(hasCodeBlock('用 ```inline``` 写')).toBe(false);
     expect(hasCodeBlock('没有代码')).toBe(false);
+  });
+});
+
+describe('codeBlocksAllShort', () => {
+  const fence = (body: string, lang = '') => `\`\`\`${lang}\n${body}\n\`\`\``;
+  it('is true only when every non-empty block is one line within the limit', () => {
+    expect(codeBlocksAllShort(`跑：\n\n${fence('ssh -i k.pem alpha@1.2.3.4', 'bash')}`)).toBe(true);
+    expect(codeBlocksAllShort(`${fence('ls')}\n\n${fence('pwd')}\n\n${fence('  ')}`)).toBe(true);
+    expect(codeBlocksAllShort(fence('x'.repeat(SHORT_CODE_MAX)))).toBe(true);
+    expect(codeBlocksAllShort(fence('中'.repeat(SHORT_CODE_MAX)))).toBe(true);
+    expect(codeBlocksAllShort(fence('x'.repeat(SHORT_CODE_MAX + 1)))).toBe(false);
+    expect(codeBlocksAllShort(fence('ls\npwd'))).toBe(false);
+    expect(codeBlocksAllShort(`${fence('ls')}\n\n${fence('a\nb')}`)).toBe(false);
+    expect(codeBlocksAllShort('没有代码')).toBe(false);
+  });
+});
+
+describe('replaceCodeBlocks', () => {
+  it('swaps closed non-empty blocks for the placeholder and keeps everything else verbatim', () => {
+    const md = '| a | b |\n|---|---|\n| 1 | 2 |\n\n  ~~~sql\n  SELECT 1;\n\n  ~~~\n中间\n```\n\n```\n````md\n```\ninner\n```\n````\n```\nunclosed';
+    expect(replaceCodeBlocks(md, 'P')).toBe('| a | b |\n|---|---|\n| 1 | 2 |\n\nP\n中间\n```\n\n```\nP\n```\nunclosed');
+  });
+
+  it('leaves text without code unchanged', () => {
+    expect(replaceCodeBlocks('a\n\nb', 'P')).toBe('a\n\nb');
   });
 });
 

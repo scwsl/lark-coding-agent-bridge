@@ -50,6 +50,56 @@ export function hasCodeBlock(markdown: string): boolean {
   return units(markdown).some((u) => u.kind === 'code' && u.fence!.body.trim() !== '');
 }
 
+/**
+ * Longest one-line code block (in characters) short enough to stay on the
+ * card: selecting one line by hand is no harder than tapping a copy icon, and
+ * posting it again below only shows the same command twice.
+ */
+export const SHORT_CODE_MAX = 120;
+
+/** Whether every non-empty code block of `markdown` is one line of at most {@link SHORT_CODE_MAX} characters. */
+export function codeBlocksAllShort(markdown: string): boolean {
+  const code = units(markdown).filter((u) => u.kind === 'code' && u.fence!.body.trim() !== '');
+  return (
+    code.length > 0 &&
+    code.every((u) => {
+      const body = u.fence!.body.trim();
+      return !body.includes('\n') && [...body].length <= SHORT_CODE_MAX;
+    })
+  );
+}
+
+/**
+ * `markdown` with each closed, non-empty fenced code block (the ones
+ * {@link codeOnlyPosts} sends) replaced by the line `placeholder`; everything
+ * else is left exactly as it was.
+ */
+export function replaceCodeBlocks(markdown: string, placeholder: string): string {
+  const out: string[] = [];
+  let open: { char: string; len: number; raw: string[]; body: string[] } | null = null;
+  for (const line of markdown.split('\n')) {
+    if (!open) {
+      const m = OPEN_FENCE.exec(line);
+      if (m) open = { char: m[2]![0]!, len: m[2]!.length, raw: [line], body: [] };
+      else out.push(line);
+      continue;
+    }
+    open.raw.push(line);
+    const close = CLOSE_FENCE.exec(line);
+    if (close && close[1]![0] === open.char && close[1]!.length >= open.len) {
+      out.push(...(open.body.join('\n').trim() === '' ? open.raw : [placeholder]));
+      open = null;
+      continue;
+    }
+    open.body.push(line);
+  }
+  if (open) out.push(...open.raw);
+  return out.join('\n');
+}
+
+const OPEN_FENCE = /^( *)(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/;
+const CLOSE_FENCE = /^\s*(`{3,}|~{3,})\s*$/;
+
 function isDelimiterRow(line: string): boolean {
   const t = line.trim();
   return t.includes('|') && /-{3,}/.test(t) && /^[|:\-\s]+$/.test(t);
@@ -91,7 +141,7 @@ function units(markdown: string): Unit[] {
   let open: { char: string; len: number; indent: number; lang: string; raw: string[]; body: string[] } | null = null;
   for (const line of markdown.split('\n')) {
     if (!open) {
-      const m = /^( *)(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/.exec(line);
+      const m = OPEN_FENCE.exec(line);
       if (m) {
         endPara();
         open = { char: m[2]![0]!, len: m[2]!.length, indent: m[1]!.length, lang: m[3] ?? '', raw: [line], body: [] };
@@ -103,7 +153,7 @@ function units(markdown: string): Unit[] {
       continue;
     }
     open.raw.push(line);
-    const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
+    const close = CLOSE_FENCE.exec(line);
     if (close && close[1]![0] === open.char && close[1]!.length >= open.len) {
       const indent = open.indent;
       const body = open.body.map((l) => l.replace(new RegExp(`^ {0,${indent}}`), '')).join('\n');
