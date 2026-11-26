@@ -1,0 +1,70 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 923b5355b4460746f1f047f7c64500ce719c8a63..7efab2f35d896f2a8a55889b1890d8165261fdda 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -4439,13 +4439,18 @@ var OutboundSender = class {
+ 		}
+ 	}
+ 	async rawSendWithRetry(args) {
+-		return retry(() => this.rawSend(args), this.config.retry);
++		const dedupe = args.uuid ? args : {
++			...args,
++			uuid: (0, node_crypto.randomUUID)()
++		};
++		return retry(() => this.rawSend(dedupe), this.config.retry);
+ 	}
+ 	async rawSend(args) {
+ 		const payload = {
+ 			receive_id: args.to,
+ 			msg_type: args.msgType,
+-			content: JSON.stringify(args.content)
++			content: JSON.stringify(args.content),
++			...args.uuid ? { uuid: args.uuid } : {}
+ 		};
+ 		if (args.replyTo) {
+ 			const id = (await this.client.im.v1.message.reply({
+@@ -4453,7 +4458,8 @@ var OutboundSender = class {
+ 				data: {
+ 					content: payload.content,
+ 					msg_type: args.msgType,
+-					reply_in_thread: args.replyInThread
++					reply_in_thread: args.replyInThread,
++					...args.uuid ? { uuid: args.uuid } : {}
+ 				}
+ 			})).data?.message_id;
+ 			if (!id) throw new LarkChannelError("unknown", "message_id missing from reply response");
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 708ddbcf0c43b79f01b72d39ba88cd507ff9a02b..bcda1af35edb4c0d18cb91658493842daac16115 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -4412,13 +4412,18 @@ var OutboundSender = class {
+ 		}
+ 	}
+ 	async rawSendWithRetry(args) {
+-		return retry(() => this.rawSend(args), this.config.retry);
++		const dedupe = args.uuid ? args : {
++			...args,
++			uuid: randomUUID()
++		};
++		return retry(() => this.rawSend(dedupe), this.config.retry);
+ 	}
+ 	async rawSend(args) {
+ 		const payload = {
+ 			receive_id: args.to,
+ 			msg_type: args.msgType,
+-			content: JSON.stringify(args.content)
++			content: JSON.stringify(args.content),
++			...args.uuid ? { uuid: args.uuid } : {}
+ 		};
+ 		if (args.replyTo) {
+ 			const id = (await this.client.im.v1.message.reply({
+@@ -4426,7 +4431,8 @@ var OutboundSender = class {
+ 				data: {
+ 					content: payload.content,
+ 					msg_type: args.msgType,
+-					reply_in_thread: args.replyInThread
++					reply_in_thread: args.replyInThread,
++					...args.uuid ? { uuid: args.uuid } : {}
+ 				}
+ 			})).data?.message_id;
+ 			if (!id) throw new LarkChannelError("unknown", "message_id missing from reply response");
