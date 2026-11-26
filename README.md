@@ -524,13 +524,9 @@ To get the full record back (the notes, plus tool lines while tool-call display 
 
 **Result card** (`messageReply: "final-card"`, 「结果卡片」 in `/config`): like plain text mode, nothing is posted while the run works, only the Typing reaction. When it is done, one non-streaming card goes out holding only the final answer, cut the same way as in plain text mode. There is no stop button, clock, tool block or reasoning on it, no Agent / Model / Usage / Sponsor byline, and no new-conversation or account-switch notice.
 
-- A short answer (6 lines or fewer, no table) has no header bar and reads like a message.
-- A long answer (more than 6 lines, or a table) gets a header bar titled with the answer's topic, not the bot's name (the sender line already shows that):
-  - the answer's leading `#` / `##` / `###` heading, which then leaves the body;
-  - else its opening sentence, up to the first full stop or colon, cut at the first comma when long, at most 24 characters;
-  - the bot's name only when the answer opens with a table or code.
-
-  For sharper titles, have the agent's reply style open long answers with a `## topic` line.
+- The header bar appears only when the answer has a title, which names what the answer is about. Without one there is no header bar and the card reads like a message. The bridge does not guess a title from the text: a group reply often opens with whom it addresses (「张三，…」), which would put a person's name in the header, and the bot's name is already on the sender line. The title comes from:
+  - a `[[TITLE: topic]]` line the agent writes. In result-card mode every run tells the agent to write one on the first line of its final reply when the reply stands on its own (a table, a list, a comparison, a troubleshooting summary) or runs past 6 lines: a noun phrase of at most 16 characters, no names, salutations or empty words like 「回复」「结果」; none for ordinary chat or short answers. The line is stripped from the text and never shows in any reply mode. Titles over 24 characters are cut.
+  - else, for an answer over 6 lines (or with a table) that opens with a `#` / `##` / `###` heading, that heading, which then leaves the body.
 - A run that did not finish (stopped, failed, paused for quota, idle timeout) gets one small grey line saying why under the answer, never a block of error text.
 - An answer of `[[NO_REPLY]]` gets no reply.
 - A card over Feishu's size limit, or one Feishu refuses (too many tables, say), goes out as a plain-text post instead, so the answer is not lost.

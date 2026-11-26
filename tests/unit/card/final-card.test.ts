@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
-import { answerTopic, finalCardText, hasTable, needsHeader, renderFinalCard } from '../../../src/card/final-card';
-import { finalAnswerState, initialState, reduce, type RunState } from '../../../src/card/run-state';
+import { finalCardText, hasTable, leadingHeading, needsHeader, renderFinalCard } from '../../../src/card/final-card';
+import { finalAnswerState, initialState, reduce, stripControlMarkers, type RunState } from '../../../src/card/run-state';
 import { getFinalCardPreference, type AppConfig } from '../../../src/config/schema';
 
-const OPTS = { botName: 'Paloma', headerTemplate: 'violet' as const };
+const OPTS = { headerTemplate: 'violet' as const };
 const done: AgentEvent = { type: 'done', terminationReason: 'normal' };
 const run = (events: AgentEvent[]): RunState => events.reduce(reduce, initialState);
-const answer = (text: string): RunState => run([{ type: 'text', delta: text }, done]);
+// What the channel hands over: the answer with its control markers stripped.
+const answer = (text: string): RunState => stripControlMarkers(run([{ type: 'text', delta: text }, done]));
 
 interface Card {
   config: { summary: { content: string }; streaming_mode?: boolean };
@@ -31,44 +32,49 @@ describe('final card', () => {
     for (const absent of ['button', 'Agent:', 'Model:', 'Sponsor', 'Usage', 'hr']) expect(json).not.toContain(absent);
   });
 
-  it('adds a header bar in the configured colour, titled with the topic, for a long answer or a table', () => {
-    const long = render(answer(LONG));
-    expect(long.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '第 1 行' } });
-
-    const table = render(answer(`三个区的对比：\n\n${TABLE}`), { headerTemplate: 'green' });
-    expect(table.header).toEqual({ template: 'green', title: { tag: 'plain_text', content: '三个区的对比' } });
-    // The opening sentence stays in the body: it is the answer, not a heading.
-    expect(table.body.elements[0]?.content?.startsWith('三个区的对比：')).toBe(true);
+  it('adds a header bar in the configured colour when the agent titles its answer', () => {
+    const card = render(answer(`[[TITLE: 三个区 Pod 对比]]\n张三，prod-us 落后两个版本，其余正常。\n\n${TABLE}`), {
+      headerTemplate: 'green',
+    });
+    expect(card.header).toEqual({ template: 'green', title: { tag: 'plain_text', content: '三个区 Pod 对比' } });
+    // The marker line leaves the body; the answer opens as written.
+    expect(card.body.elements[0]?.content?.startsWith('张三，prod-us 落后两个版本')).toBe(true);
+    expect(JSON.stringify(card)).not.toContain('[[TITLE');
+    expect(card.config.summary.content).toBe('三个区 Pod 对比');
   });
 
-  it('falls back to the bot name when the answer opens with a table', () => {
-    expect(render(answer(TABLE)).header?.title.content).toBe('Paloma');
+  it('shows no header bar for an untitled answer, however long: nothing is guessed off its opening', () => {
+    // A group reply opens with whom it addresses; that is no title.
+    expect(render(answer(`张文韬，kick-off 是写操作，先确认范围：\n${LONG}`)).header).toBeUndefined();
+    expect(render(answer(`三个区的对比：\n\n${TABLE}`)).header).toBeUndefined();
+    expect(render(answer(TABLE)).header).toBeUndefined();
   });
 
-  it('puts the configured avatar in the header, and nowhere on a short answer', () => {
+  it('puts the configured avatar in the header, and nowhere without one', () => {
     const icon = { tag: 'custom_icon', img_key: 'img_v3_avatar' };
-    expect(render(answer(LONG), { headerIcon: 'img_v3_avatar' }).header?.icon).toEqual(icon);
-    expect(render(answer(LONG)).header?.icon).toBeUndefined();
-    expect(JSON.stringify(render(answer('ok'), { headerIcon: 'img_v3_avatar' }))).not.toContain('img_v3_avatar');
+    expect(render(answer(`[[TITLE: 主题]]\n${LONG}`), { headerIcon: 'img_v3_avatar' }).header?.icon).toEqual(icon);
+    expect(render(answer(`[[TITLE: 主题]]\n${LONG}`)).header?.icon).toBeUndefined();
+    expect(JSON.stringify(render(answer(LONG), { headerIcon: 'img_v3_avatar' }))).not.toContain('img_v3_avatar');
   });
 
-  it('takes the title from a leading heading and leaves it out of the body', () => {
+  it('takes the title from the leading heading of a long answer and leaves it out of the body', () => {
     const card = render(answer(`## antelope 三区对比\n\n${TABLE}`));
     expect(card.header?.title.content).toBe('antelope 三区对比');
     expect(card.body.elements[0]?.content?.startsWith('| 区域')).toBe(true);
+    // A short answer keeps its heading as markdown.
+    expect(render(answer('## 结论\n\n都正常')).header).toBeUndefined();
+    // A heading that repeats the agent's title is not shown twice.
+    const both = render(answer(`[[TITLE: 三区对比]]\n## 三区对比\n\n正文`));
+    expect(both.header?.title.content).toBe('三区对比');
+    expect(both.body.elements[0]?.content).toBe('正文');
   });
 
-  it('reads a short topic off the answer', () => {
-    expect(answerTopic('## 三个生产区 Pod 与发布对比\n\n正文')).toEqual({ title: '三个生产区 Pod 与发布对比', rest: '正文' });
-    expect(answerTopic('**prod-us 落后两个版本**。其余正常')?.title).toBe('prod-us 落后两个版本');
-    expect(answerTopic('- 先看结论：都正常')?.title).toBe('先看结论');
-    // A long opening sentence is cut at its first comma, then to the title
-    // limit — at a word boundary, never inside `pod`.
-    expect(answerTopic('三个生产区里只有 prod-us 有一个 pod 处于 Pending 状态，原因是节点资源不足，其余都正常。')?.title).toBe(
-      '三个生产区里只有 prod-us 有一个…',
-    );
-    expect(answerTopic(TABLE)).toBeUndefined();
-    expect(answerTopic('```\ncode\n```')).toBeUndefined();
+  it('reads the leading heading', () => {
+    expect(leadingHeading('## 三个生产区 Pod 与发布对比\n\n正文')).toEqual({ title: '三个生产区 Pod 与发布对比', rest: '正文' });
+    expect(leadingHeading('\n# **加粗** 标题 #\n正文')?.title).toBe('加粗 标题');
+    expect(leadingHeading('## 只有标题')).toBeUndefined();
+    expect(leadingHeading('#### 四级不算\n正文')).toBeUndefined();
+    expect(leadingHeading('张三，正文')).toBeUndefined();
   });
 
   it('decides on the header by the answer itself', () => {

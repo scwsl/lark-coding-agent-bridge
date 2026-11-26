@@ -190,6 +190,7 @@ async function replyTo(mode: Mode, runEvents: AgentEvent[], preferences: Record<
   await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
   await new Promise((resolve) => setTimeout(resolve, 80));
   return {
+    h,
     sent: h.channel.sent.map((s) => (s.content as { markdown: string }).markdown),
     cotBodies: h.cotRequests.map((r) => r.body).join('\n'),
   };
@@ -240,10 +241,17 @@ describe('final-card mode', () => {
     expect(json).not.toContain('tail app.log');
   });
 
-  it('gives a long answer a violet header titled with its topic', async () => {
-    const { h } = await run('topic', narratedRun(`三个区：\n\n| 区 | Pod |\n|---|---|\n| eur | 12 |`));
+  it('asks the agent for a title and puts the one it gives in a violet header bar', async () => {
+    const { h } = await run('group', narratedRun(`[[TITLE: 三个区 Pod 对比]]\n张三，三个区：\n\n| 区 | Pod |\n|---|---|\n| eur | 12 |`));
+    expect(JSON.stringify(h.agent.runOptions[0])).toContain('[[TITLE: 主题]]');
     const card = (h.channel.sent[0]!.content as { card: Card }).card;
-    expect(card.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '三个区' } });
+    expect(card.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '三个区 Pod 对比' } });
+    expect(JSON.stringify(card)).not.toContain('[[TITLE');
+  });
+
+  it('keeps a long answer without a title free of a header bar', async () => {
+    const { h } = await run('group', narratedRun(`张三，三个区：\n\n| 区 | Pod |\n|---|---|\n| eur | 12 |`));
+    expect((h.channel.sent[0]!.content as { card: Card }).card.header).toBeUndefined();
   });
 
   it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
@@ -280,6 +288,14 @@ describe('text mode with tool calls (textReplyFinalOnly)', () => {
   it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
     const { sent } = await replyTo('text', narratedRun('[[NO_REPLY]]'));
     expect(sent).toEqual([]);
+  });
+
+  it('never shows a [[TITLE…]] line, and does not ask for one', async () => {
+    const { sent, h } = await replyTo('text', narratedRun(`[[TITLE: 主题]]\n${ANSWER}`));
+    expect(JSON.stringify(h.agent.runOptions[0])).not.toContain('[[TITLE');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(ANSWER);
+    expect(sent[0]).not.toContain('TITLE');
   });
 });
 

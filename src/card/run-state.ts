@@ -1,6 +1,7 @@
 import type { AgentEvent } from '../agent/types';
 import { stripBriefMarker } from '../session/brief-marker';
 import { stripNewSessionMarker } from '../session/smart-session';
+import { stripTitleMarker, titleOf } from './title-marker';
 
 export type ToolStatus = 'running' | 'done' | 'error';
 
@@ -65,6 +66,12 @@ export interface RunState {
    * is not over: the process works on and reports back in a later turn.
    */
   background?: number;
+  /**
+   * The header title the agent gave its answer with `[[TITLE: …]]`, read off
+   * when the marker is stripped from the text (see `stripSessionMarker`).
+   * Only the final card shows it.
+   */
+  title?: string;
 }
 
 export const initialState: RunState = {
@@ -321,31 +328,37 @@ export function stripNoReply(state: RunState): RunState {
 }
 
 /**
- * Drop a trailing `[[NEW_SESSION…]]` marker (会话智能压缩) from the answer the
- * user sees — complete, or still streaming in on a live text block. The
- * request itself is read from the raw state by the channel.
+ * Drop a trailing `[[NEW_SESSION…]]` marker (会话智能压缩), `[[BRIEF…]]` and
+ * `[[TITLE…]]` from the answer the user sees — complete, or still streaming in
+ * on a live text block. The session request and the brief are read from the
+ * raw state by the channel; the title is kept on the state (`title`).
  */
 export function stripSessionMarker(state: RunState): RunState {
   let changed = false;
+  let title: string | undefined;
+  const strip = (text: string, streaming = false): string => {
+    title = titleOf(text) ?? title;
+    return stripNewSessionMarker(stripTitleMarker(stripBriefMarker(text, streaming), streaming), streaming);
+  };
   const blocks = state.blocks.map((b) => {
     if (b.kind !== 'text') return b;
-    const content = stripNewSessionMarker(stripBriefMarker(b.content, b.streaming), b.streaming);
+    const content = strip(b.content, b.streaming);
     if (content === b.content) return b;
     changed = true;
     return { ...b, content };
   });
-  const finalText =
-    state.finalText !== undefined ? stripNewSessionMarker(stripBriefMarker(state.finalText)) : undefined;
+  const finalText = state.finalText !== undefined ? strip(state.finalText) : undefined;
   if (finalText !== state.finalText) changed = true;
   if (!changed) return state;
   return {
     ...state,
     blocks: blocks.filter((b) => !(b.kind === 'text' && b.content.trim() === '')),
     finalText: finalText?.trim() ? finalText : undefined,
+    ...((title ?? state.title) ? { title: title ?? state.title } : {}),
   };
 }
 
-/** Agent-side reply markers: `[[NO_REPLY]]` answers, `[[BRIEF…]]` and a trailing `[[NEW_SESSION…]]`. */
+/** Agent-side reply markers: `[[NO_REPLY]]` answers, `[[BRIEF…]]`, `[[TITLE…]]` and a trailing `[[NEW_SESSION…]]`. */
 export function stripControlMarkers(state: RunState): RunState {
   return stripNoReply(stripSessionMarker(state));
 }
@@ -378,7 +391,12 @@ export function finalAnswerState(state: RunState): RunState {
     const answer = text(state.blocks.slice(start));
     blocks = answer.length > 0 ? withEarlierAnswer(state.blocks.slice(0, start), answer) : text(state.blocks);
   }
-  return { ...state, blocks, reasoning: { content: '', active: false }, footer: null };
+  // A `[[TITLE…]]` the agent wrote before its last tool call is cut off with
+  // that text; keep its title for the card (a later marker still wins).
+  const title =
+    state.title ??
+    titleOf([...state.blocks.map((b) => (b.kind === 'text' ? b.content : '')), state.finalText ?? ''].join('\n'));
+  return { ...state, blocks, reasoning: { content: '', active: false }, footer: null, ...(title ? { title } : {}) };
 }
 
 /** A tail shorter than this reads as a sign-off ("已保存"), not as the answer. */

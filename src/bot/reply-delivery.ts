@@ -445,7 +445,6 @@ async function sendFinalCard(
   const meta = input.cardRenderOptions.meta;
   const locale = input.cardRenderOptions.locale;
   const card = renderFinalCard(input.state, {
-    botName: meta?.title ?? '',
     headerTemplate: pref.headerTemplate,
     ...(pref.headerIcon ? { headerIcon: pref.headerIcon } : {}),
     ...(pref.footer && meta?.model ? { footerModel: meta.model } : {}),

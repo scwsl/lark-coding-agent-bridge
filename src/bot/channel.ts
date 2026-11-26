@@ -231,6 +231,7 @@ import {
 } from './edit';
 import { mediaPlaceholders } from './media-placeholders';
 import { OWNER_BRIEF_INSTRUCTION, planOwnerNotice, stripBriefMarker } from '../card/owner-notify';
+import { FINAL_CARD_TITLE_INSTRUCTION } from '../card/title-marker';
 import { planLongRunNotice, sendLongRunNotice } from './long-run-notice';
 import {
   BackgroundOrigins,
@@ -2168,6 +2169,8 @@ async function prepareBatchPrompt(
       : []),
     ...(smartSession ? [SMART_SESSION_INSTRUCTION] : []),
     ...(controls.botOwnerId && isOwnerNotifyChat(controls.cfg, chatId) ? [OWNER_BRIEF_INSTRUCTION] : []),
+    // The final card's header bar shows only a title the agent gives (see card/title-marker).
+    ...(getMessageReplyMode(controls.cfg) === 'final-card' ? [FINAL_CARD_TITLE_INSTRUCTION] : []),
     ...(editedIds.length > 0 ? [editInstruction(editedIds)] : []),
     ...(waitingOrigins.length > 0
       ? [backgroundTasksInstruction(waitingOrigins, executor.backgroundTasks(scope))]
